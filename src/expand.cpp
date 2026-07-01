@@ -5,6 +5,7 @@
 #include <fnmatch.h>
 #include <glob.h>
 #include <sstream>
+#include <unistd.h>
 
 static CaptureHook g_captureHook;
 void setCaptureHook(CaptureHook hook) { g_captureHook = std::move(hook); }
@@ -326,6 +327,28 @@ static std::string expandOne(const std::string& src, size_t& i, const ShellState
         std::string output = g_captureHook ? g_captureHook(cmd) : "";
         while (!output.empty() && output.back() == '\n') output.pop_back();
         return output;
+    }
+    // Special single-char parameters: $? $$ $# $@ $* $! $0. Checked before
+    // the digit/name scans since none of these are name-chars ($0 IS a digit
+    // but is special -- the shell/script name, not a positional param).
+    if (i < src.size()) {
+        char sp = src[i];
+        if (sp == '?') { i++; return std::to_string(state.lastStatus); }
+        if (sp == '$') { i++; return std::to_string((long)getpid()); }
+        if (sp == '!') { i++; return ""; } // last-background-pid: not tracked yet
+        if (sp == '#') {
+            i++;
+            return std::to_string(state.argStack.empty() ? 0 : (long)state.argStack.back().size());
+        }
+        if (sp == '@' || sp == '*') {
+            i++;
+            if (state.argStack.empty()) return "";
+            std::string out;
+            const auto& args = state.argStack.back();
+            for (size_t k = 0; k < args.size(); k++) { if (k) out += " "; out += args[k]; }
+            return out;
+        }
+        if (sp == '0') { i++; return "ark"; } // shell/script name
     }
     if (i < src.size() && std::isdigit((unsigned char)src[i])) {
         size_t j = i;

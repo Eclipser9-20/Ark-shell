@@ -121,6 +121,17 @@ static void test_function_def_with_parens() {
     assert(f->funcBody->children[0]->words[0] == "echo");
 }
 
+static void test_posix_function_def() {
+    // POSIX form: `name() { ... }` with NO `function` keyword. Detected by
+    // lookahead for the Word ( ) prefix; previously hung the parser.
+    auto root = parseSrc("greet() { echo hi ; }");
+    Node* f = root->children[0].get();
+    assert(f->kind == NodeKind::FunctionDef);
+    assert(f->funcName == "greet");
+    assert(f->funcBody->children.size() == 1);
+    assert(f->funcBody->children[0]->words[0] == "echo");
+}
+
 int main() {
     test_simple_command();
     test_redirects();
@@ -134,5 +145,6 @@ int main() {
     test_case();
     test_function_def();
     test_function_def_with_parens();
+    test_posix_function_def();
     std::cout << "all parser simple-command tests passed\n";
 }

@@ -30,6 +30,12 @@ private:
     size_t pos_ = 0;
 
     const Token& peek() const { return toks_[pos_]; }
+    // Lookahead: kind of the token `off` positions ahead, or End past the end
+    // (toks_ always has a trailing End sentinel, so this never reads OOB for
+    // small offsets used at statement start).
+    TokKind peekKind(size_t off) const {
+        return pos_ + off < toks_.size() ? toks_[pos_ + off].kind : TokKind::End;
+    }
     const Token& advance() { return toks_[pos_++]; }
     bool check(TokKind k) const { return peek().kind == k; }
     void expect(TokKind k, const std::string& what) {

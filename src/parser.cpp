@@ -151,6 +151,24 @@ std::unique_ptr<Node> Parser::parseStatement() {
     if (check(TokKind::For)) return parseFor();
     if (check(TokKind::Case)) return parseCase();
     if (check(TokKind::Function)) return parseFunctionDef();
+    // POSIX function definition: `name () { ... }` with NO `function` keyword.
+    // Detected by lookahead for the `Word ( )` prefix at statement start --
+    // without this, `name` parsed as a command and the following `(` `)` `{`
+    // were stray tokens the pipeline/command grammar couldn't consume, which
+    // hung the parser (the recurring unhandled-token stall). Distinct from
+    // parseFunctionDef(), which starts by consuming the `function` keyword.
+    if (check(TokKind::Word) && peekKind(1) == TokKind::LParen && peekKind(2) == TokKind::RParen) {
+        auto fn = std::make_unique<Node>();
+        fn->kind = NodeKind::FunctionDef;
+        fn->funcName = advance().text; // name
+        advance(); // '('
+        advance(); // ')'
+        while (check(TokKind::Newline)) advance(); // bash allows a newline before the body's '{'
+        advance(); // '{' (a plain Word token with text "{")
+        fn->funcBody = parseStatementList({});
+        if (check(TokKind::Word) && peek().text == "}") advance();
+        return fn;
+    }
     auto stmt = parsePipeline();
     if (check(TokKind::Amp)) { advance(); stmt->background = true; }
     if (check(TokKind::And)) { advance(); stmt->joinOp = JoinOp::And; }
