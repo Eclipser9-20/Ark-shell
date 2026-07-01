@@ -2,6 +2,7 @@
 #include "complete.h"
 #include "highlight.h"
 #include <atomic>
+#include <cctype>
 #include <cerrno>
 #include <csignal>
 #include <cstring>
@@ -14,7 +15,16 @@
 RawMode::RawMode() {
     tcgetattr(STDIN_FILENO, &orig);
     termios raw = orig;
-    raw.c_lflag &= ~(ICANON | ECHO | ISIG);
+    // IEXTEN matters as much as ICANON here: on BSD/macOS it enables
+    // "extended input processing", which intercepts several control bytes
+    // BEFORE they're delivered to read() -- notably VREPRINT (Ctrl-R, 0x12)
+    // and VLNEXT (Ctrl-V), plus VDSUSP (Ctrl-Y) as delayed-suspend. Leaving
+    // it on meant Ctrl-R never reached the reverse-search handler at all (the
+    // byte was swallowed by the tty driver). Clearing IXON likewise lets
+    // Ctrl-S/Ctrl-Q through as ordinary bytes instead of XON/XOFF output
+    // flow control -- a real shell owns those keys, not the terminal driver.
+    raw.c_lflag &= ~(ICANON | ECHO | ISIG | IEXTEN);
+    raw.c_iflag &= ~(IXON);
     raw.c_cc[VMIN] = 1;
     raw.c_cc[VTIME] = 0;
     tcsetattr(STDIN_FILENO, TCSANOW, &raw);
@@ -80,12 +90,50 @@ static bool byteAvailableSoon(int timeoutMs) {
     }
 }
 
+// Move cursor left past any whitespace then the whole preceding word --
+// matches readline's backward-word (Alt+B / Alt+Left / Meta-b).
+static void moveWordBackward(const std::string& buf, size_t& cursor) {
+    while (cursor > 0 && std::isspace((unsigned char)buf[cursor - 1])) cursor--;
+    while (cursor > 0 && !std::isspace((unsigned char)buf[cursor - 1])) cursor--;
+}
+
+// Move cursor right past the current word then any following whitespace --
+// matches readline's forward-word (Alt+F / Alt+Right / Meta-f).
+static void moveWordForward(const std::string& buf, size_t& cursor) {
+    while (cursor < buf.size() && std::isspace((unsigned char)buf[cursor])) cursor++;
+    while (cursor < buf.size() && !std::isspace((unsigned char)buf[cursor])) cursor++;
+}
+
+// The index (into history.lines()) of the position Ctrl-W should erase back
+// to -- same traversal as moveWordBackward, but as a query rather than a
+// mutation, since the kill needs both the target position AND the erased
+// text (saved for Ctrl-Y).
+static size_t wordBackwardIndex(const std::string& buf, size_t cursor) {
+    size_t i = cursor;
+    while (i > 0 && std::isspace((unsigned char)buf[i - 1])) i--;
+    while (i > 0 && !std::isspace((unsigned char)buf[i - 1])) i--;
+    return i;
+}
+
+// Most recent history entry (searching backward from `startIdx`, exclusive)
+// containing `query` as a substring, or -1 if none match. An empty query
+// never matches anything -- reverse-i-search shows no match until the user
+// actually types something, matching bash.
+static int searchHistoryBackward(const std::vector<std::string>& lines, const std::string& query, int startIdx) {
+    if (query.empty()) return -1;
+    for (int i = startIdx - 1; i >= 0; i--) {
+        if (lines[i].find(query) != std::string::npos) return i;
+    }
+    return -1;
+}
+
 std::optional<std::string> readLine(const std::string& prompt, History& history,
                                      const std::function<void()>& onIdleTick) {
     RawMode raw;
     std::string buf;
     size_t cursor = 0;
     int histIndex = (int)history.lines().size(); // one-past-the-end = "not browsing history"
+    std::string killBuffer; // last text erased by Ctrl-K/U/W, pastable with Ctrl-Y
 
     std::cout << prompt << std::flush;
 
@@ -127,6 +175,110 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
             if (cursor > 0) { buf.erase(cursor - 1, 1); cursor--; redraw(); }
             continue;
         }
+        if (c == 1) { cursor = 0; redraw(); continue; }            // Ctrl-A: start of line
+        if (c == 5) { cursor = buf.size(); redraw(); continue; }   // Ctrl-E: end of line
+        if (c == 11) { // Ctrl-K: kill to end of line
+            killBuffer = buf.substr(cursor);
+            buf.erase(cursor);
+            redraw();
+            continue;
+        }
+        if (c == 21) { // Ctrl-U: kill to start of line
+            killBuffer = buf.substr(0, cursor);
+            buf.erase(0, cursor);
+            cursor = 0;
+            redraw();
+            continue;
+        }
+        if (c == 23) { // Ctrl-W: kill the word before the cursor
+            size_t start = wordBackwardIndex(buf, cursor);
+            killBuffer = buf.substr(start, cursor - start);
+            buf.erase(start, cursor - start);
+            cursor = start;
+            redraw();
+            continue;
+        }
+        if (c == 25) { // Ctrl-Y: yank (paste) the last killed text
+            if (!killBuffer.empty()) {
+                buf.insert(cursor, killBuffer);
+                cursor += killBuffer.size();
+                redraw();
+            }
+            continue;
+        }
+        if (c == 18) { // Ctrl-R: reverse incremental history search
+            std::string savedBuf = buf;
+            size_t savedCursor = cursor;
+            std::string query;
+            int matchIdx = -1;
+
+            auto redrawSearch = [&]() {
+                std::string matched = matchIdx >= 0 ? history.lines()[matchIdx] : "";
+                std::cout << "\r\x1b[K(reverse-i-search)'" << query << "': " << matched << std::flush;
+            };
+            redrawSearch();
+
+            bool cancelled = false;
+            bool accepted = false;
+            for (;;) {
+                char sc;
+                ssize_t sn = read(STDIN_FILENO, &sc, 1);
+                if (sn < 0 && errno == EINTR) continue;
+                if (sn <= 0) { cancelled = true; break; }
+
+                if (sc == 18) { // Ctrl-R again: find the next (older) match
+                    int searchFrom = matchIdx >= 0 ? matchIdx : (int)history.lines().size();
+                    int next = searchHistoryBackward(history.lines(), query, searchFrom);
+                    if (next >= 0) matchIdx = next; // no match further back: keep current one, like bash
+                    redrawSearch();
+                    continue;
+                }
+                if (sc == '\x1b' || sc == 7) { cancelled = true; break; } // Escape or Ctrl-G: cancel
+                if (sc == '\r' || sc == '\n') { accepted = true; break; } // Enter: accept AND run
+                if (sc == 127 || sc == 8) { // Backspace: shrink the query, re-search from the top
+                    if (!query.empty()) query.pop_back();
+                    matchIdx = searchHistoryBackward(history.lines(), query, (int)history.lines().size());
+                    redrawSearch();
+                    continue;
+                }
+                if ((unsigned char)sc >= 32 && (unsigned char)sc < 127) { // printable
+                    query += sc;
+                    matchIdx = searchHistoryBackward(history.lines(), query, (int)history.lines().size());
+                    redrawSearch();
+                    continue;
+                }
+                // Any other key (arrows, Tab, etc.): accept the current match
+                // into the edit buffer and fall through to normal editing,
+                // without executing it (matches bash's "any other command
+                // key ends the search" behavior, simplified -- the
+                // triggering keystroke itself is just dropped rather than
+                // re-interpreted, e.g. an arrow won't also move the cursor).
+                accepted = true;
+                break;
+            }
+
+            if (accepted && matchIdx >= 0) {
+                buf = history.lines()[matchIdx];
+                cursor = buf.size();
+            } else if (accepted) {
+                // Enter with no match at all: nothing to run, just resume
+                // editing whatever was there before Ctrl-R was pressed.
+                buf = savedBuf;
+                cursor = savedCursor;
+                redraw();
+                continue;
+            } else if (cancelled) {
+                buf = savedBuf;
+                cursor = savedCursor;
+                redraw();
+                continue;
+            }
+            // A real Enter-accept executes immediately, matching bash's
+            // reverse-i-search -- Enter doesn't just populate the prompt,
+            // it runs the matched command right away.
+            std::cout << "\n";
+            return buf;
+        }
         if (c == 9) { // Tab
             auto [wordStart, word] = wordUnderCursor(buf, cursor);
             bool cmdPos = isCommandPosition(buf, wordStart);
@@ -154,8 +306,8 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
             }
             continue;
         }
-        if (c == '\x1b') { // escape sequence (arrow keys: ESC [ A/B/C/D) OR a
-                            // standalone Escape key press
+        if (c == '\x1b') { // escape sequence (arrow keys, Alt+word-jumps) OR
+                            // a standalone Escape key press
             if (!byteAvailableSoon(50)) {
                 // Nothing followed within 50ms -- a real arrow-key sequence
                 // would have. Treat as a standalone Escape: give it a
@@ -165,15 +317,45 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
                 std::cout << "\n";
                 return std::string();
             }
-            char seq[2];
-            if (readByte(seq[0]) <= 0) continue;
-            if (readByte(seq[1]) <= 0) continue;
-            if (seq[0] != '[') continue;
-            if (seq[1] == 'C' && cursor < buf.size()) { cursor++; redraw(); }
-            else if (seq[1] == 'D' && cursor > 0) { cursor--; redraw(); }
-            else if (seq[1] == 'A') { // Up: older history
+            char first;
+            if (readByte(first) <= 0) continue;
+
+            // Alt+Left / Alt+Right word jumps: macOS terminals commonly send
+            // these as the 2-byte Meta-prefixed readline forms (ESC b / ESC
+            // f) rather than a CSI sequence -- handle both this and the CSI
+            // form below, since which one a given terminal/config sends
+            // isn't something ark controls.
+            if (first == 'b') { moveWordBackward(buf, cursor); redraw(); continue; }
+            if (first == 'f') { moveWordForward(buf, cursor); redraw(); continue; }
+            if (first != '[') continue; // unrecognized 2-byte escape, discard
+
+            // CSI sequence: ESC [ <params...> <final-letter>. The previous
+            // version assumed every sequence was exactly 3 bytes total (ESC
+            // [ X) -- true for a plain arrow key, but NOT for anything with
+            // modifier parameters like Alt+Right's xterm form ESC[1;3C. That
+            // fixed-length assumption meant reading a byte too few for a
+            // longer sequence, treating whatever came next (unrelated,
+            // possibly the user's very next real keystroke) as if it were
+            // part of this one. Read until a letter (or ~) terminates it.
+            std::string params;
+            char final = 0;
+            for (;;) {
+                char b;
+                if (readByte(b) <= 0) break;
+                if ((b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || b == '~') { final = b; break; }
+                params += b;
+                if (params.size() > 8) break; // sanity guard against a malformed/runaway sequence
+            }
+
+            if (final == 'C' && params.empty() && cursor < buf.size()) { cursor++; redraw(); }
+            else if (final == 'D' && params.empty() && cursor > 0) { cursor--; redraw(); }
+            else if (final == 'C' && params == "1;3") { moveWordForward(buf, cursor); redraw(); }  // xterm Alt+Right
+            else if (final == 'D' && params == "1;3") { moveWordBackward(buf, cursor); redraw(); } // xterm Alt+Left
+            else if (final == 'H' && params.empty()) { cursor = 0; redraw(); }           // Home
+            else if (final == 'F' && params.empty()) { cursor = buf.size(); redraw(); }  // End
+            else if (final == 'A' && params.empty()) { // Up: older history
                 if (histIndex > 0) { histIndex--; buf = history.lines()[histIndex]; cursor = buf.size(); redraw(); }
-            } else if (seq[1] == 'B') { // Down: newer history
+            } else if (final == 'B' && params.empty()) { // Down: newer history
                 if (histIndex < (int)history.lines().size()) {
                     histIndex++;
                     buf = histIndex == (int)history.lines().size() ? "" : history.lines()[histIndex];
