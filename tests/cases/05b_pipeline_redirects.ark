@@ -1,0 +1,3 @@
+echo three two one > /tmp/ark_test_05b_in.txt
+/usr/bin/tr ' ' '\n' < /tmp/ark_test_05b_in.txt | /usr/bin/sort > /tmp/ark_test_05b_out.txt
+/bin/cat /tmp/ark_test_05b_out.txt

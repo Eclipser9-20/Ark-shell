@@ -1,0 +1,2 @@
+echo redirected > /tmp/ark_test_05_out.txt
+/bin/cat /tmp/ark_test_05_out.txt
