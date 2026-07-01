@@ -1,5 +1,8 @@
 #include "../src/complete.h"
+#include <algorithm>
 #include <cassert>
+#include <cstdlib>
+#include <fstream>
 #include <iostream>
 
 static void test_word_under_cursor_simple() {
@@ -49,6 +52,42 @@ static void test_longest_common_prefix() {
     assert(longestCommonPrefix({"abc", "xyz"}) == "");
 }
 
+static void test_complete_path_in_temp_dir() {
+    system("rm -rf /tmp/ark_complete_test_dir");
+    system("mkdir -p /tmp/ark_complete_test_dir/sub");
+    std::ofstream(("/tmp/ark_complete_test_dir/foo.txt")).close();
+    std::ofstream(("/tmp/ark_complete_test_dir/foobar.txt")).close();
+    std::ofstream(("/tmp/ark_complete_test_dir/.hidden")).close();
+
+    auto results = completePath("/tmp/ark_complete_test_dir/fo");
+    std::sort(results.begin(), results.end());
+    assert(results.size() == 2);
+    assert(results[0] == "/tmp/ark_complete_test_dir/foo.txt");
+    assert(results[1] == "/tmp/ark_complete_test_dir/foobar.txt");
+
+    auto hidden = completePath("/tmp/ark_complete_test_dir/.hid");
+    assert(hidden.size() == 1);
+    assert(hidden[0] == "/tmp/ark_complete_test_dir/.hidden");
+
+    auto notHidden = completePath("/tmp/ark_complete_test_dir/");
+    assert(std::find(notHidden.begin(), notHidden.end(),
+                      "/tmp/ark_complete_test_dir/.hidden") == notHidden.end());
+
+    system("rm -rf /tmp/ark_complete_test_dir");
+}
+
+static void test_complete_command_finds_builtins() {
+    auto results = completeCommand("ec");
+    assert(std::find(results.begin(), results.end(), "echo") != results.end());
+}
+
+static void test_is_directory() {
+    system("mkdir -p /tmp/ark_complete_isdir_test");
+    assert(isDirectory("/tmp/ark_complete_isdir_test") == true);
+    assert(isDirectory("/tmp/ark_complete_isdir_test_nonexistent") == false);
+    system("rm -rf /tmp/ark_complete_isdir_test");
+}
+
 int main() {
     test_word_under_cursor_simple();
     test_word_under_cursor_mid_word();
@@ -59,5 +98,8 @@ int main() {
     test_command_position_after_pipe();
     test_command_position_after_keyword();
     test_longest_common_prefix();
+    test_complete_path_in_temp_dir();
+    test_complete_command_finds_builtins();
+    test_is_directory();
     std::cout << "all complete word/position tests passed\n";
 }
