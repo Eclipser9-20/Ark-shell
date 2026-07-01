@@ -2,6 +2,7 @@
 #include "exec.h"
 #include "lexer.h"
 #include "parser.h"
+#include <algorithm>
 #include <climits>
 #include <csignal>
 #include <cstdlib>
@@ -117,6 +118,20 @@ static int b_dirs(const std::vector<std::string>&, ShellState& state) {
 // `return [n]`: stop the current function (or sourced script) and set its
 // status to n (default: last status). Sets a flag that runList and the loop
 // executors honor, unwinding back to callFunction which consumes it.
+static int b_break(const std::vector<std::string>& argv, ShellState& state) {
+    if (state.loopDepth == 0) { std::cerr << "break: only meaningful in a `for' or `while' loop\n"; return 1; }
+    state.loopCtl = ShellState::LoopCtl::Break;
+    state.loopCtlLevels = argv.size() > 1 ? std::max(1, std::atoi(argv[1].c_str())) : 1;
+    return 0;
+}
+
+static int b_continue(const std::vector<std::string>& argv, ShellState& state) {
+    if (state.loopDepth == 0) { std::cerr << "continue: only meaningful in a `for' or `while' loop\n"; return 1; }
+    state.loopCtl = ShellState::LoopCtl::Continue;
+    state.loopCtlLevels = argv.size() > 1 ? std::max(1, std::atoi(argv[1].c_str())) : 1;
+    return 0;
+}
+
 static int b_return(const std::vector<std::string>& argv, ShellState& state) {
     state.returnStatus = argv.size() > 1 ? std::atoi(argv[1].c_str()) : state.lastStatus;
     state.returnFlag = true;
@@ -402,6 +417,7 @@ const std::unordered_map<std::string, BuiltinFn>& builtinRegistry() {
         {"ark-settings", b_ark_settings},
         {"source", b_source}, {".", b_source},
         {"return", b_return}, {"local", b_local},
+        {"break", b_break}, {"continue", b_continue},
     };
     return reg;
 }

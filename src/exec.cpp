@@ -593,22 +593,57 @@ static int runIf(Node* ifn, ShellState& state) {
     return 0;
 }
 
+// Handles break/continue after a loop-body execution. Returns true if the
+// enclosing loop should STOP (a break that targets this level, or a
+// break/continue targeting an OUTER level -- which we let propagate by
+// leaving loopCtl set and decrementing the level). Sets `doContinue` when
+// this iteration should just advance to the next.
+static bool consumeLoopCtl(ShellState& state, bool& stopLoop) {
+    stopLoop = false;
+    if (state.loopCtl == ShellState::LoopCtl::None) return false;
+    if (state.loopCtlLevels > 1) {
+        // Targets an outer loop: consume one level here and propagate up by
+        // stopping this loop with loopCtl still set.
+        state.loopCtlLevels--;
+        stopLoop = true;
+        return true;
+    }
+    // Targets THIS loop.
+    bool wasBreak = state.loopCtl == ShellState::LoopCtl::Break;
+    state.loopCtl = ShellState::LoopCtl::None;
+    state.loopCtlLevels = 0;
+    stopLoop = wasBreak;      // break stops the loop; continue does not
+    return true;              // handled (caller checks stopLoop / else continues)
+}
+
 static int runWhile(Node* wn, ShellState& state) {
     int status = 0;
+    state.loopDepth++;
+    struct DepthGuard { int& d; ~DepthGuard() { d--; } } dg{state.loopDepth};
     while (execNode(wn->children[0].get(), state) == 0) {
         if (state.returnFlag) break; // condition itself may have returned
         status = execNode(wn->children[1].get(), state);
         if (state.returnFlag) break; // `return` inside the loop body
+        bool stopLoop;
+        if (consumeLoopCtl(state, stopLoop) && stopLoop) break;
     }
     return status;
 }
 
 static int runFor(Node* fn, ShellState& state) {
     int status = 0;
-    for (const auto& raw : fn->forWords) {
-        state.vars[fn->forVar] = expandWord(raw, state);
+    state.loopDepth++;
+    struct DepthGuard { int& d; ~DepthGuard() { d--; } } dg{state.loopDepth};
+    // Expand the word list with FULL expansion (glob + split), so
+    // `for f in *.txt` iterates once per matching file, and `for w in $LIST`
+    // iterates over the split words -- not the raw single word.
+    auto items = expandWords(fn->forWords, state);
+    for (const auto& item : items) {
+        state.vars[fn->forVar] = item;
         status = execNode(fn->children[0].get(), state);
         if (state.returnFlag) break; // `return` inside the loop body
+        bool stopLoop;
+        if (consumeLoopCtl(state, stopLoop) && stopLoop) break;
     }
     return status;
 }
@@ -632,7 +667,9 @@ static int runList(Node* list, ShellState& state) {
         if (prevJoin == JoinOp::Or && status == 0) continue;
         status = execNode(stmt, state);
         state.lastStatus = status;
-        if (state.returnFlag) break; // `return` stops the rest of the list/body
+        // `return`, `break`, or `continue` stops the rest of this list/body;
+        // the enclosing function/loop executor consumes the flag.
+        if (state.returnFlag || state.loopCtl != ShellState::LoopCtl::None) break;
     }
     return status;
 }

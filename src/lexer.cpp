@@ -75,6 +75,27 @@ Token Lexer::lexWord() {
             if (!atEnd()) out += advance();
             continue;
         }
+        if (c == '`') {
+            // Legacy backtick command substitution: rewrite `cmd` into the
+            // modern $(cmd) form so the expander's single command-sub path
+            // handles both. A backslash before a char inside is unescaped
+            // (bash's backtick quoting removes one level). No nesting of
+            // backticks (the old syntax can't nest without escaping anyway).
+            advance(); // opening '`'
+            std::string inner;
+            while (!atEnd() && peek() != '`') {
+                if (peek() == '\\' && (peek(1) == '`' || peek(1) == '\\' || peek(1) == '$')) {
+                    advance(); inner += advance();
+                } else {
+                    inner += advance();
+                }
+            }
+            if (!atEnd()) advance(); // closing '`'
+            out += "$(";
+            out += inner;
+            out += ")";
+            continue;
+        }
         if (c == '$' && peek(1) == '(') {
             // Command substitution used bare (not inside "quotes"): without
             // this, the '(' right after '$' would hit the operator-starting

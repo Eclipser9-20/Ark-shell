@@ -314,7 +314,11 @@ static std::string expandOne(const std::string& src, size_t& i, const ShellState
         }
         i = j;
         (void)closed;
-        return evalArithmetic(expr, state);
+        // Expand the expression first so nested $((...)), $(...) and $var
+        // references resolve before evaluation -- e.g. $(( $((2+3)) * 2 ))
+        // or $(( $count + 1 )). Bare identifiers (x, count) are left for
+        // evalArithmetic to look up directly.
+        return evalArithmetic(expandWord(expr, state), state);
     }
     if (i < src.size() && src[i] == '(') {
         int depth = 1;

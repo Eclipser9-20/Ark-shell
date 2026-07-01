@@ -20,9 +20,21 @@ build/%.o: src/%.cpp
 
 -include $(DEP)
 
-.PHONY: clean test
+.PHONY: clean test unittest check
 clean:
 	rm -rf build $(BIN)
 
 test: $(BIN)
 	bash tests/run_tests.sh
+
+# Per-module unit tests: each tests/*_test.cpp links against every non-main
+# source (main.cpp excluded -- it has the real main()). Kept as a target so
+# the link list stays correct as cross-module dependencies grow.
+UNIT_SRC := $(filter-out src/main.cpp,$(SRC))
+unittest:
+	@for t in tests/*_test.cpp; do \
+	  name=$$(basename $$t .cpp); \
+	  $(CXX) $(CXXFLAGS) $$t $(UNIT_SRC) -o build/$$name 2>/dev/null && ./build/$$name || echo "FAIL: $$name"; \
+	done
+
+check: test unittest

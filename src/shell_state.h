@@ -19,6 +19,14 @@ struct ShellState {
     bool returnFlag = false;
     int returnStatus = 0;
 
+    // `break` / `continue` loop control: the builtins set this; runList stops
+    // the current statement list when it's non-None, and the while/for
+    // executors consume it (Break exits the loop, Continue skips to the next
+    // iteration). loopCtlLevels supports `break N` / `continue N`.
+    enum class LoopCtl { None, Break, Continue } loopCtl = LoopCtl::None;
+    int loopCtlLevels = 0;
+    int loopDepth = 0; // active for/while nesting; break/continue no-op at 0
+
     // `local` variable scopes -- one per active function call. Each records a
     // name's prior state (whether it existed and its value) so the variable
     // is restored when the function returns.
