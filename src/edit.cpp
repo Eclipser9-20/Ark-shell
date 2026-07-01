@@ -1,4 +1,5 @@
 #include "edit.h"
+#include "highlight.h"
 #include <iostream>
 #include <termios.h>
 #include <unistd.h>
@@ -27,7 +28,7 @@ std::optional<std::string> readLine(const std::string& prompt, History& history)
     std::cout << prompt << std::flush;
 
     auto redraw = [&]() {
-        std::cout << "\r\x1b[K" << prompt << buf;
+        std::cout << "\r\x1b[K" << prompt << highlightLine(buf);
         size_t back = buf.size() - cursor;
         if (back > 0) std::cout << "\x1b[" << back << "D";
         std::cout << std::flush;

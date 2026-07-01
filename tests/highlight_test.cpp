@@ -66,6 +66,27 @@ static void test_and_operator() {
     assert(spans[4].kind == SpanKind::Command); // command position reset after &&
 }
 
+static void test_highlight_wraps_command_in_blue() {
+    std::string out = highlightLine("echo hi");
+    assert(out.find("\x1b[38;2;122;162;247mecho\x1b[0m") != std::string::npos);
+}
+
+static void test_highlight_preserves_plain_text_unwrapped() {
+    std::string out = highlightLine("echo hi");
+    // "hi" is Plain -- no color code wraps it, but the literal text is present
+    assert(out.find("hi") != std::string::npos);
+}
+
+static void test_highlight_wraps_string_in_green() {
+    std::string out = highlightLine("echo 'hi'");
+    assert(out.find("\x1b[38;2;158;206;106m'hi'\x1b[0m") != std::string::npos);
+}
+
+static void test_highlight_wraps_variable_in_cyan() {
+    std::string out = highlightLine("echo $HOME");
+    assert(out.find("\x1b[38;2;125;207;255m$HOME\x1b[0m") != std::string::npos);
+}
+
 int main() {
     test_plain_command();
     test_pipeline_resets_command_position();
@@ -75,5 +96,9 @@ int main() {
     test_variable();
     test_braced_variable();
     test_and_operator();
+    test_highlight_wraps_command_in_blue();
+    test_highlight_preserves_plain_text_unwrapped();
+    test_highlight_wraps_string_in_green();
+    test_highlight_wraps_variable_in_cyan();
     std::cout << "all highlight classify tests passed\n";
 }

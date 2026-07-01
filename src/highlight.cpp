@@ -117,3 +117,35 @@ std::vector<Span> classify(const std::string& raw) {
 
     return spans;
 }
+
+namespace {
+const char* colorFor(SpanKind kind) {
+    switch (kind) {
+        case SpanKind::Command:  return "\x1b[38;2;122;162;247m";
+        case SpanKind::Keyword:  return "\x1b[38;2;187;154;247m";
+        case SpanKind::String:   return "\x1b[38;2;158;206;106m";
+        case SpanKind::Variable: return "\x1b[38;2;125;207;255m";
+        case SpanKind::Operator: return "\x1b[38;2;86;95;137m";
+        case SpanKind::Plain:    return nullptr;
+    }
+    return nullptr;
+}
+} // namespace
+
+std::string highlightLine(const std::string& raw) {
+    auto spans = classify(raw);
+    std::string out;
+    out.reserve(raw.size() + 32);
+    for (const auto& sp : spans) {
+        std::string text = raw.substr(sp.start, sp.end - sp.start);
+        const char* color = colorFor(sp.kind);
+        if (color) {
+            out += color;
+            out += text;
+            out += "\x1b[0m";
+        } else {
+            out += text;
+        }
+    }
+    return out;
+}
