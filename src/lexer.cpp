@@ -103,8 +103,29 @@ Token Lexer::lexWord() {
     return Token{kind, out, startLine, startCol};
 }
 
+// One here-doc awaiting its body: which token to fill, the terminator word,
+// whether to strip leading tabs (<<-), and whether the delimiter was quoted
+// (<<'EOF' -> literal body, no expansion).
+struct PendingHeredoc {
+    size_t tokenIndex;
+    std::string delimiter;
+    bool stripTabs;
+    bool noExpand;
+};
+
 std::vector<Token> Lexer::tokenize() {
     std::vector<Token> toks;
+    std::vector<PendingHeredoc> pending;
+
+    // Read one whole source line (up to and including the newline, which is
+    // consumed). Used to collect here-doc bodies after a command line ends.
+    auto readRawLine = [&](std::string& out) -> bool {
+        if (atEnd()) return false;
+        while (!atEnd() && peek() != '\n') out += advance();
+        if (!atEnd()) advance(); // consume the '\n'
+        return true;
+    };
+
     for (;;) {
         skipSpacesAndComments();
         if (atEnd()) break;
@@ -112,12 +133,60 @@ std::vector<Token> Lexer::tokenize() {
             int l = line_, c = col_;
             advance();
             toks.push_back(Token{TokKind::Newline, "\n", l, c});
+            // After the command line's newline, collect any here-doc bodies
+            // whose `<<` appeared on that line, in order.
+            for (auto& ph : pending) {
+                std::string body;
+                for (;;) {
+                    std::string lineText;
+                    if (!readRawLine(lineText)) break; // EOF before delimiter -- stop
+                    std::string cmp = lineText;
+                    if (ph.stripTabs) {
+                        size_t t = 0;
+                        while (t < cmp.size() && cmp[t] == '\t') t++;
+                        cmp = cmp.substr(t);
+                        size_t bt = 0;
+                        while (bt < lineText.size() && lineText[bt] == '\t') bt++;
+                        lineText = lineText.substr(bt);
+                    }
+                    if (cmp == ph.delimiter) break; // terminator line -- consumed, not added
+                    body += lineText;
+                    body += '\n';
+                }
+                toks[ph.tokenIndex].text = body;
+                toks[ph.tokenIndex].heredocNoExpand = ph.noExpand;
+            }
+            pending.clear();
             continue;
         }
         if (peek() == '2' && peek(1) == '>') {
             int l = line_, c = col_;
             advance(); advance();
             toks.push_back(Token{TokKind::RedirErrOut, "2>", l, c});
+            continue;
+        }
+        // Here-doc: `<<` or `<<-`, followed by a (possibly quoted) delimiter.
+        if (peek() == '<' && peek(1) == '<') {
+            int l = line_, c = col_;
+            advance(); advance(); // '<<'
+            bool stripTabs = false;
+            if (peek() == '-') { advance(); stripTabs = true; }
+            while (!atEnd() && (peek() == ' ' || peek() == '\t')) advance();
+            // Read the delimiter word. If it's quoted, the body is literal.
+            std::string delim;
+            bool noExpand = false;
+            if (peek() == '\'' || peek() == '"') {
+                char q = advance();
+                noExpand = true; // quoting the delimiter suppresses body expansion
+                while (!atEnd() && peek() != q) delim += advance();
+                if (!atEnd()) advance();
+            } else {
+                while (!atEnd() && peek() != ' ' && peek() != '\t' && peek() != '\n' &&
+                       std::string("|&;<>()").find(peek()) == std::string::npos)
+                    delim += advance();
+            }
+            toks.push_back(Token{TokKind::RedirHeredoc, "", l, c});
+            pending.push_back(PendingHeredoc{toks.size() - 1, delim, stripTabs, noExpand});
             continue;
         }
         if (std::string("|&;<>()").find(peek()) != std::string::npos) {

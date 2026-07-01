@@ -44,7 +44,37 @@ static sigset_t foregroundDefaultSignals() {
     return s;
 }
 
-static void applyRedirectsFileActions(const std::vector<Redirect>& redirects, posix_spawn_file_actions_t& actions) {
+// Writes `body` to an anonymous temp file and returns a read-positioned fd.
+// The file is unlinked immediately, so it has no name on disk and is reclaimed
+// the moment the last fd referencing it closes -- no path bookkeeping or
+// cleanup needed. Returns -1 on failure. This is how a here-doc body becomes
+// a real readable stdin.
+static int heredocTempFd(const std::string& body) {
+    char tmpl[] = "/tmp/ark_heredoc_XXXXXX";
+    int fd = mkstemp(tmpl);
+    if (fd == -1) return -1;
+    unlink(tmpl); // fd stays valid; the file is now anonymous
+    size_t off = 0;
+    while (off < body.size()) {
+        ssize_t w = write(fd, body.data() + off, body.size() - off);
+        if (w <= 0) break;
+        off += (size_t)w;
+    }
+    lseek(fd, 0, SEEK_SET);
+    return fd;
+}
+
+static std::string heredocBody(const Redirect& r, ShellState& state) {
+    // Expand $vars in the body unless the delimiter was quoted (<<'EOF').
+    // expandWord does parameter/command/arith expansion with no word-splitting,
+    // which is exactly here-doc semantics (newlines and spacing preserved).
+    return r.heredocExpand ? expandWord(r.target, state) : r.target;
+}
+
+// posix_spawn path. Any here-doc opens a temp fd HERE in the parent; those fds
+// are pushed to `heredocFds` so the caller closes them after the spawn returns.
+static void applyRedirectsFileActions(const std::vector<Redirect>& redirects, posix_spawn_file_actions_t& actions,
+                                       ShellState& state, std::vector<int>& heredocFds) {
     for (const auto& r : redirects) {
         switch (r.kind) {
             case Redirect::Kind::In:
@@ -59,18 +89,33 @@ static void applyRedirectsFileActions(const std::vector<Redirect>& redirects, po
             case Redirect::Kind::ErrOut:
                 posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, r.target.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
                 break;
+            case Redirect::Kind::HereDoc: {
+                int fd = heredocTempFd(heredocBody(r, state));
+                if (fd != -1) {
+                    posix_spawn_file_actions_adddup2(&actions, fd, STDIN_FILENO);
+                    posix_spawn_file_actions_addclose(&actions, fd); // child drops its copy after the dup
+                    heredocFds.push_back(fd);                        // parent closes after spawn
+                }
+                break;
+            }
         }
     }
 }
 
-static void applyRedirectsInChild(const std::vector<Redirect>& redirects) {
+static void applyRedirectsInChild(const std::vector<Redirect>& redirects, ShellState& state) {
     for (const auto& r : redirects) {
+        if (r.kind == Redirect::Kind::HereDoc) {
+            int fd = heredocTempFd(heredocBody(r, state));
+            if (fd != -1) { dup2(fd, STDIN_FILENO); close(fd); }
+            continue;
+        }
         int fd = -1, target = -1;
         switch (r.kind) {
             case Redirect::Kind::In: fd = open(r.target.c_str(), O_RDONLY); target = STDIN_FILENO; break;
             case Redirect::Kind::Out: fd = open(r.target.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644); target = STDOUT_FILENO; break;
             case Redirect::Kind::Append: fd = open(r.target.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644); target = STDOUT_FILENO; break;
             case Redirect::Kind::ErrOut: fd = open(r.target.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644); target = STDERR_FILENO; break;
+            case Redirect::Kind::HereDoc: break; // handled above
         }
         if (fd != -1) { dup2(fd, target); close(fd); }
     }
@@ -98,6 +143,7 @@ static int runPipelineStage(Node* cmd, ShellState& state, int inFd, int outFd, p
 
     posix_spawn_file_actions_t actions;
     posix_spawn_file_actions_init(&actions);
+    std::vector<int> heredocFds; // parent-side here-doc temp fds, closed after spawn
     if (inFd != -1) {
         posix_spawn_file_actions_adddup2(&actions, inFd, STDIN_FILENO);
         posix_spawn_file_actions_addclose(&actions, inFd);
@@ -112,7 +158,8 @@ static int runPipelineStage(Node* cmd, ShellState& state, int inFd, int outFd, p
     // wins (matches real shell behavior) -- though in practice the only
     // stages where both apply are a first stage with `<` (no previous pipe)
     // or a last stage with `>` (no next pipe), so there's no real conflict.
-    applyRedirectsFileActions(cmd->redirects, actions);
+    applyRedirectsFileActions(cmd->redirects, actions, state, heredocFds);
+    auto closeHeredocFds = [&]() { for (int fd : heredocFds) close(fd); };
 
     if (it != reg.end()) {
         // Builtins run in-process normally, but inside a pipeline stage they
@@ -129,7 +176,7 @@ static int runPipelineStage(Node* cmd, ShellState& state, int inFd, int outFd, p
         if (pid == 0) {
             if (inFd != -1) { dup2(inFd, STDIN_FILENO); close(inFd); }
             if (outFd != -1) { dup2(outFd, STDOUT_FILENO); close(outFd); }
-            applyRedirectsInChild(cmd->redirects);
+            applyRedirectsInChild(cmd->redirects, state);
             int rc = it->second(argv, state);
             std::cout.flush(); // _exit() below skips iostream buffer flushing
                                 // entirely -- without this, a builtin's output
@@ -141,6 +188,7 @@ static int runPipelineStage(Node* cmd, ShellState& state, int inFd, int outFd, p
             _exit(rc);
         }
         posix_spawn_file_actions_destroy(&actions);
+        closeHeredocFds();
         pidOut = pid;
         return 0;
     }
@@ -164,6 +212,7 @@ static int runPipelineStage(Node* cmd, ShellState& state, int inFd, int outFd, p
     int rc = posix_spawnp(&pid, cargv[0], &actions, &attr, cargv.data(), environ);
     posix_spawnattr_destroy(&attr);
     posix_spawn_file_actions_destroy(&actions);
+    closeHeredocFds();
     if (rc != 0) {
         std::cerr << argv[0] << ": command not found\n";
         pidOut = -1;
@@ -411,7 +460,7 @@ static int runCommand(Node* cmd, ShellState& state) {
                             // get duplicated by the child's own flush)
         pid_t pid = fork();
         if (pid == 0) {
-            applyRedirectsInChild(cmd->redirects);
+            applyRedirectsInChild(cmd->redirects, state);
             int rc = it->second(argv, state);
             std::cout.flush(); // same _exit()-skips-iostream-flush issue as
                                 // the pipeline builtin-fork path (Task 13)
@@ -428,7 +477,8 @@ static int runCommand(Node* cmd, ShellState& state) {
 
     posix_spawn_file_actions_t actions;
     posix_spawn_file_actions_init(&actions);
-    applyRedirectsFileActions(cmd->redirects, actions);
+    std::vector<int> heredocFds; // parent-side here-doc temp fds, closed after spawn
+    applyRedirectsFileActions(cmd->redirects, actions, state, heredocFds);
 
     // Give this foreground command its own process group and hand off the
     // controlling terminal to it -- exactly like runPipeline() already does
@@ -457,6 +507,7 @@ static int runCommand(Node* cmd, ShellState& state) {
     int rc = posix_spawnp(&pid, cargv[0], &actions, &attr, cargv.data(), environ);
     posix_spawnattr_destroy(&attr);
     posix_spawn_file_actions_destroy(&actions);
+    for (int fd : heredocFds) close(fd); // parent-side here-doc temp fds
     if (rc != 0) {
         std::cerr << argv[0] << ": command not found\n";
         return 127;

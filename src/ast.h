@@ -8,8 +8,9 @@ enum class NodeKind { Command, Pipeline, If, While, For, Case, FunctionDef, List
 enum class JoinOp { None, And, Or, Seq };
 
 struct Redirect {
-    enum class Kind { In, Out, Append, ErrOut } kind;
-    std::string target;
+    enum class Kind { In, Out, Append, ErrOut, HereDoc } kind;
+    std::string target;       // filename for file redirects; the BODY for HereDoc
+    bool heredocExpand = true; // HereDoc: expand $vars in the body (false for <<'EOF')
 };
 
 struct Node {

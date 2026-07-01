@@ -1,0 +1,13 @@
+cat << EOF
+plain line
+EOF
+name=world
+cat << EOF
+hello $name
+EOF
+cat << 'EOF'
+literal $name
+EOF
+cat << EOF | tr a-z A-Z
+loud
+EOF

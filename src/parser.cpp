@@ -15,6 +15,14 @@ std::unique_ptr<Node> Parser::parseCommand() {
     node->kind = NodeKind::Command;
     while (!atStatementEnd()) {
         TokKind k = peek().kind;
+        if (k == TokKind::RedirHeredoc) {
+            // The lexer already collected the body into this token's text and
+            // recorded whether the delimiter was quoted -- no following word
+            // to consume (unlike a file redirect).
+            const Token& t = advance();
+            node->redirects.push_back(Redirect{Redirect::Kind::HereDoc, t.text, !t.heredocNoExpand});
+            continue;
+        }
         if (k == TokKind::RedirIn || k == TokKind::RedirOut ||
             k == TokKind::RedirAppend || k == TokKind::RedirErrOut) {
             Redirect::Kind rk = redirKindFor(k);
