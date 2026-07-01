@@ -1,0 +1,39 @@
+#pragma once
+#include <string>
+#include <utility>
+#include <vector>
+
+// Returns {wordStart, word} for the word ending exactly at `cursor` --
+// scans backward from `cursor` to the nearest whitespace or start of
+// `buf`. A live-editing heuristic on raw text (like highlight.cpp's
+// scanner), not a full parse.
+std::pair<size_t, std::string> wordUnderCursor(const std::string& buf, size_t cursor);
+
+// True if the word starting at `wordStart` is in "command position" --
+// the start of `buf`, or right after |, ;, &&, ||, &, or a shell keyword
+// (if/then/else/fi/while/do/done/for/in/case/esac/function). Reimplements
+// (deliberately, not shared via highlight.h) the same command-position
+// rule highlight.cpp's classify() uses internally -- kept as a small,
+// self-contained scan here rather than exposing classify()'s internal
+// state machine as a new public API just for this one caller.
+bool isCommandPosition(const std::string& buf, size_t wordStart);
+
+// Longest common prefix shared by all strings in `items`. Empty for an
+// empty list; the item itself for a single-item list.
+std::string longestCommonPrefix(const std::vector<std::string>& items);
+
+// Filesystem path completion: splits `partial` into directory + filename
+// prefix, lists matching entries via opendir/readdir (no subprocess).
+// Hidden files excluded unless the prefix itself starts with '.'.
+// Candidates are full replacement text for `partial` (including any
+// directory portion `partial` itself had), not just suffixes.
+std::vector<std::string> completePath(const std::string& partial);
+
+// Command-name completion: builtin names (from builtinRegistry()) plus
+// executables found by scanning each $PATH directory (opendir/readdir +
+// access(path, X_OK) -- no subprocess).
+std::vector<std::string> completeCommand(const std::string& partial);
+
+// True if `path` (after expanding a leading '~' via $HOME) is a directory.
+// Used to decide whether a completed path should get a trailing '/' or ' '.
+bool isDirectory(const std::string& path);
