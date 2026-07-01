@@ -146,7 +146,7 @@ constexpr const char* ICON_FOLDER = "\xef\x81\xbc"; // nf-fa-folder_open (U+F07C
 constexpr const char* ICON_BRANCH = "\xef\x84\xa6"; // nf-fa-code_fork, git-branch stand-in (U+F126)
 constexpr const char* ICON_CLOCK = "\xef\x80\x97";  // nf-fa-clock_o (U+F017)
 constexpr const char* ICON_USER = "\xef\x80\x87";   // nf-fa-user (U+F007)
-constexpr const char* ICON_CPU = "\xef\x8b\x9b";    // nf-fa-microchip (U+F2DB)
+constexpr const char* ICON_CPU = "\xef\x83\xa7";    // nf-fa-bolt (U+F0E7)
 // Rounded powerline dividers (as opposed to the hard-triangle E0B0/E0B2 used
 // in the first pass) -- these render as a solid semicircle bump, giving each
 // chip a pill/capsule shape instead of a sharp-cornered block.
@@ -187,17 +187,19 @@ void paintChrome(const std::string& cwd, const std::string& gitBranch,
     int rows, cols;
     if (!getTerminalSize(rows, cols) || rows <= 2) return;
 
-    // ---- top bar: [dir pill]  [branch pill] ----
-    // A gap of one plain default-bg space separates adjacent pills, rather
-    // than the earlier design's continuously-flowing colored blocks -- once
-    // every pill shares the same dark fill, touching pills would have no
-    // visible seam at all, so a gap plus rounded caps on each end is what
-    // actually reads as distinct rounded chips.
+    // ---- top bar: [dir pill][branch pill] ----
+    // Adjacent pills now touch directly instead of leaving a plain-space gap
+    // between them: with every pill sharing the same dark fill, a lone
+    // rounded cap between two chips would be invisible (fg would equal bg,
+    // no color boundary to reveal the bump) -- but placing one chip's
+    // CLOSING cap immediately against the next chip's OPENING cap (no space
+    // between them) still reads as a distinct rounded divider notch, the
+    // classic lualine/powerline "connected rounded segments" look.
     int pillOverhead = 1 + 1 + 4; // icon + space-after-icon + 2 padding + 2 rounded caps
     std::string dirText = cwd;
     int dirVisible = (int)cwd.size();
-    if (dirVisible + 1 + pillOverhead > cols) {
-        int room = cols - pillOverhead - 1;
+    if (dirVisible + pillOverhead > cols) {
+        int room = cols - pillOverhead;
         if (room < 0) room = 0;
         // Keep the tail of the path (e.g. ".../ark-terminal") -- the most
         // specific, most useful part when truncated -- rather than the head.
@@ -208,11 +210,10 @@ void paintChrome(const std::string& cwd, const std::string& gitBranch,
 
     std::string topLine = dirPill.ansi;
     int topWidth = dirPill.width;
-    if (!gitBranch.empty() && topWidth + 1 + (int)gitBranch.size() + pillOverhead <= cols) {
+    if (!gitBranch.empty() && topWidth + (int)gitBranch.size() + pillOverhead <= cols) {
         Chip branchPill = makePill(FG_GREEN, std::string(ICON_BRANCH) + " " + gitBranch,
                                     1 + 1 + (int)gitBranch.size());
-        topLine += " ";
-        topLine += branchPill.ansi;
+        topLine += branchPill.ansi; // no gap -- caps touch, forming the divider notch
     }
 
     // ---- bottom bar: [user+session pill] ... padding ... [cpu+mem pill] ----
@@ -229,7 +230,12 @@ void paintChrome(const std::string& cwd, const std::string& gitBranch,
     char hwbuf[64];
     snprintf(hwbuf, sizeof(hwbuf), "%3.0f%%  mem %.1f/%.1fG", hw.cpuPercent, hw.memUsedGB, hw.memTotalGB);
     std::string hwStr = hwbuf;
-    std::string rightText = std::string(ICON_CPU) + " " + hwStr;
+    // The bolt icon is colored blue specifically, then switches back to
+    // FG_RED (makePill's base accent, applied before this text) for the
+    // stats themselves -- a per-glyph color override embedded directly in
+    // the text, since makePill only takes one accent color for the whole
+    // chip otherwise.
+    std::string rightText = std::string(FG_BLUE) + ICON_CPU + FG_RED + " " + hwStr;
     int rightVisible = 1 + 1 + (int)hwStr.size();
     Chip rightPill = makePill(FG_RED, rightText, rightVisible);
 
