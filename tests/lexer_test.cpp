@@ -13,9 +13,12 @@ static void test_simple_words() {
 }
 
 static void test_single_quotes_are_literal() {
+    // \x02 marks single-quoted content -- fully literal (no $ expansion,
+    // no IFS splitting), distinct from \x01's double-quote marker (which
+    // still allows $ expansion). See expand.cpp's expandWords().
     Lexer lex("echo 'a b  c'");
     auto toks = lex.tokenize();
-    assert(toks[1].text == "a b  c");
+    assert(toks[1].text == "\x02" "a b  c" "\x02");
 }
 
 static void test_double_quotes_allow_later_expansion_markers() {

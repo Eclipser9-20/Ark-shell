@@ -100,10 +100,17 @@ static std::vector<std::string> globExpand(const std::string& pattern) {
 std::vector<std::string> expandWords(const std::vector<std::string>& words, ShellState& state) {
     std::vector<std::string> result;
     for (const auto& w : words) {
-        bool quoted = w.size() >= 2 && w.front() == '\x01' && w.back() == '\x01';
-        std::string inner = quoted ? w.substr(1, w.size() - 2) : w;
+        bool singleQuoted = w.size() >= 2 && w.front() == '\x02' && w.back() == '\x02';
+        bool doubleQuoted = w.size() >= 2 && w.front() == '\x01' && w.back() == '\x01';
+        if (singleQuoted) {
+            // Fully literal: no $ expansion, no splitting.
+            result.push_back(w.substr(1, w.size() - 2));
+            continue;
+        }
+        std::string inner = doubleQuoted ? w.substr(1, w.size() - 2) : w;
         std::string expanded = expandWord(inner, state);
-        if (quoted) {
+        if (doubleQuoted) {
+            // $ expansion still applies, but no IFS splitting/globbing.
             result.push_back(expanded);
             continue;
         }

@@ -64,6 +64,17 @@ static void test_command_substitution() {
     assert(words[1] == "hi"); // trailing newline stripped, then split (single word here)
 }
 
+static void test_single_quotes_suppress_dollar_expansion_and_split() {
+    ShellState st;
+    st.vars["HOME"] = "/Users/gideoncox";
+    // \x02-wrapped (single-quoted) content must stay fully literal: no $
+    // expansion, no IFS splitting -- even though it contains both a $var
+    // and internal whitespace.
+    auto words = expandWords({"echo", "\x02" "$HOME is not $expanded" "\x02"}, st);
+    assert(words.size() == 2);
+    assert(words[1] == "$HOME is not $expanded");
+}
+
 int main() {
     test_simple_var();
     test_braced_var();
@@ -73,5 +84,6 @@ int main() {
     test_word_splitting();
     test_quoted_no_split_marker();
     test_command_substitution();
+    test_single_quotes_suppress_dollar_expansion_and_split();
     std::cout << "all expand parameter-expansion tests passed\n";
 }

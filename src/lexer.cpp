@@ -45,7 +45,12 @@ Token Lexer::lexWord() {
         if (std::string("|&;<>()").find(c) != std::string::npos) break;
         if (c == '\'') {
             advance(); // consume opening quote
+            // \x02 marks single-quoted content: unlike double quotes (\x01,
+            // no split but $ still expands), single quotes suppress BOTH
+            // splitting AND $ expansion -- fully literal.
+            out += '\x02';
             while (!atEnd() && peek() != '\'') out += advance();
+            out += '\x02';
             if (!atEnd()) advance(); // consume closing quote
             continue;
         }
