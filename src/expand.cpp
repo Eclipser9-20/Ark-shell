@@ -82,6 +82,17 @@ std::string expandWord(const std::string& word, const ShellState& state) {
     return out;
 }
 
+// Expands a leading ~ to $HOME, only for unquoted words (bash never expands
+// ~ inside single or double quotes). `~user` (other users' home dirs) is
+// out of scope -- YAGNI, nobody here has multiple local accounts to cd between.
+static std::string expandTilde(const std::string& word) {
+    if (word.empty() || word[0] != '~') return word;
+    if (word.size() > 1 && word[1] != '/') return word;
+    const char* home = getenv("HOME");
+    if (!home) return word;
+    return std::string(home) + word.substr(1);
+}
+
 static std::vector<std::string> splitOnWhitespace(const std::string& s) {
     std::vector<std::string> out;
     std::istringstream iss(s);
@@ -117,7 +128,7 @@ std::vector<std::string> expandWords(const std::vector<std::string>& words, Shel
             result.push_back(w.substr(1, w.size() - 2));
             continue;
         }
-        std::string inner = doubleQuoted ? w.substr(1, w.size() - 2) : w;
+        std::string inner = doubleQuoted ? w.substr(1, w.size() - 2) : expandTilde(w);
         std::string expanded = expandWord(inner, state);
         if (doubleQuoted) {
             // $ expansion still applies, but no IFS splitting/globbing.

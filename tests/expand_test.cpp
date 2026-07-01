@@ -1,5 +1,6 @@
 #include "../src/expand.h"
 #include <cassert>
+#include <cstdlib>
 #include <iostream>
 
 static void test_simple_var() {
@@ -75,6 +76,38 @@ static void test_single_quotes_suppress_dollar_expansion_and_split() {
     assert(words[1] == "$HOME is not $expanded");
 }
 
+static void test_tilde_expands_to_home() {
+    ShellState st;
+    setenv("HOME", "/Users/gideoncox", 1);
+    auto words = expandWords({"cd", "~"}, st);
+    assert(words[1] == "/Users/gideoncox");
+}
+
+static void test_tilde_slash_expands_to_home_subpath() {
+    ShellState st;
+    setenv("HOME", "/Users/gideoncox", 1);
+    auto words = expandWords({"cd", "~/pullio"}, st);
+    assert(words[1] == "/Users/gideoncox/pullio");
+}
+
+static void test_tilde_mid_word_not_expanded() {
+    ShellState st;
+    setenv("HOME", "/Users/gideoncox", 1);
+    // ~ only expands at the start of a word (bash semantics) -- "foo~bar"
+    // is a literal filename, not a home-dir reference.
+    auto words = expandWords({"echo", "foo~bar"}, st);
+    assert(words[1] == "foo~bar");
+}
+
+static void test_tilde_not_expanded_when_quoted() {
+    ShellState st;
+    setenv("HOME", "/Users/gideoncox", 1);
+    auto dq = expandWords({"echo", "\x01" "~" "\x01"}, st);
+    assert(dq[1] == "~");
+    auto sq = expandWords({"echo", "\x02" "~" "\x02"}, st);
+    assert(sq[1] == "~");
+}
+
 int main() {
     test_simple_var();
     test_braced_var();
@@ -85,5 +118,9 @@ int main() {
     test_quoted_no_split_marker();
     test_command_substitution();
     test_single_quotes_suppress_dollar_expansion_and_split();
+    test_tilde_expands_to_home();
+    test_tilde_slash_expands_to_home_subpath();
+    test_tilde_mid_word_not_expanded();
+    test_tilde_not_expanded_when_quoted();
     std::cout << "all expand parameter-expansion tests passed\n";
 }
