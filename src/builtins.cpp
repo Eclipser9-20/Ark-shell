@@ -41,6 +41,62 @@ static int b_exit(const std::vector<std::string>& argv, ShellState& state) {
     std::exit(code);
 }
 
+// Shared cd primitive for pushd/popd (does the chdir + OLDPWD/PWD bookkeeping
+// without the `cd`-specific arg parsing). Returns true on success.
+static bool changeDir(const std::string& target, ShellState& state) {
+    std::string prev = state.cwd;
+    if (::chdir(target.c_str()) != 0) {
+        std::cerr << "cd: " << target << ": No such file or directory\n";
+        return false;
+    }
+    char buf[PATH_MAX];
+    if (::getcwd(buf, sizeof(buf))) state.cwd = buf;
+    state.vars["OLDPWD"] = prev;
+    ::setenv("OLDPWD", prev.c_str(), 1);
+    ::setenv("PWD", state.cwd.c_str(), 1);
+    return true;
+}
+
+// Prints the directory stack (current dir first, then the stack top-down),
+// space-separated -- like `dirs` in bash/zsh.
+static void printDirStack(const ShellState& state) {
+    std::cout << state.cwd;
+    for (auto it = state.dirStack.rbegin(); it != state.dirStack.rend(); ++it) std::cout << " " << *it;
+    std::cout << "\n";
+}
+
+static int b_pushd(const std::vector<std::string>& argv, ShellState& state) {
+    if (argv.size() < 2) {
+        // No arg: swap the current dir with the top of the stack.
+        if (state.dirStack.empty()) { std::cerr << "pushd: no other directory\n"; return 1; }
+        std::string top = state.dirStack.back();
+        std::string here = state.cwd;
+        if (!changeDir(top, state)) return 1;
+        state.dirStack.back() = here;
+        printDirStack(state);
+        return 0;
+    }
+    std::string here = state.cwd;
+    if (!changeDir(argv[1], state)) return 1;
+    state.dirStack.push_back(here);
+    printDirStack(state);
+    return 0;
+}
+
+static int b_popd(const std::vector<std::string>&, ShellState& state) {
+    if (state.dirStack.empty()) { std::cerr << "popd: directory stack empty\n"; return 1; }
+    std::string target = state.dirStack.back();
+    state.dirStack.pop_back();
+    if (!changeDir(target, state)) return 1;
+    printDirStack(state);
+    return 0;
+}
+
+static int b_dirs(const std::vector<std::string>&, ShellState& state) {
+    printDirStack(state);
+    return 0;
+}
+
 static int b_pwd(const std::vector<std::string>&, ShellState& state) {
     std::cout << state.cwd << "\n";
     return 0;
@@ -189,6 +245,7 @@ const std::unordered_map<std::string, BuiltinFn>& builtinRegistry() {
         {"export", b_export}, {"unset", b_unset}, {"type", b_type}, {"read", b_read},
         {"jobs", b_jobs}, {"fg", b_fg}, {"bg", b_bg},
         {"alias", b_alias}, {"unalias", b_unalias},
+        {"pushd", b_pushd}, {"popd", b_popd}, {"dirs", b_dirs},
     };
     return reg;
 }

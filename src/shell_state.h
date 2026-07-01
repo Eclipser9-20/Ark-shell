@@ -11,6 +11,7 @@ struct ShellState {
     std::unordered_map<std::string, std::string> aliases; // name -> replacement text
     std::unordered_map<std::string, Node*> functions; // non-owning; owner lives in main.cpp's AST-root list
     std::vector<std::vector<std::string>> argStack;    // positional params per call frame
+    std::vector<std::string> dirStack;                 // pushd/popd directory stack (top = back())
     int lastStatus = 0;
     std::string cwd;
     JobTable* jobs = nullptr; // non-owning; owned by main.cpp
