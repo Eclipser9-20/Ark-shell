@@ -1,0 +1,9 @@
+rm -rf /tmp/ark_rg
+mkdir -p /tmp/ark_rg/a/b
+echo x > /tmp/ark_rg/top.txt
+echo x > /tmp/ark_rg/a/mid.txt
+echo x > /tmp/ark_rg/a/b/deep.txt
+cd /tmp/ark_rg
+echo **/*.txt
+echo *.txt
+rm -rf /tmp/ark_rg

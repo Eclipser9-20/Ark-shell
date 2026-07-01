@@ -1,9 +1,12 @@
 #include "expand.h"
+#include <algorithm>
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <dirent.h>
 #include <fnmatch.h>
 #include <glob.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 static CaptureHook g_captureHook;
@@ -517,11 +520,66 @@ static std::vector<std::string> braceExpand(const std::string& w) {
     return {w};
 }
 
-// Expands filesystem glob characters (* ?) via POSIX glob(3). A pattern with
-// no glob chars is returned as-is; a pattern that matches nothing is left
-// literal (bash's default behavior without nullglob), not silently dropped.
+// Collects `base` and every subdirectory reachable beneath it (recursively)
+// into `dirs`. `base` is either "" (meaning the current directory) or a path
+// ending in '/'. Hidden directories (dot-prefixed) are skipped, matching
+// zsh's default of `**` not descending into or matching dotfiles.
+static void collectDirsRecursive(const std::string& base, std::vector<std::string>& dirs) {
+    dirs.push_back(base);
+    DIR* d = opendir(base.empty() ? "." : base.c_str());
+    if (!d) return;
+    struct dirent* e;
+    while ((e = readdir(d)) != nullptr) {
+        std::string name = e->d_name;
+        if (name == "." || name == ".." || (!name.empty() && name[0] == '.')) continue;
+        std::string full = base + name; // base ends with '/' (or is "")
+        struct stat st;
+        if (stat(full.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
+            collectDirsRecursive(full + "/", dirs);
+        }
+    }
+    closedir(d);
+}
+
+// zsh-style recursive glob: `**` matches across directory levels. E.g.
+// `**/*.cpp` finds every .cpp under the current tree, `src/**/*.h` under src.
+// Implemented by enumerating the directory tree rooted at the fixed prefix
+// before `**`, then running an ordinary glob of `<eachDir>/<suffix>` and
+// unioning the results.
+static std::vector<std::string> recursiveGlob(const std::string& pattern) {
+    size_t stars = pattern.find("**");
+    size_t slash = pattern.rfind('/', stars);
+    std::string prefix = (slash == std::string::npos) ? "" : pattern.substr(0, slash + 1);
+    size_t after = stars + 2;                 // past "**"
+    if (after < pattern.size() && pattern[after] == '/') after++; // past the "/"
+    std::string suffix = pattern.substr(after);
+    if (suffix.empty()) suffix = "*";         // `**` alone -> everything
+
+    std::vector<std::string> dirs;
+    collectDirsRecursive(prefix, dirs);
+
+    std::vector<std::string> out;
+    for (const auto& dir : dirs) {
+        glob_t gl;
+        std::string p = dir + suffix;
+        if (::glob(p.c_str(), 0, nullptr, &gl) == 0) {
+            for (size_t i = 0; i < gl.gl_pathc; i++) out.push_back(gl.gl_pathv[i]);
+        }
+        globfree(&gl);
+    }
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    if (out.empty()) out.push_back(pattern); // no match -> literal
+    return out;
+}
+
+// Expands filesystem glob characters (* ?) via POSIX glob(3), with zsh-style
+// recursive `**` handled separately. A pattern with no glob chars is returned
+// as-is; a pattern that matches nothing is left literal (bash's default
+// behavior without nullglob), not silently dropped.
 static std::vector<std::string> globExpand(const std::string& pattern) {
     if (pattern.find_first_of("*?") == std::string::npos) return {pattern};
+    if (pattern.find("**") != std::string::npos) return recursiveGlob(pattern);
     glob_t gl;
     int rc = ::glob(pattern.c_str(), 0, nullptr, &gl);
     std::vector<std::string> out;
