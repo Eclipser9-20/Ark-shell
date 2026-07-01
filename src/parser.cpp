@@ -64,7 +64,17 @@ std::unique_ptr<Node> Parser::parseStatementList(std::initializer_list<TokKind> 
         for (TokKind t : stopTokens) if (check(t)) { stop = true; break; }
         if (stop || check(TokKind::End)) break;
         if (check(TokKind::Word) && peek().text == "}") break;
+        // No-progress guard: if parseStatement() consumes NOTHING (e.g. a
+        // stray ';;' or ')' that no rule handles), we'd loop forever -- the
+        // recurring "unhandled token stalls the parser" hang, hit generically
+        // here so any such token becomes a clean syntax error instead.
+        size_t before = pos_;
         list->children.push_back(parseStatement());
+        if (pos_ == before) {
+            throw ParseError(peek().line, peek().col,
+                              "syntax error near unexpected token '" + peek().text + "'",
+                              peek().kind == TokKind::End);
+        }
     }
     return list;
 }
@@ -118,9 +128,14 @@ std::unique_ptr<Node> Parser::parseCase() {
     cn->caseWord = advance().text;
     advance(); // 'in'
     while (check(TokKind::Newline) || check(TokKind::Semi)) advance();
-    while (!check(TokKind::Esac)) {
+    // Stop at End as well as Esac -- otherwise a `case` with no matching
+    // `esac` walks off the end of the token stream (advance() past the End
+    // sentinel) and reads out of bounds: a SIGBUS. expect(Esac) below then
+    // reports the missing esac cleanly (incomplete on End -> continuation
+    // prompt interactively).
+    while (!check(TokKind::Esac) && !check(TokKind::End)) {
         std::string pattern = advance().text;
-        advance(); // ')'
+        if (check(TokKind::RParen)) advance(); // ')'
         auto body = parseStatementList({TokKind::DSemi, TokKind::Esac});
         cn->caseClauses.emplace_back(pattern, std::move(body));
         if (check(TokKind::DSemi)) advance();

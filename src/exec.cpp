@@ -311,6 +311,14 @@ static int runFunctionDef(Node* fn, ShellState& state) {
 }
 
 static int callFunction(Node* body, const std::vector<std::string>& argv, ShellState& state) {
+    // Recursion guard: unbounded function recursion (`f() { f; }`) otherwise
+    // overflows the C++ call stack -> SIGSEGV. argStack depth IS the function
+    // nesting depth, so cap it and error out cleanly instead of crashing.
+    constexpr size_t kMaxFunctionDepth = 1000;
+    if (state.argStack.size() >= kMaxFunctionDepth) {
+        std::cerr << argv[0] << ": maximum function recursion depth exceeded\n";
+        return 1;
+    }
     std::vector<std::string> params(argv.begin() + 1, argv.end()); // argv[0] is the function name
     state.argStack.push_back(params);
     state.localScopes.emplace_back(); // fresh local-variable scope for this call
