@@ -4,6 +4,7 @@
 #include "jobs.h"
 #include "lexer.h"
 #include "parser.h"
+#include <cctype>
 #include <cerrno>
 #include <csignal>
 #include <cstdio>
@@ -14,6 +15,7 @@
 #include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
+#include <utility>
 #include <vector>
 
 extern char** environ;
@@ -265,8 +267,91 @@ static int callFunction(Node* body, const std::vector<std::string>& argv, ShellS
     return status;
 }
 
+// A word is an assignment iff it's `NAME=...` where NAME is a valid shell
+// identifier: a leading letter or underscore, then letters/digits/underscores,
+// up to the first `=`. Returns the index of that `=` (so NAME = word[0..idx),
+// VALUE = word[idx+1..]), or std::string::npos if the word isn't an
+// assignment. The `=` must come BEFORE any quote sentinel -- `x="a=b"` is an
+// assignment of x, but `"x=y"` (a fully-quoted word) is a literal command
+// word, not an assignment.
+static size_t assignmentEq(const std::string& word) {
+    if (word.empty()) return std::string::npos;
+    char c0 = word[0];
+    if (!(std::isalpha((unsigned char)c0) || c0 == '_')) return std::string::npos;
+    for (size_t i = 0; i < word.size(); i++) {
+        char c = word[i];
+        if (c == '=') return i > 0 ? i : std::string::npos; // empty name -> not an assignment
+        if (c == '\x01' || c == '\x02') return std::string::npos; // hit a quote before '=' -> not an assignment
+        if (!(std::isalnum((unsigned char)c) || c == '_')) return std::string::npos;
+    }
+    return std::string::npos; // no '=' at all
+}
+
 static int runCommand(Node* cmd, ShellState& state) {
-    auto argv = expandWords(cmd->words, state);
+    // Leading NAME=value words are assignments (bash: they precede the
+    // command, if any). Peel them off the raw (pre-expansion) words -- the
+    // NAME and '=' are literal, only the VALUE gets expanded, and never
+    // word-split (that's why expandNoSplit, not expandWords, is used on it).
+    size_t firstCmdWord = 0;
+    std::vector<std::pair<std::string, std::string>> assignments;
+    while (firstCmdWord < cmd->words.size()) {
+        size_t eq = assignmentEq(cmd->words[firstCmdWord]);
+        if (eq == std::string::npos) break;
+        std::string name = cmd->words[firstCmdWord].substr(0, eq);
+        std::string value = expandNoSplit(cmd->words[firstCmdWord].substr(eq + 1), state);
+        assignments.emplace_back(std::move(name), std::move(value));
+        firstCmdWord++;
+    }
+
+    if (firstCmdWord == cmd->words.size() && !assignments.empty()) {
+        // Pure assignment(s), no command: set shell variables persistently.
+        for (auto& [name, value] : assignments) {
+            state.vars[name] = value;
+            ::setenv(name.c_str(), value.c_str(), 1); // keep the process env in
+                                                       // sync so $(...) subshells
+                                                       // and children see it too
+        }
+        return 0;
+    }
+
+    // Assignment(s) followed by a command: bash applies them to that command's
+    // environment only, not the shell's own vars. Simplest correct realization
+    // with the current model: setenv them (so external commands and $(...)
+    // inherit them), run, then restore the prior environment values. Also mirror
+    // into state.vars for the duration so an ark-side expansion in the same
+    // command (rare, but e.g. a builtin) sees them.
+    std::vector<std::pair<std::string, std::string>> savedVars;   // (name, prior value or "" sentinel)
+    std::vector<std::pair<std::string, bool>> savedEnvPresent;    // (name, was-set-before)
+    for (auto& [name, value] : assignments) {
+        auto vit = state.vars.find(name);
+        savedVars.emplace_back(name, vit != state.vars.end() ? vit->second : std::string());
+        const char* prev = getenv(name.c_str());
+        savedEnvPresent.emplace_back(name, prev != nullptr);
+        if (prev) savedVars.back().second = prev; // prefer the real env value for restore
+        state.vars[name] = value;
+        ::setenv(name.c_str(), value.c_str(), 1);
+    }
+    struct EnvRestore {
+        ShellState& st;
+        const std::vector<std::pair<std::string, std::string>>& sv;
+        const std::vector<std::pair<std::string, bool>>& se;
+        bool active;
+        ~EnvRestore() {
+            if (!active) return;
+            for (size_t i = 0; i < se.size(); i++) {
+                const std::string& name = se[i].first;
+                if (se[i].second) ::setenv(name.c_str(), sv[i].second.c_str(), 1);
+                else ::unsetenv(name.c_str());
+                // state.vars: a temp assignment shouldn't leave a shell var
+                // behind unless one already existed with that name.
+                if (se[i].second) st.vars[name] = sv[i].second;
+                else st.vars.erase(name);
+            }
+        }
+    } envRestore{state, savedVars, savedEnvPresent, !assignments.empty()};
+
+    std::vector<std::string> tempWords(cmd->words.begin() + firstCmdWord, cmd->words.end());
+    auto argv = expandWords(tempWords, state);
     if (argv.empty()) return 0;
 
     auto fnIt = state.functions.find(argv[0]);

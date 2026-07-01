@@ -118,6 +118,15 @@ static std::vector<std::string> globExpand(const std::string& pattern) {
     return out;
 }
 
+std::string expandNoSplit(const std::string& w, ShellState& state) {
+    bool singleQuoted = w.size() >= 2 && w.front() == '\x02' && w.back() == '\x02';
+    bool doubleQuoted = w.size() >= 2 && w.front() == '\x01' && w.back() == '\x01';
+    if (singleQuoted) return w.substr(1, w.size() - 2); // fully literal
+    std::string inner = doubleQuoted ? w.substr(1, w.size() - 2) : expandTilde(w);
+    return expandWord(inner, state); // $/command-sub expansion, but the caller
+                                      // (assignment RHS) never splits or globs
+}
+
 std::vector<std::string> expandWords(const std::vector<std::string>& words, ShellState& state) {
     std::vector<std::string> result;
     for (const auto& w : words) {

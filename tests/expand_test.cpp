@@ -108,6 +108,27 @@ static void test_tilde_not_expanded_when_quoted() {
     assert(sq[1] == "~");
 }
 
+static void test_expand_no_split_keeps_one_value() {
+    ShellState st;
+    st.vars["LIST"] = "a b c";
+    // expandNoSplit is the assignment-RHS primitive: expands $ but never
+    // splits on whitespace, so `x=$LIST` gets the whole "a b c" as one value
+    // (unlike expandWords, which would split it into three).
+    assert(expandNoSplit("$LIST", st) == "a b c");
+}
+
+static void test_expand_no_split_double_quoted() {
+    ShellState st;
+    st.vars["NAME"] = "world";
+    assert(expandNoSplit("\x01" "hello $NAME" "\x01", st) == "hello world");
+}
+
+static void test_expand_no_split_single_quoted_literal() {
+    ShellState st;
+    st.vars["NAME"] = "world";
+    assert(expandNoSplit("\x02" "hello $NAME" "\x02", st) == "hello $NAME");
+}
+
 int main() {
     test_simple_var();
     test_braced_var();
@@ -122,5 +143,8 @@ int main() {
     test_tilde_slash_expands_to_home_subpath();
     test_tilde_mid_word_not_expanded();
     test_tilde_not_expanded_when_quoted();
+    test_expand_no_split_keeps_one_value();
+    test_expand_no_split_double_quoted();
+    test_expand_no_split_single_quoted_literal();
     std::cout << "all expand parameter-expansion tests passed\n";
 }
