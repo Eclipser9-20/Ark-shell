@@ -137,9 +137,27 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
 
     std::cout << prompt << std::flush;
 
+    // fish-style autosuggestion: the tail of the most recent history entry
+    // that starts with the current buffer, shown as dimmed ghost text after
+    // the cursor and accepted with Right-arrow / Ctrl-F / End. Empty if the
+    // buffer is empty or nothing in history extends it.
+    auto currentSuggestion = [&]() -> std::string {
+        if (buf.empty()) return "";
+        const auto& lines = history.lines();
+        for (int i = (int)lines.size() - 1; i >= 0; i--) {
+            if (lines[i].size() > buf.size() && lines[i].compare(0, buf.size(), buf) == 0)
+                return lines[i].substr(buf.size());
+        }
+        return "";
+    };
+
     auto redraw = [&]() {
         std::cout << "\r\x1b[K" << prompt << highlightLine(buf);
-        size_t back = buf.size() - cursor;
+        // Only offer a suggestion when the cursor is at the end of the line
+        // (fish behavior) -- otherwise ghost text mid-edit is confusing.
+        std::string sug = (cursor == buf.size()) ? currentSuggestion() : "";
+        if (!sug.empty()) std::cout << "\x1b[38;2;86;95;137m" << sug << "\x1b[0m"; // TokyoNight comment gray
+        size_t back = (buf.size() - cursor) + sug.size();
         if (back > 0) std::cout << "\x1b[" << back << "D";
         std::cout << std::flush;
     };
@@ -177,6 +195,11 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
         }
         if (c == 1) { cursor = 0; redraw(); continue; }            // Ctrl-A: start of line
         if (c == 5) { cursor = buf.size(); redraw(); continue; }   // Ctrl-E: end of line
+        if (c == 6) { // Ctrl-F: forward one char, or accept the autosuggestion at end of line
+            if (cursor < buf.size()) { cursor++; redraw(); }
+            else { std::string s = currentSuggestion(); if (!s.empty()) { buf += s; cursor = buf.size(); redraw(); } }
+            continue;
+        }
         if (c == 11) { // Ctrl-K: kill to end of line
             killBuffer = buf.substr(cursor);
             buf.erase(cursor);
@@ -347,7 +370,10 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
                 if (params.size() > 8) break; // sanity guard against a malformed/runaway sequence
             }
 
-            if (final == 'C' && params.empty() && cursor < buf.size()) { cursor++; redraw(); }
+            if (final == 'C' && params.empty()) { // Right: forward char, or accept autosuggestion at end
+                if (cursor < buf.size()) { cursor++; redraw(); }
+                else { std::string s = currentSuggestion(); if (!s.empty()) { buf += s; cursor = buf.size(); redraw(); } }
+            }
             else if (final == 'D' && params.empty() && cursor > 0) { cursor--; redraw(); }
             else if (final == 'C' && params == "1;3") { moveWordForward(buf, cursor); redraw(); }  // xterm Alt+Right
             else if (final == 'D' && params == "1;3") { moveWordBackward(buf, cursor); redraw(); } // xterm Alt+Left
