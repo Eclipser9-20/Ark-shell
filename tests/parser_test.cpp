@@ -29,8 +29,36 @@ static void test_redirects() {
     assert(cmd->redirects[2].kind == Redirect::Kind::ErrOut && cmd->redirects[2].target == "err.txt");
 }
 
+static void test_pipeline() {
+    auto root = parseSrc("cat file.txt | grep foo | wc -l");
+    Node* pipe = root->children[0].get();
+    assert(pipe->kind == NodeKind::Pipeline);
+    assert(pipe->children.size() == 3);
+    assert(pipe->children[0]->words[0] == "cat");
+    assert(pipe->children[1]->words[0] == "grep");
+    assert(pipe->children[2]->words[0] == "wc");
+}
+
+static void test_and_or_seq() {
+    auto root = parseSrc("a && b || c ; d");
+    assert(root->children.size() == 4);
+    assert(root->children[0]->joinOp == JoinOp::And);
+    assert(root->children[1]->joinOp == JoinOp::Or);
+    assert(root->children[2]->joinOp == JoinOp::Seq);
+    assert(root->children[3]->joinOp == JoinOp::None);
+}
+
+static void test_background() {
+    auto root = parseSrc("sleep 5 &");
+    Node* cmd = root->children[0].get();
+    assert(cmd->background == true);
+}
+
 int main() {
     test_simple_command();
     test_redirects();
+    test_pipeline();
+    test_and_or_seq();
+    test_background();
     std::cout << "all parser simple-command tests passed\n";
 }
