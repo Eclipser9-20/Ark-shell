@@ -32,11 +32,46 @@ static void test_unset_var_is_empty() {
     assert(expandWord("[$UNSET]", st) == "[]");
 }
 
+static void test_word_splitting() {
+    ShellState st;
+    st.vars["LIST"] = "a b  c";
+    auto words = expandWords({"echo", "$LIST"}, st);
+    // "echo" stays one word; "$LIST" expands then splits on IFS whitespace into 3
+    assert(words.size() == 4);
+    assert(words[0] == "echo" && words[1] == "a" && words[2] == "b" && words[3] == "c");
+}
+
+static void test_quoted_no_split_marker() {
+    ShellState st;
+    st.vars["LIST"] = "a b c";
+    // A word wrapped in the QUOTED marker (see expand.cpp) must NOT be split.
+    // NOTE: "\x01" "a b c" "\x01" (separate literals) is required here --
+    // "\x01a b c\x01" would parse as one \x hex escape "\x01a" (hex escapes
+    // greedily consume hex digits, and 'a' is a valid one), silently
+    // producing byte 0x1A instead of 0x01 followed by 'a'.
+    auto words = expandWords({"echo", "\x01" "a b c" "\x01"}, st);
+    assert(words.size() == 2);
+    assert(words[1] == "a b c");
+}
+
+static void test_command_substitution() {
+    ShellState st;
+    setCaptureHook([](const std::string& cmd) -> std::string {
+        assert(cmd == "echo hi");
+        return "hi\n";
+    });
+    auto words = expandWords({"echo", "$(echo hi)"}, st);
+    assert(words[1] == "hi"); // trailing newline stripped, then split (single word here)
+}
+
 int main() {
     test_simple_var();
     test_braced_var();
     test_default_expansion();
     test_length_expansion();
     test_unset_var_is_empty();
+    test_word_splitting();
+    test_quoted_no_split_marker();
+    test_command_substitution();
     std::cout << "all expand parameter-expansion tests passed\n";
 }
