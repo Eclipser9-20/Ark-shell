@@ -38,11 +38,41 @@ static void test_comment_stripped() {
     assert(toks.size() == 3); // echo, hi, End
 }
 
+static void test_operators() {
+    Lexer lex("a | b && c || d ; e & f > g >> h < i 2> j ( k )");
+    auto toks = lex.tokenize();
+    std::vector<TokKind> kinds;
+    for (auto& t : toks) kinds.push_back(t.kind);
+    std::vector<TokKind> expected = {
+        TokKind::Word, TokKind::Pipe, TokKind::Word, TokKind::And, TokKind::Word,
+        TokKind::Or, TokKind::Word, TokKind::Semi, TokKind::Word, TokKind::Amp,
+        TokKind::Word, TokKind::RedirOut, TokKind::Word, TokKind::RedirAppend,
+        TokKind::Word, TokKind::RedirIn, TokKind::Word, TokKind::RedirErrOut,
+        TokKind::Word, TokKind::LParen, TokKind::Word, TokKind::RParen, TokKind::End
+    };
+    assert(kinds == expected);
+}
+
+static void test_keywords() {
+    Lexer lex("if then else fi while do done for in case esac function");
+    auto toks = lex.tokenize();
+    std::vector<TokKind> expected = {
+        TokKind::If, TokKind::Then, TokKind::Else, TokKind::Fi, TokKind::While,
+        TokKind::Do, TokKind::Done, TokKind::For, TokKind::In, TokKind::Case,
+        TokKind::Esac, TokKind::Function, TokKind::End
+    };
+    std::vector<TokKind> kinds;
+    for (auto& t : toks) kinds.push_back(t.kind);
+    assert(kinds == expected);
+}
+
 int main() {
     test_simple_words();
     test_single_quotes_are_literal();
     test_double_quotes_allow_later_expansion_markers();
     test_backslash_escape();
     test_comment_stripped();
+    test_operators();
+    test_keywords();
     std::cout << "all lexer word/quote tests passed\n";
 }

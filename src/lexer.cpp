@@ -1,4 +1,16 @@
 #include "lexer.h"
+#include <unordered_map>
+
+static TokKind keywordKind(const std::string& w) {
+    static const std::unordered_map<std::string, TokKind> kw = {
+        {"if", TokKind::If}, {"then", TokKind::Then}, {"else", TokKind::Else},
+        {"fi", TokKind::Fi}, {"while", TokKind::While}, {"do", TokKind::Do},
+        {"done", TokKind::Done}, {"for", TokKind::For}, {"in", TokKind::In},
+        {"case", TokKind::Case}, {"esac", TokKind::Esac}, {"function", TokKind::Function},
+    };
+    auto it = kw.find(w);
+    return it != kw.end() ? it->second : TokKind::Word;
+}
 
 char Lexer::peek(size_t off) const {
     size_t p = pos_ + off;
@@ -57,7 +69,8 @@ Token Lexer::lexWord() {
         }
         out += advance();
     }
-    return Token{TokKind::Word, out, startLine, startCol};
+    TokKind kind = keywordKind(out);
+    return Token{kind, out, startLine, startCol};
 }
 
 std::vector<Token> Lexer::tokenize() {
@@ -71,14 +84,28 @@ std::vector<Token> Lexer::tokenize() {
             toks.push_back(Token{TokKind::Newline, "\n", l, c});
             continue;
         }
-        // Operators are recognized starting Task 3; word-terminator characters
-        // that aren't yet handled here simply fall through to lexWord's guard.
+        if (peek() == '2' && peek(1) == '>') {
+            int l = line_, c = col_;
+            advance(); advance();
+            toks.push_back(Token{TokKind::RedirErrOut, "2>", l, c});
+            continue;
+        }
         if (std::string("|&;<>()").find(peek()) != std::string::npos) {
-            // Placeholder single-char consumption until Task 3 adds real operator
-            // tokens; kept here only so tokenize() doesn't infinite-loop today.
             int l = line_, c = col_;
             char ch = advance();
-            toks.push_back(Token{TokKind::Word, std::string(1, ch), l, c});
+            TokKind kind;
+            std::string text(1, ch);
+            switch (ch) {
+                case '|': kind = (peek() == '|') ? (advance(), text += '|', TokKind::Or) : TokKind::Pipe; break;
+                case '&': kind = (peek() == '&') ? (advance(), text += '&', TokKind::And) : TokKind::Amp; break;
+                case ';': kind = (peek() == ';') ? (advance(), text += ';', TokKind::DSemi) : TokKind::Semi; break;
+                case '(': kind = TokKind::LParen; break;
+                case ')': kind = TokKind::RParen; break;
+                case '>': kind = (peek() == '>') ? (advance(), text += '>', TokKind::RedirAppend) : TokKind::RedirOut; break;
+                case '<': kind = TokKind::RedirIn; break;
+                default: kind = TokKind::Word; break;
+            }
+            toks.push_back(Token{kind, text, l, c});
             continue;
         }
         toks.push_back(lexWord());
