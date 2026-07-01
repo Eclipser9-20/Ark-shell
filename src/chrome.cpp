@@ -116,19 +116,26 @@ static std::string formatSession(double seconds) {
 
 namespace {
 
-// TokyoNight Night palette -- reusing the exact colors already established
-// in highlight.cpp's syntax highlighter (blue/purple/comment-gray), so the
-// pinned bars visually match the rest of the shell instead of introducing a
-// competing color scheme.
+// "Dark neon sign" palette, per feedback: less pink (purple's gone
+// entirely), rounded edges, blue/green/black/red kept dark rather than
+// blindingly bright. All chips now share ONE near-black fill (TokyoNight's
+// own bg_dark, #16161e -- a real, slightly-lighter-than-editor-bg tone
+// TokyoNight itself defines for status-line-style UI chrome, not a made-up
+// value) -- the "black" -- with each chip's icon+text glowing in a distinct
+// accent color instead of the chip itself being a bright color block. Blue,
+// green and red are the EXACT hexes already established elsewhere in this
+// codebase (blue matches highlight.cpp's Command color; green/red match
+// main.cpp's prompt success/fail arrow) rather than a new arbitrary "neon"
+// palette, so the whole shell still reads as one consistent theme.
+constexpr const char* BG_CHIP = "\x1b[48;2;22;22;30m";  // TokyoNight bg_dark (#16161e)
+constexpr const char* FG_CHIP = "\x1b[38;2;22;22;30m";  // same color, as foreground -- used to
+                                                         // draw the rounded caps below
 constexpr const char* FG_BLUE = "\x1b[38;2;122;162;247m";
-constexpr const char* BG_BLUE = "\x1b[48;2;122;162;247m";
-constexpr const char* FG_PURPLE = "\x1b[38;2;187;154;247m";
-constexpr const char* BG_PURPLE = "\x1b[48;2;187;154;247m";
-constexpr const char* FG_GRAY = "\x1b[38;2;86;95;137m";
-constexpr const char* BG_GRAY = "\x1b[48;2;86;95;137m";
-constexpr const char* FG_DARK = "\x1b[38;2;26;27;38m"; // TokyoNight bg color, used
-                                                        // as the readable text
-                                                        // color ON a colored chip
+constexpr const char* FG_GREEN = "\x1b[38;2;158;206;106m";
+constexpr const char* FG_RED = "\x1b[38;2;247;118;142m";
+constexpr const char* FG_INFO = "\x1b[38;2;192;202;245m"; // TokyoNight normal fg -- neutral
+                                                           // text for the user/session chip,
+                                                           // which doesn't need to "glow"
 constexpr const char* RESET = "\x1b[0m";
 constexpr const char* BG_DEFAULT = "\x1b[49m";
 
@@ -139,22 +146,38 @@ constexpr const char* ICON_FOLDER = "\xef\x81\xbc"; // nf-fa-folder_open (U+F07C
 constexpr const char* ICON_BRANCH = "\xef\x84\xa6"; // nf-fa-code_fork, git-branch stand-in (U+F126)
 constexpr const char* ICON_CLOCK = "\xef\x80\x97";  // nf-fa-clock_o (U+F017)
 constexpr const char* ICON_USER = "\xef\x80\x87";   // nf-fa-user (U+F007)
-constexpr const char* ICON_CPU = "\xef\x8b\x9b";     // nf-fa-microchip (U+F2DB)
-constexpr const char* SEP_RIGHT = "\xee\x82\xb0";    // powerline solid right arrow (U+E0B0)
-constexpr const char* SEP_LEFT = "\xee\x82\xb2";     // powerline solid left arrow, mirrored (U+E0B2)
+constexpr const char* ICON_CPU = "\xef\x8b\x9b";    // nf-fa-microchip (U+F2DB)
+// Rounded powerline dividers (as opposed to the hard-triangle E0B0/E0B2 used
+// in the first pass) -- these render as a solid semicircle bump, giving each
+// chip a pill/capsule shape instead of a sharp-cornered block.
+constexpr const char* ROUND_LEFT_CAP = "\xee\x82\xb6";  // U+E0B6, opens a pill: "("
+constexpr const char* ROUND_RIGHT_CAP = "\xee\x82\xb4"; // U+E0B4, closes a pill: ")"
 
-// A colored "chip": bg/fg wrap `text` with one padding space on each side.
-// `visibleWidth` (the on-screen column count of `text`) is tracked
-// separately from ansi.size(), since `text` mixes 3-byte UTF-8 icon glyphs
-// (1 display column each) with ASCII and ANSI color codes (0 display
-// columns) -- byte length would badly overcount.
+// A rounded "pill": a BG_CHIP-filled capsule with a distinct fg accent color
+// for its icon+text, opened/closed with the rounded caps above (drawn with
+// fg=BG_CHIP's own color against the surrounding default background, which
+// is what actually produces the rounded-bump shape). `visibleWidth` (the
+// on-screen column count of `text`) is tracked separately from the ansi
+// string's byte length, since `text` mixes 3-byte UTF-8 icon glyphs (1
+// display column each) with ASCII and ANSI color codes (0 display columns).
 struct Chip {
     std::string ansi;
-    int width;
+    int width; // includes both rounded caps + the padding spaces inside them
 };
 
-Chip makeChip(const char* bg, const char* fg, const std::string& text, int visibleWidth) {
-    return {std::string(bg) + fg + " " + text + " ", visibleWidth + 2};
+Chip makePill(const char* accentFg, const std::string& text, int visibleWidth) {
+    std::string s;
+    s += BG_DEFAULT;
+    s += FG_CHIP;
+    s += ROUND_LEFT_CAP; // opening rounded cap, against the surrounding default bg
+    s += BG_CHIP;
+    s += accentFg;
+    s += " " + text + " ";
+    s += BG_DEFAULT;
+    s += FG_CHIP;
+    s += ROUND_RIGHT_CAP; // closing rounded cap
+    s += RESET;
+    return {s, visibleWidth + 4}; // +2 padding spaces, +2 rounded caps
 }
 
 } // namespace
@@ -164,41 +187,35 @@ void paintChrome(const std::string& cwd, const std::string& gitBranch,
     int rows, cols;
     if (!getTerminalSize(rows, cols) || rows <= 2) return;
 
-    // ---- top bar: [folder + cwd] -> [branch icon + branch] -> default ----
+    // ---- top bar: [dir pill]  [branch pill] ----
+    // A gap of one plain default-bg space separates adjacent pills, rather
+    // than the earlier design's continuously-flowing colored blocks -- once
+    // every pill shares the same dark fill, touching pills would have no
+    // visible seam at all, so a gap plus rounded caps on each end is what
+    // actually reads as distinct rounded chips.
+    int pillOverhead = 1 + 1 + 4; // icon + space-after-icon + 2 padding + 2 rounded caps
     std::string dirText = cwd;
     int dirVisible = (int)cwd.size();
-    int chipOverhead = 1 + 1 + 1 + 2; // icon + space-after-icon + leading/trailing chip spaces
-    if (dirVisible + chipOverhead > cols) {
-        int room = cols - chipOverhead;
+    if (dirVisible + 1 + pillOverhead > cols) {
+        int room = cols - pillOverhead - 1;
         if (room < 0) room = 0;
         // Keep the tail of the path (e.g. ".../ark-terminal") -- the most
         // specific, most useful part when truncated -- rather than the head.
         dirText = (int)cwd.size() > room ? cwd.substr(cwd.size() - room) : cwd;
         dirVisible = (int)dirText.size();
     }
-    Chip dirChip = makeChip(BG_BLUE, FG_DARK, std::string(ICON_FOLDER) + " " + dirText, dirVisible + 2);
+    Chip dirPill = makePill(FG_BLUE, std::string(ICON_FOLDER) + " " + dirText, 1 + 1 + dirVisible);
 
-    std::string topLine = dirChip.ansi;
-    int topWidth = dirChip.width;
-    bool showBranch = !gitBranch.empty() && topWidth + 1 + (int)gitBranch.size() + chipOverhead <= cols;
-    if (showBranch) {
-        topLine += FG_BLUE;
-        topLine += BG_PURPLE;
-        topLine += SEP_RIGHT; // arrow: blue segment exiting into purple
-        Chip branchChip = makeChip(BG_PURPLE, FG_DARK, std::string(ICON_BRANCH) + " " + gitBranch,
-                                    (int)gitBranch.size() + 2);
-        topLine += branchChip.ansi;
-        topLine += FG_PURPLE;
-        topLine += BG_DEFAULT;
-        topLine += SEP_RIGHT; // arrow: purple segment exiting into blank
-    } else {
-        topLine += FG_BLUE;
-        topLine += BG_DEFAULT;
-        topLine += SEP_RIGHT; // arrow: blue segment exiting into blank (no repo)
+    std::string topLine = dirPill.ansi;
+    int topWidth = dirPill.width;
+    if (!gitBranch.empty() && topWidth + 1 + (int)gitBranch.size() + pillOverhead <= cols) {
+        Chip branchPill = makePill(FG_GREEN, std::string(ICON_BRANCH) + " " + gitBranch,
+                                    1 + 1 + (int)gitBranch.size());
+        topLine += " ";
+        topLine += branchPill.ansi;
     }
-    topLine += RESET;
 
-    // ---- bottom bar: [user + session] ... padding ... [cpu + mem] ----
+    // ---- bottom bar: [user+session pill] ... padding ... [cpu+mem pill] ----
     char host[256] = {0};
     gethostname(host, sizeof(host) - 1);
     const char* user = getenv("USER");
@@ -207,30 +224,20 @@ void paintChrome(const std::string& cwd, const std::string& gitBranch,
 
     std::string leftText = std::string(ICON_USER) + " " + userHost + "  " + ICON_CLOCK + " " + sessionStr;
     int leftVisible = 1 + 1 + (int)userHost.size() + 2 + 1 + 1 + (int)sessionStr.size();
-    Chip leftChip = makeChip(BG_GRAY, FG_DARK, leftText, leftVisible);
+    Chip leftPill = makePill(FG_INFO, leftText, leftVisible);
 
     char hwbuf[64];
     snprintf(hwbuf, sizeof(hwbuf), "%3.0f%%  mem %.1f/%.1fG", hw.cpuPercent, hw.memUsedGB, hw.memTotalGB);
     std::string hwStr = hwbuf;
     std::string rightText = std::string(ICON_CPU) + " " + hwStr;
     int rightVisible = 1 + 1 + (int)hwStr.size();
-    Chip rightChip = makeChip(BG_BLUE, FG_DARK, rightText, rightVisible);
+    Chip rightPill = makePill(FG_RED, rightText, rightVisible);
 
-    int usedWidth = leftChip.width + 1 /* left arrow */ + 1 /* right arrow */ + rightChip.width;
+    int usedWidth = leftPill.width + rightPill.width;
     int pad = cols - usedWidth;
     if (pad < 1) pad = 1;
 
-    std::string bottomLine = leftChip.ansi;
-    bottomLine += FG_GRAY;
-    bottomLine += BG_DEFAULT;
-    bottomLine += SEP_RIGHT; // arrow: gray segment exiting into blank
-    bottomLine += RESET;
-    bottomLine += std::string(pad, ' ');
-    bottomLine += FG_BLUE;
-    bottomLine += BG_DEFAULT;
-    bottomLine += SEP_LEFT; // arrow: blue segment entering from blank (right-aligned)
-    bottomLine += rightChip.ansi;
-    bottomLine += RESET;
+    std::string bottomLine = leftPill.ansi + std::string(pad, ' ') + rightPill.ansi;
 
     // NOTE: no save/restore-cursor here anymore -- see reassertChrome() for
     // why. This function only ever writes the two chrome rows; whoever
