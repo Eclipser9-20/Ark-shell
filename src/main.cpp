@@ -1,9 +1,11 @@
 #include "exec.h"
 #include "expand.h"
+#include "jobs.h"
 #include "lexer.h"
 #include "parser.h"
 #include "shell_state.h"
 #include <climits>
+#include <csignal>
 #include <iostream>
 #include <iterator>
 #include <string>
@@ -11,6 +13,20 @@
 
 int main() {
     ShellState state;
+    JobTable jobTable;
+    state.jobs = &jobTable;
+
+    installSigchldHandler();
+    // A background job's own process group must not be stopped just because
+    // it tries terminal I/O -- POSIX delivers SIGTTOU/SIGTTIN to whichever
+    // process group ISN'T in the foreground when it touches the terminal.
+    // Ignoring these in the shell itself keeps the shell from being stopped
+    // by its own bookkeeping (e.g. tcsetpgrp calls); actual background jobs
+    // still get the standard stop behavior via their own (non-ignored,
+    // inherited-then-reset-on-exec) disposition.
+    signal(SIGTTOU, SIG_IGN);
+    signal(SIGTTIN, SIG_IGN);
+
     char buf[PATH_MAX];
     if (::getcwd(buf, sizeof(buf))) state.cwd = buf;
 

@@ -35,6 +35,17 @@ void installSigchldHandler() {
     sigaction(SIGCHLD, &sa, nullptr);
 }
 
+BlockSigchld::BlockSigchld() {
+    sigset_t mask;
+    sigemptyset(&mask);
+    sigaddset(&mask, SIGCHLD);
+    sigprocmask(SIG_BLOCK, &mask, &old_);
+}
+
+BlockSigchld::~BlockSigchld() {
+    sigprocmask(SIG_SETMASK, &old_, nullptr);
+}
+
 int JobTable::add(pid_t pgid, std::vector<pid_t> pids, std::string cmdline) {
     int id = nextId_++;
     jobs_.push_back(Job{id, pgid, std::move(pids), std::move(cmdline), Job::State::Running});

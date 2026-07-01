@@ -1,4 +1,5 @@
 #pragma once
+#include "jobs.h"
 #include "shell_state.h"
 #include <string>
 #include <unordered_map>

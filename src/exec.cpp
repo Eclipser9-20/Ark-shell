@@ -110,6 +110,11 @@ static int runPipelineStage(Node* cmd, ShellState& state, int inFd, int outFd, p
 }
 
 static int runPipeline(Node* pipeline, ShellState& state) {
+    // Guards the whole spawn-loop + wait-loop below: without this, the
+    // global SIGCHLD handler could reap a fast-exiting stage before this
+    // function's own waitpid() calls get to it (same race as runCommand).
+    BlockSigchld guard;
+
     size_t n = pipeline->children.size();
     std::vector<pid_t> pids(n, -1);
     int prevReadFd = -1;
@@ -140,8 +145,14 @@ static int runPipeline(Node* pipeline, ShellState& state) {
 
     pid_t jobPgid = pids.empty() ? -1 : pids[0];
 
+    // A backgrounded pipeline is executed inside its own forked wrapper
+    // process (see execNode's central background handling) -- that wrapper
+    // is not the foreground job, so it must NOT try to grab the controlling
+    // terminal for its sub-stages. Only foreground pipelines do the
+    // tcsetpgrp handoff; a background one still waits on its own stages
+    // (acting as their supervisor) but skips terminal control entirely.
     pid_t shellPgid = getpgrp();
-    if (jobPgid > 0) tcsetpgrp(STDIN_FILENO, jobPgid);
+    if (!pipeline->background && jobPgid > 0) tcsetpgrp(STDIN_FILENO, jobPgid);
 
     int status = 0;
     for (pid_t pid : pids) {
@@ -151,7 +162,7 @@ static int runPipeline(Node* pipeline, ShellState& state) {
         status = WIFEXITED(st) ? WEXITSTATUS(st) : 1; // pipeline status = last stage's
     }
 
-    tcsetpgrp(STDIN_FILENO, shellPgid);
+    if (!pipeline->background) tcsetpgrp(STDIN_FILENO, shellPgid);
     return status;
 }
 
@@ -184,7 +195,13 @@ static int runCommand(Node* cmd, ShellState& state) {
     }
     if (it != reg.end()) {
         // Builtin with redirects: fork so the redirect doesn't leak into the
-        // interactive shell's own stdout/stdin.
+        // interactive shell's own stdout/stdin. BlockSigchld guards the
+        // whole fork+wait sequence: without it, the global SIGCHLD handler
+        // (installed for background-job tracking) can reap this specific
+        // child first, making our own waitpid() below return ECHILD --
+        // silently leaving `status` at its zero-initialized value, which
+        // WIFEXITED/WEXITSTATUS then misreport as "exited successfully".
+        BlockSigchld guard;
         pid_t pid = fork();
         if (pid == 0) {
             applyRedirectsInChild(cmd->redirects);
@@ -206,6 +223,8 @@ static int runCommand(Node* cmd, ShellState& state) {
     posix_spawn_file_actions_init(&actions);
     applyRedirectsFileActions(cmd->redirects, actions);
 
+    // Same SIGCHLD race as above, guarded the same way.
+    BlockSigchld guard;
     pid_t pid;
     int rc = posix_spawnp(&pid, cargv[0], &actions, nullptr, cargv.data(), environ);
     posix_spawn_file_actions_destroy(&actions);
@@ -278,7 +297,7 @@ static int runList(Node* list, ShellState& state) {
     return status;
 }
 
-int execNode(Node* node, ShellState& state) {
+static int execNodeDispatch(Node* node, ShellState& state) {
     switch (node->kind) {
         case NodeKind::List:
             return runList(node, state);
@@ -300,4 +319,46 @@ int execNode(Node* node, ShellState& state) {
             std::cerr << "ark: internal error: unimplemented node kind\n";
             return 1;
     }
+}
+
+static std::string buildCmdline(Node* node) {
+    std::string cmdline;
+    auto appendWords = [&](Node* cmd) {
+        for (auto& w : cmd->words) { cmdline += w; cmdline += " "; }
+    };
+    if (node->kind == NodeKind::Pipeline) {
+        for (auto& child : node->children) appendWords(child.get());
+    } else {
+        appendWords(node);
+    }
+    return cmdline;
+}
+
+// Background (`&`) is valid on any Command or Pipeline, at any nesting depth
+// (POSIX allows it anywhere a pipeline appears, e.g. inside an if-branch) --
+// handled centrally here so every node kind gets it uniformly instead of
+// duplicating background logic in runCommand AND runPipeline separately.
+int execNode(Node* node, ShellState& state) {
+    if (node->background && (node->kind == NodeKind::Command || node->kind == NodeKind::Pipeline)) {
+        pid_t pid = fork();
+        if (pid == 0) {
+            setpgid(0, 0); // new process group, this child is its own leader
+            int rc = execNodeDispatch(node, state); // NOT execNode -- avoids
+                                                      // re-checking background
+                                                      // on this same node and
+                                                      // forking again
+            std::cout.flush();
+            _exit(rc);
+        }
+        setpgid(pid, pid);
+        if (state.jobs) state.jobs->add(pid, {pid}, buildCmdline(node));
+        // Real shells only print the "[1] <pid>" job-start announcement in
+        // interactive/monitor mode -- non-interactive scripts stay silent.
+        // Since the pid is non-deterministic and phase 1 has no interactive
+        // mode wired up yet (Task 19), staying silent here is both correct
+        // shell behavior and keeps this testable.
+        return 0; // background jobs report success immediately; real status
+                  // comes later via `wait`/`jobs`
+    }
+    return execNodeDispatch(node, state);
 }

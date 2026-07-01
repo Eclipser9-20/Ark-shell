@@ -1,7 +1,10 @@
 #include "builtins.h"
 #include <climits>
+#include <csignal>
 #include <cstdlib>
 #include <iostream>
+#include <sys/wait.h>
+#include <termios.h>
 #include <unistd.h>
 
 static int b_cd(const std::vector<std::string>& argv, ShellState& state) {
@@ -73,10 +76,46 @@ static int b_read(const std::vector<std::string>& argv, ShellState& state) {
     return 0;
 }
 
+static int b_jobs(const std::vector<std::string>&, ShellState& state) {
+    if (!state.jobs) return 0;
+    state.jobs->drainSignalQueue();
+    for (Job* j : state.jobs->all()) {
+        const char* stateName = j->state == Job::State::Running ? "Running"
+                               : j->state == Job::State::Stopped ? "Stopped" : "Done";
+        std::cout << "[" << j->id << "] " << stateName << "  " << j->cmdline << "\n";
+    }
+    return 0;
+}
+
+static int b_fg(const std::vector<std::string>& argv, ShellState& state) {
+    if (!state.jobs || argv.size() < 2) return 1;
+    Job* j = state.jobs->find(std::atoi(argv[1].c_str()));
+    if (!j) { std::cerr << "fg: no such job\n"; return 1; }
+    BlockSigchld guard; // same reap-race guard as exec.cpp's foreground waits
+    pid_t shellPgid = getpgrp();
+    tcsetpgrp(STDIN_FILENO, j->pgid);
+    kill(-j->pgid, SIGCONT);
+    int status = 0;
+    for (pid_t pid : j->pids) waitpid(pid, &status, 0);
+    tcsetpgrp(STDIN_FILENO, shellPgid);
+    state.jobs->remove(j->id);
+    return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+}
+
+static int b_bg(const std::vector<std::string>& argv, ShellState& state) {
+    if (!state.jobs || argv.size() < 2) return 1;
+    Job* j = state.jobs->find(std::atoi(argv[1].c_str()));
+    if (!j) { std::cerr << "bg: no such job\n"; return 1; }
+    kill(-j->pgid, SIGCONT);
+    j->state = Job::State::Running;
+    return 0;
+}
+
 const std::unordered_map<std::string, BuiltinFn>& builtinRegistry() {
     static const std::unordered_map<std::string, BuiltinFn> reg = {
         {"cd", b_cd}, {"exit", b_exit}, {"pwd", b_pwd}, {"echo", b_echo},
         {"export", b_export}, {"unset", b_unset}, {"type", b_type}, {"read", b_read},
+        {"jobs", b_jobs}, {"fg", b_fg}, {"bg", b_bg},
     };
     return reg;
 }
