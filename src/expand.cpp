@@ -51,6 +51,16 @@ static std::string expandOne(const std::string& src, size_t& i, const ShellState
         while (!output.empty() && output.back() == '\n') output.pop_back();
         return output;
     }
+    if (i < src.size() && std::isdigit((unsigned char)src[i])) {
+        size_t j = i;
+        while (j < src.size() && std::isdigit((unsigned char)src[j])) j++;
+        int idx = std::stoi(src.substr(i, j - i));
+        i = j;
+        if (!state.argStack.empty() && idx >= 1 && (size_t)idx <= state.argStack.back().size()) {
+            return state.argStack.back()[idx - 1];
+        }
+        return "";
+    }
     size_t j = i;
     while (j < src.size() && isNameChar(src[j])) j++;
     std::string name = src.substr(i, j - i);

@@ -136,9 +136,27 @@ static int runPipeline(Node* pipeline, ShellState& state) {
     return status;
 }
 
+static int runFunctionDef(Node* fn, ShellState& state) {
+    state.functions[fn->funcName] = fn->funcBody.get();
+    return 0;
+}
+
+static int callFunction(Node* body, const std::vector<std::string>& argv, ShellState& state) {
+    std::vector<std::string> params(argv.begin() + 1, argv.end()); // argv[0] is the function name
+    state.argStack.push_back(params);
+    int status = execNode(body, state);
+    state.argStack.pop_back();
+    return status;
+}
+
 static int runCommand(Node* cmd, ShellState& state) {
     auto argv = expandWords(cmd->words, state);
     if (argv.empty()) return 0;
+
+    auto fnIt = state.functions.find(argv[0]);
+    if (fnIt != state.functions.end()) {
+        return callFunction(fnIt->second, argv, state);
+    }
 
     auto& reg = builtinRegistry();
     auto it = reg.find(argv[0]);
@@ -257,8 +275,9 @@ int execNode(Node* node, ShellState& state) {
             return runFor(node, state);
         case NodeKind::Case:
             return runCase(node, state);
+        case NodeKind::FunctionDef:
+            return runFunctionDef(node, state);
         default:
-            // FunctionDef lands here until Task 16.
             std::cerr << "ark: internal error: unimplemented node kind\n";
             return 1;
     }
