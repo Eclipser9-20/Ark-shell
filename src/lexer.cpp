@@ -51,6 +51,7 @@ Token Lexer::lexWord() {
         }
         if (c == '"') {
             advance();
+            out += '\x01';
             while (!atEnd() && peek() != '"') {
                 if (peek() == '\\' && (peek(1) == '"' || peek(1) == '\\' || peek(1) == '$')) {
                     advance();
@@ -59,6 +60,7 @@ Token Lexer::lexWord() {
                     out += advance();
                 }
             }
+            out += '\x01';
             if (!atEnd()) advance();
             continue;
         }

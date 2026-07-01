@@ -19,11 +19,13 @@ static void test_single_quotes_are_literal() {
 }
 
 static void test_double_quotes_allow_later_expansion_markers() {
-    // Double-quoted text is stored as-is (with the quotes stripped);
-    // $ substitution markers are resolved later by the Expander (Task 9/10).
+    // Double-quoted text is wrapped in \x01 sentinels (with the quotes
+    // themselves stripped) so the Expander (Task 10/12) can tell a quoted
+    // word apart from an unquoted one and skip IFS word-splitting on it --
+    // $ substitution markers inside are still resolved later by the Expander.
     Lexer lex("echo \"a $X b\"");
     auto toks = lex.tokenize();
-    assert(toks[1].text == "a $X b");
+    assert(toks[1].text == "\x01" "a $X b" "\x01");
 }
 
 static void test_backslash_escape() {
