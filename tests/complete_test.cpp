@@ -88,6 +88,32 @@ static void test_is_directory() {
     system("rm -rf /tmp/ark_complete_isdir_test");
 }
 
+static void test_complete_in_search_dirs() {
+    system("rm -rf /tmp/ark_sd_a /tmp/ark_sd_b");
+    system("mkdir -p /tmp/ark_sd_a /tmp/ark_sd_b");
+    system("printf '#!/bin/sh\\n' > /tmp/ark_sd_a/programfrombin; chmod +x /tmp/ark_sd_a/programfrombin");
+    std::ofstream("/tmp/ark_sd_b/notes.txt").close();
+    setenv("ARK_SEARCH_DIRS", "/tmp/ark_sd_a:/tmp/ark_sd_b", 1);
+
+    // Executable match (execOnly) -> found by its command prefix, full path.
+    auto execHits = completeInSearchDirs("programfro", true);
+    assert(execHits.size() == 1 && execHits[0] == "/tmp/ark_sd_a/programfrombin");
+
+    // Non-exec file is excluded when execOnly is set...
+    assert(completeInSearchDirs("notes", true).empty());
+    // ...but included when execOnly is false (path-arg completion).
+    auto fileHits = completeInSearchDirs("notes", false);
+    assert(fileHits.size() == 1 && fileHits[0] == "/tmp/ark_sd_b/notes.txt");
+
+    // Empty prefix never dumps whole directories.
+    assert(completeInSearchDirs("", false).empty());
+
+    unsetenv("ARK_SEARCH_DIRS");
+    // With no ARK_SEARCH_DIRS set, cross-dir search is a no-op.
+    assert(completeInSearchDirs("programfro", true).empty());
+    system("rm -rf /tmp/ark_sd_a /tmp/ark_sd_b");
+}
+
 int main() {
     test_word_under_cursor_simple();
     test_word_under_cursor_mid_word();
@@ -101,5 +127,6 @@ int main() {
     test_complete_path_in_temp_dir();
     test_complete_command_finds_builtins();
     test_is_directory();
+    test_complete_in_search_dirs();
     std::cout << "all complete word/position tests passed\n";
 }

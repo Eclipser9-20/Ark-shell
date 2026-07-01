@@ -37,3 +37,10 @@ std::vector<std::string> completeCommand(const std::string& partial);
 // True if `path` (after expanding a leading '~' via $HOME) is a directory.
 // Used to decide whether a completed path should get a trailing '/' or ' '.
 bool isDirectory(const std::string& path);
+
+// Cross-directory completion: searches each dir in $ARK_SEARCH_DIRS (colon-
+// separated, ~ expanded) for entries starting with `prefix`, returning their
+// home-abbreviated full paths. execOnly restricts to executables. This is
+// what lets a program in ~/bin complete from any working directory. Merged
+// into completeCommand()/completePath() results; also usable directly.
+std::vector<std::string> completeInSearchDirs(const std::string& prefix, bool execOnly);

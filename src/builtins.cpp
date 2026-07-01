@@ -2,7 +2,9 @@
 #include <climits>
 #include <csignal>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
@@ -95,6 +97,56 @@ static int b_popd(const std::vector<std::string>&, ShellState& state) {
 static int b_dirs(const std::vector<std::string>&, ShellState& state) {
     printDirStack(state);
     return 0;
+}
+
+// Opens ~/.config/ark/ark.config in an editor. Prefers Pistin (Gideon's
+// terminal IDE), then $EDITOR, then vi -- so the config is edited in the
+// intended tool but still works on a bare box. Creates the file (with a
+// commented template) if it doesn't exist yet, so the editor always opens
+// something. Runs the editor as a normal foreground child.
+static int b_ark_settings(const std::vector<std::string>&, ShellState&) {
+    const char* home = getenv("HOME");
+    std::string dir = std::string(home ? home : "") + "/.config/ark";
+    std::string cfg = dir + "/ark.config";
+
+    ::mkdir((std::string(home ? home : "") + "/.config").c_str(), 0755);
+    ::mkdir(dir.c_str(), 0755);
+    struct stat st;
+    if (stat(cfg.c_str(), &st) != 0) {
+        std::ofstream f(cfg);
+        f << "# ark.config -- sourced at startup (interactive sessions).\n"
+             "# Aliases, exports, and functions here persist across sessions.\n"
+             "#\n"
+             "# Cross-directory completion: list dirs to search from anywhere\n"
+             "# (a program in ~/bin then completes even from ~/projects):\n"
+             "# export ARK_SEARCH_DIRS=\"$HOME/bin:$HOME/projects\"\n"
+             "#\n"
+             "# alias ll='ls -la'\n"
+             "# export EDITOR=pistin\n";
+    }
+
+    std::string editor;
+    if (access("/usr/local/bin/pistin", X_OK) == 0) editor = "/usr/local/bin/pistin";
+    else {
+        std::string p = std::string(home ? home : "") + "/Pistin/pistin";
+        if (access(p.c_str(), X_OK) == 0) editor = p;
+    }
+    if (editor.empty()) { const char* e = getenv("EDITOR"); editor = (e && *e) ? e : "vi"; }
+
+    BlockSigchld guard;
+    pid_t pid = fork();
+    if (pid == 0) {
+        signal(SIGINT, SIG_DFL);
+        signal(SIGTSTP, SIG_DFL);
+        signal(SIGTTOU, SIG_DFL);
+        signal(SIGTTIN, SIG_DFL);
+        execlp(editor.c_str(), editor.c_str(), cfg.c_str(), (char*)nullptr);
+        std::cerr << "ark-settings: could not launch " << editor << "\n";
+        _exit(127);
+    }
+    int status = 0;
+    waitpidRetry(pid, &status, 0);
+    return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
 }
 
 static int b_pwd(const std::vector<std::string>&, ShellState& state) {
@@ -246,6 +298,7 @@ const std::unordered_map<std::string, BuiltinFn>& builtinRegistry() {
         {"jobs", b_jobs}, {"fg", b_fg}, {"bg", b_bg},
         {"alias", b_alias}, {"unalias", b_unalias},
         {"pushd", b_pushd}, {"popd", b_popd}, {"dirs", b_dirs},
+        {"ark-settings", b_ark_settings},
     };
     return reg;
 }

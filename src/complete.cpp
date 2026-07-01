@@ -66,6 +66,58 @@ static std::string expandHome(const std::string& path) {
     return path;
 }
 
+// Reverse of expandHome: rewrite an absolute path under $HOME back to ~/...
+// so completions display as "~/bin/foo" rather than "/Users/you/bin/foo".
+static std::string abbreviateHome(const std::string& path) {
+    const char* home = getenv("HOME");
+    if (home) {
+        std::string h = home;
+        if (path.rfind(h, 0) == 0 && (path.size() == h.size() || path[h.size()] == '/'))
+            return "~" + path.substr(h.size());
+    }
+    return path;
+}
+
+// Cross-directory completion (zsh/fish-style "find it wherever it lives"):
+// searches every directory listed in $ARK_SEARCH_DIRS (colon-separated, ~
+// expanded) for entries whose name starts with `prefix`, returning their FULL
+// (home-abbreviated) paths -- so typing `programfro` in ~/projects can
+// complete to `~/bin/programfrombin`. Set the list in ark.config, e.g.
+// `export ARK_SEARCH_DIRS="$HOME/bin:$HOME/projects"`. Empty prefix returns
+// nothing (don't dump whole directories). execOnly restricts to executables
+// (for command-position completion).
+std::vector<std::string> completeInSearchDirs(const std::string& prefix, bool execOnly) {
+    std::vector<std::string> results;
+    if (prefix.empty()) return results;
+    const char* sd = getenv("ARK_SEARCH_DIRS");
+    if (!sd) return results;
+    std::string dirs = sd;
+    size_t pos = 0;
+    while (pos <= dirs.size()) {
+        size_t colon = dirs.find(':', pos);
+        std::string dir = (colon == std::string::npos) ? dirs.substr(pos) : dirs.substr(pos, colon - pos);
+        if (!dir.empty()) {
+            std::string real = expandHome(dir);
+            DIR* d = opendir(real.c_str());
+            if (d) {
+                struct dirent* e;
+                while ((e = readdir(d)) != nullptr) {
+                    std::string name = e->d_name;
+                    if (name == "." || name == "..") continue;
+                    if (name.rfind(prefix, 0) != 0) continue;
+                    std::string full = real + "/" + name;
+                    if (execOnly && access(full.c_str(), X_OK) != 0) continue;
+                    results.push_back(abbreviateHome(full));
+                }
+                closedir(d);
+            }
+        }
+        if (colon == std::string::npos) break;
+        pos = colon + 1;
+    }
+    return results;
+}
+
 bool isDirectory(const std::string& path) {
     struct stat st;
     return stat(expandHome(path).c_str(), &st) == 0 && S_ISDIR(st.st_mode);
@@ -98,7 +150,14 @@ std::vector<std::string> completePath(const std::string& partial) {
         }
     }
     closedir(d);
+    // For a bare name (no slash typed), also search the configured cross-dir
+    // list so a file/program in ~/bin etc. can complete from anywhere.
+    if (slash == std::string::npos) {
+        auto extra = completeInSearchDirs(prefix, /*execOnly=*/false);
+        results.insert(results.end(), extra.begin(), extra.end());
+    }
     std::sort(results.begin(), results.end());
+    results.erase(std::unique(results.begin(), results.end()), results.end());
     return results;
 }
 
@@ -133,6 +192,9 @@ std::vector<std::string> completeCommand(const std::string& partial) {
             pos = colon + 1;
         }
     }
+
+    auto extra = completeInSearchDirs(partial, /*execOnly=*/true);
+    results.insert(results.end(), extra.begin(), extra.end());
 
     std::sort(results.begin(), results.end());
     results.erase(std::unique(results.begin(), results.end()), results.end());
