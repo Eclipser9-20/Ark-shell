@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <fstream>
 #include <iostream>
 #include <iterator>
 #include <string>
@@ -59,6 +60,33 @@ static void mkdirRecursive(const std::string& path) {
             std::string prefix = path.substr(0, i);
             if (!prefix.empty()) ::mkdir(prefix.c_str(), 0755); // EEXIST is fine, ignored
         }
+    }
+}
+
+// Sources ~/.config/ark/ark.config at startup (interactive mode only, like
+// bash's .bashrc / zsh's .zshrc): reads the whole file and runs it through
+// ark's own lexer/parser/exec in the current session's state, so aliases,
+// exported vars, and functions defined there persist into the session. A
+// missing or empty file is a silent no-op; a syntax/runtime error is reported
+// but never fatal (a broken config shouldn't stop you getting a shell). The
+// parsed AST is retained in `astRoots` since it may define functions whose
+// bodies must outlive this call.
+static void sourceConfig(const std::string& path, ShellState& state,
+                          std::vector<std::unique_ptr<Node>>& astRoots) {
+    std::ifstream f(path);
+    if (!f.is_open()) return;
+    std::string source((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    if (source.empty()) return;
+    try {
+        Lexer lex(source);
+        Parser parser(lex.tokenize());
+        auto ast = parser.parse();
+        execNode(ast.get(), state);
+        astRoots.push_back(std::move(ast));
+    } catch (const ParseError& e) {
+        std::cerr << "ark: ark.config: parse error at line " << e.line << ": " << e.what() << "\n";
+    } catch (const std::exception& e) {
+        std::cerr << "ark: ark.config: " << e.what() << "\n";
     }
 }
 
@@ -275,6 +303,12 @@ int main() {
                                                   // ONLY statements that define a
                                                   // function get pushed here, see
                                                   // containsFunctionDef() above
+
+    // Source the user config now that state/history/chrome are set up but
+    // before the first prompt -- so its aliases/exports/functions are live for
+    // the very first command typed.
+    sourceConfig(histDir + "/ark.config", state, astRoots);
+
     std::string pending;
     bool continuing = false;
 
