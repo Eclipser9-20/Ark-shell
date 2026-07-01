@@ -1,11 +1,13 @@
 #include "exec.h"
 #include "builtins.h"
 #include "expand.h"
+#include "jobs.h"
 #include <cstring>
 #include <fcntl.h>
 #include <iostream>
 #include <spawn.h>
 #include <sys/wait.h>
+#include <termios.h>
 #include <unistd.h>
 #include <vector>
 
@@ -122,9 +124,24 @@ static int runPipeline(Node* pipeline, ShellState& state) {
 
         runPipelineStage(pipeline->children[i].get(), state, inFd, outFd, pids[i]);
 
+        // All stages share one process group (the first stage's pid is the
+        // group leader). Both parent and child call setpgid on the same
+        // target -- the standard double-call pattern that closes the race
+        // where the parent might hand the terminal to the group before the
+        // child has actually joined it.
+        if (pids[i] > 0) {
+            pid_t pgid = pids[0];
+            setpgid(pids[i], pgid);
+        }
+
         if (prevReadFd != -1) close(prevReadFd);
         if (hasNext) { close(pipeFds[1]); prevReadFd = pipeFds[0]; }
     }
+
+    pid_t jobPgid = pids.empty() ? -1 : pids[0];
+
+    pid_t shellPgid = getpgrp();
+    if (jobPgid > 0) tcsetpgrp(STDIN_FILENO, jobPgid);
 
     int status = 0;
     for (pid_t pid : pids) {
@@ -133,6 +150,8 @@ static int runPipeline(Node* pipeline, ShellState& state) {
         waitpid(pid, &st, 0);
         status = WIFEXITED(st) ? WEXITSTATUS(st) : 1; // pipeline status = last stage's
     }
+
+    tcsetpgrp(STDIN_FILENO, shellPgid);
     return status;
 }
 
