@@ -96,6 +96,16 @@ static void test_case() {
     assert(cn->caseClauses[1].first == "b");
 }
 
+static void test_function_def() {
+    auto root = parseSrc("function greet { echo hi ; }");
+    Node* f = root->children[0].get();
+    assert(f->kind == NodeKind::FunctionDef);
+    assert(f->funcName == "greet");
+    assert(f->funcBody->kind == NodeKind::List);
+    assert(f->funcBody->children.size() == 1);
+    assert(f->funcBody->children[0]->words[0] == "echo");
+}
+
 int main() {
     test_simple_command();
     test_redirects();
@@ -107,5 +117,6 @@ int main() {
     test_while();
     test_for();
     test_case();
+    test_function_def();
     std::cout << "all parser simple-command tests passed\n";
 }

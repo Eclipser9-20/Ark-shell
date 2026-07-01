@@ -122,11 +122,23 @@ std::unique_ptr<Node> Parser::parseCase() {
     return cn;
 }
 
+std::unique_ptr<Node> Parser::parseFunctionDef() {
+    advance(); // 'function'
+    auto fn = std::make_unique<Node>();
+    fn->kind = NodeKind::FunctionDef;
+    fn->funcName = advance().text;
+    advance(); // '{' (a plain Word token with text "{")
+    fn->funcBody = parseStatementList({});
+    if (check(TokKind::Word) && peek().text == "}") advance();
+    return fn;
+}
+
 std::unique_ptr<Node> Parser::parseStatement() {
     if (check(TokKind::If)) return parseIf();
     if (check(TokKind::While)) return parseWhile();
     if (check(TokKind::For)) return parseFor();
     if (check(TokKind::Case)) return parseCase();
+    if (check(TokKind::Function)) return parseFunctionDef();
     auto stmt = parsePipeline();
     if (check(TokKind::Amp)) { advance(); stmt->background = true; }
     if (check(TokKind::And)) { advance(); stmt->joinOp = JoinOp::And; }
