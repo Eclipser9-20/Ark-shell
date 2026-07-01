@@ -5,6 +5,7 @@
 #include "lexer.h"
 #include "parser.h"
 #include <cerrno>
+#include <csignal>
 #include <cstdio>
 #include <cstring>
 #include <fcntl.h>
@@ -16,6 +17,29 @@
 #include <vector>
 
 extern char** environ;
+
+// Real bug found live: neither Ctrl-C nor Ctrl-Z worked on ANY foreground
+// child (a plain external command, a shell script). Root cause: ark ignores
+// SIGINT/SIGTSTP/SIGTTIN/SIGTTOU for ITSELF (see main.cpp) so it can't be
+// killed/stopped by a stray signal in a cooked-mode gap -- but SIG_IGN
+// dispositions are INHERITED ACROSS exec() (unlike custom handlers, which
+// reset to default), so every spawned child was BORN with those same
+// signals already ignored. The kernel still delivered Ctrl-C/Ctrl-Z
+// correctly to the child's process group; the child just had no reaction
+// configured for them at all, inherited from ark. Returns the sigset used
+// to reset these back to default (SIG_DFL) via posix_spawnattr_setsigdefault
+// + POSIX_SPAWN_SETSIGDEF, so a spawned child gets normal signal behavior
+// regardless of what ark itself ignores for its own defensive reasons.
+static sigset_t foregroundDefaultSignals() {
+    sigset_t s;
+    sigemptyset(&s);
+    sigaddset(&s, SIGINT);
+    sigaddset(&s, SIGQUIT);
+    sigaddset(&s, SIGTSTP);
+    sigaddset(&s, SIGTTIN);
+    sigaddset(&s, SIGTTOU);
+    return s;
+}
 
 static void applyRedirectsFileActions(const std::vector<Redirect>& redirects, posix_spawn_file_actions_t& actions) {
     for (const auto& r : redirects) {
@@ -122,8 +146,20 @@ static int runPipelineStage(Node* cmd, ShellState& state, int inFd, int outFd, p
     for (auto& a : argv) cargv.push_back(const_cast<char*>(a.c_str()));
     cargv.push_back(nullptr);
 
+    // Process-group assignment for pipeline stages is handled separately by
+    // runPipeline() (all stages share the first stage's pgid, via setpgid()
+    // after spawn) -- this attr is only for the signal-disposition reset
+    // (see foregroundDefaultSignals()), needed here just as much as for a
+    // plain single command.
+    posix_spawnattr_t attr;
+    posix_spawnattr_init(&attr);
+    sigset_t defaultSigs = foregroundDefaultSignals();
+    posix_spawnattr_setsigdefault(&attr, &defaultSigs);
+    posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSIGDEF);
+
     pid_t pid;
-    int rc = posix_spawnp(&pid, cargv[0], &actions, nullptr, cargv.data(), environ);
+    int rc = posix_spawnp(&pid, cargv[0], &actions, &attr, cargv.data(), environ);
+    posix_spawnattr_destroy(&attr);
     posix_spawn_file_actions_destroy(&actions);
     if (rc != 0) {
         std::cerr << argv[0] << ": command not found\n";
@@ -286,10 +322,16 @@ static int runCommand(Node* cmd, ShellState& state) {
     // attr-based POSIX_SPAWN_SETPGROUP sets the child's pgid atomically as
     // part of the spawn itself (pgroup=0 means "use the child's own pid"),
     // so there's no fork+exec-style race window to close here.
+    // ALSO resets SIGINT/SIGTSTP/etc. to default (see foregroundDefaultSignals)
+    // -- without this, the process-group handoff alone still isn't enough:
+    // the child would be born with those signals inherited as ignored from
+    // ark and just never react to Ctrl-C/Ctrl-Z at all.
     posix_spawnattr_t attr;
     posix_spawnattr_init(&attr);
     posix_spawnattr_setpgroup(&attr, 0);
-    posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
+    sigset_t defaultSigs = foregroundDefaultSignals();
+    posix_spawnattr_setsigdefault(&attr, &defaultSigs);
+    posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGDEF);
 
     // Same SIGCHLD race as above, guarded the same way.
     BlockSigchld guard;
