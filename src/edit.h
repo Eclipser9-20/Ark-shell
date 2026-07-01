@@ -18,14 +18,23 @@ struct RawMode {
     ~RawMode();
 };
 
+// Arms a 1-second repeating SIGALRM used to drive onIdleTick (see readLine()
+// below) on a true wall-clock cadence, independent of typing activity. Call
+// once per session, before the first readLine() call.
+void installIdleTicker();
+
 // Reads one line interactively using raw termios input, with history recall
 // (Up/Down) and basic cursor movement (Left/Right/Backspace). Returns
 // nullopt on EOF (Ctrl-D on an empty line).
 //
-// onIdleTick, if set, is invoked roughly once per second while waiting for
-// the next keystroke (used to keep the pinned hardware-stats bar live even
-// when the user isn't actively typing). It fires on a best-effort ~1Hz
-// cadence tracked against an absolute deadline, so a burst of typing doesn't
-// starve or drift it.
+// onIdleTick, if set, is invoked roughly once per second (driven by
+// installIdleTicker()'s SIGALRM, checked once per loop iteration here) to
+// keep the pinned hardware-stats bar live. This does NOT wait for an idle
+// gap in typing -- a naive "call it when select() times out waiting for the
+// next byte" approach silently stops ticking during a fast typing burst or
+// a terminal paste, since such a wait never times out while bytes keep
+// arriving. Checking a signal-set flag once per character instead means the
+// tick still lands within about one keystroke of its 1-second deadline no
+// matter how fast input is arriving.
 std::optional<std::string> readLine(const std::string& prompt, History& history,
                                      const std::function<void()>& onIdleTick = {});

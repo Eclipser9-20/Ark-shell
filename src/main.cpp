@@ -17,6 +17,7 @@
 #include <iostream>
 #include <iterator>
 #include <string>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
 
@@ -44,6 +45,21 @@ static std::string buildPrompt(const ShellState& state, const std::string&) {
 
 static std::string continuationPrompt() {
     return std::string(tn::COMMENT) + "\xe2\x80\xba" + tn::R + " "; // "\xe2\x80\xba" = UTF-8 for ›
+}
+
+// Direct-syscall equivalent of `mkdir -p`: creates each path component that
+// doesn't already exist. Replaces an earlier `system("mkdir -p ...")` call --
+// that forked/exec'd a whole /bin/sh, real subprocess latency sitting right
+// in the startup path before the terminal is ever put in raw mode, widening
+// the window where a keystroke can land mid-chrome-repaint (see the
+// startup-wide RawMode guard below).
+static void mkdirRecursive(const std::string& path) {
+    for (size_t i = 1; i <= path.size(); i++) {
+        if (i == path.size() || path[i] == '/') {
+            std::string prefix = path.substr(0, i);
+            if (!prefix.empty()) ::mkdir(prefix.c_str(), 0755); // EEXIST is fine, ignored
+        }
+    }
 }
 
 static void printParseError(const std::string& source, const ParseError& e) {
@@ -79,6 +95,15 @@ int main() {
     // inherited-then-reset-on-exec) disposition.
     signal(SIGTTOU, SIG_IGN);
     signal(SIGTTIN, SIG_IGN);
+    // Real shells never die from a stray Ctrl-C reaching their OWN process --
+    // only the foreground JOB (a different process group) does, via normal
+    // job-control signal targeting. Ctrl-C is handled explicitly as a byte
+    // (0x03) inside readLine() while raw mode is active (ISIG off, so the
+    // kernel doesn't even raise SIGINT then) -- but raw mode is only active
+    // *during* readLine() itself. Any Ctrl-C landing in a cooked-mode gap
+    // (starting up, between commands, right as a foreground job exits) would
+    // otherwise hit the default SIGINT disposition and kill ark outright.
+    signal(SIGINT, SIG_IGN);
 
     char buf[PATH_MAX];
     if (::getcwd(buf, sizeof(buf))) state.cwd = buf;
@@ -116,10 +141,8 @@ int main() {
     std::string home = getenv("HOME") ? getenv("HOME") : "";
     std::string histDir = home + "/.config/ark";
     std::string histPath = histDir + "/.history";
-    system(("mkdir -p " + histDir).c_str()); // simplest possible directory-ensure for phase 1
 
     History history;
-    history.load(histPath);
 
     auto sessionStart = std::chrono::steady_clock::now();
     auto sessionSeconds = [&]() {
@@ -156,15 +179,38 @@ int main() {
     winch.sa_flags = SA_RESTART;
     sigaction(SIGWINCH, &winch, nullptr);
 
-    doReassertChrome(); // initial paint before the REPL loop starts
-    // Seed the cursor inside the scroll region (row 2) for the very first
-    // prompt: reassertChrome()'s save/restore preserves whatever the cursor's
-    // TRUE position was, but on a fresh terminal that's row 1 -- outside the
-    // scroll region -- since there's no earlier "real" position to restore
-    // to yet. Every later reassertChrome() call correctly preserves the
-    // actual in-progress cursor position instead; this is a one-time seed.
-    printf("\x1b[2;1H");
-    fflush(stdout);
+    // installIdleTicker() arms a 1-second repeating SIGALRM so the pinned
+    // bar keeps ticking live even during a fast typing burst or a terminal
+    // paste -- see edit.cpp for why a select()-timeout-based approach alone
+    // isn't enough (it only fires in GAPS between keystrokes, so continuous
+    // input starves it indefinitely).
+    installIdleTicker();
+
+    {
+        // One guard around the entire startup sequence -- not just the
+        // chrome repaint -- since mkdir/history-load/getHwStats all run
+        // before the terminal is ever put in raw mode otherwise. A keystroke
+        // typed anywhere in that window would previously get echoed by the
+        // kernel in cooked mode, potentially interleaving with our own
+        // escape-sequence writes (e.g. landing on row 1 mid-repaint).
+        RawMode startupGuard;
+        printf("\x1b[?2004l"); // defensively disable bracketed paste -- ark's
+                                // line editor doesn't understand \x1b[200~/
+                                // \x1b[201~ markers, and a parent shell may
+                                // have left the terminal mode enabled
+        mkdirRecursive(histDir);
+        history.load(histPath);
+        doReassertChrome(); // initial paint before the REPL loop starts
+        // Seed the cursor inside the scroll region (row 2) for the very
+        // first prompt: reassertChrome()'s save/restore preserves whatever
+        // the cursor's TRUE position was, but on a fresh terminal that's
+        // row 1 -- outside the scroll region -- since there's no earlier
+        // "real" position to restore to yet. Every later reassertChrome()
+        // call correctly preserves the actual in-progress cursor position
+        // instead; this is a one-time seed.
+        printf("\x1b[2;1H");
+        fflush(stdout);
+    }
 
     std::vector<std::unique_ptr<Node>> astRoots; // keeps FunctionDef bodies alive
     std::string pending;

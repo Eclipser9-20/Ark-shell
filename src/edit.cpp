@@ -1,10 +1,12 @@
 #include "edit.h"
 #include "complete.h"
 #include "highlight.h"
+#include <atomic>
 #include <cerrno>
-#include <chrono>
+#include <csignal>
+#include <cstring>
 #include <iostream>
-#include <sys/select.h>
+#include <sys/time.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -18,28 +20,37 @@ RawMode::RawMode() {
 }
 RawMode::~RawMode() { tcsetattr(STDIN_FILENO, TCSANOW, &orig); }
 
-// Blocks until STDIN has a byte ready or `deadline` passes. Returns true if a
-// byte is ready to read, false on timeout. EINTR (e.g. a SIGWINCH landing
-// mid-select) just retries against the same deadline rather than bubbling up
-// as an error -- resizing the terminal shouldn't look like a dead input.
-static bool waitForInput(std::chrono::steady_clock::time_point deadline) {
-    for (;;) {
-        auto remaining = deadline - std::chrono::steady_clock::now();
-        if (remaining < std::chrono::microseconds(0)) remaining = std::chrono::microseconds(0);
-        auto us = std::chrono::duration_cast<std::chrono::microseconds>(remaining).count();
-        struct timeval tv;
-        tv.tv_sec = (long)(us / 1000000);
-        tv.tv_usec = (long)(us % 1000000);
+static std::atomic<bool> g_tick{false};
 
-        fd_set fds;
-        FD_ZERO(&fds);
-        FD_SET(STDIN_FILENO, &fds);
-        int rv = select(STDIN_FILENO + 1, &fds, nullptr, nullptr, &tv);
-        if (rv > 0) return true;
-        if (rv == 0) return false;
-        if (errno == EINTR) continue;
-        return false; // treat any other select() error as "no input" -- the
-                       // following read() will surface the real problem
+void installIdleTicker() {
+    struct sigaction sa;
+    std::memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = [](int) { g_tick.store(true, std::memory_order_relaxed); };
+    sigemptyset(&sa.sa_mask);
+    // Deliberately NOT SA_RESTART: this must interrupt a blocking read() so
+    // the loop below gets a chance to check the flag even while sitting idle
+    // waiting for the next keystroke.
+    sa.sa_flags = 0;
+    sigaction(SIGALRM, &sa, nullptr);
+
+    struct itimerval timer;
+    timer.it_value.tv_sec = 1;
+    timer.it_value.tv_usec = 0;
+    timer.it_interval.tv_sec = 1;
+    timer.it_interval.tv_usec = 0;
+    setitimer(ITIMER_REAL, &timer, nullptr);
+}
+
+// Reads exactly one byte, transparently retrying on EINTR (SIGALRM/SIGWINCH
+// landing mid-syscall). Used for every raw read in this file so a
+// badly-timed signal can never truncate a multi-byte escape sequence --
+// the outer loop in readLine() is what checks g_tick, once per full
+// keystroke/action, not here.
+static ssize_t readByte(char& out) {
+    for (;;) {
+        ssize_t n = read(STDIN_FILENO, &out, 1);
+        if (n < 0 && errno == EINTR) continue;
+        return n;
     }
 }
 
@@ -59,19 +70,18 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
         std::cout << std::flush;
     };
 
-    auto nextTick = std::chrono::steady_clock::now() + std::chrono::seconds(1);
-
     for (;;) {
-        if (onIdleTick) {
-            if (!waitForInput(nextTick)) {
-                onIdleTick();
-                nextTick = std::chrono::steady_clock::now() + std::chrono::seconds(1);
-                continue;
-            }
-            nextTick = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        // Checked once per full keystroke/action (not just on a select()
+        // timeout) so a continuous typing burst or a terminal paste -- where
+        // read() keeps returning data immediately and never actually blocks
+        // -- can't starve the tick indefinitely; it fires within one
+        // keystroke of the SIGALRM that set it.
+        if (onIdleTick && g_tick.exchange(false, std::memory_order_relaxed)) {
+            onIdleTick();
         }
+
         char c;
-        ssize_t n = read(STDIN_FILENO, &c, 1);
+        ssize_t n = readByte(c);
         if (n <= 0) return std::nullopt; // EOF/error
 
         if (c == '\r' || c == '\n') { std::cout << "\n"; return buf; }
@@ -110,8 +120,8 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
         }
         if (c == '\x1b') { // escape sequence (arrow keys: ESC [ A/B/C/D)
             char seq[2];
-            if (read(STDIN_FILENO, &seq[0], 1) <= 0) continue;
-            if (read(STDIN_FILENO, &seq[1], 1) <= 0) continue;
+            if (readByte(seq[0]) <= 0) continue;
+            if (readByte(seq[1]) <= 0) continue;
             if (seq[0] != '[') continue;
             if (seq[1] == 'C' && cursor < buf.size()) { cursor++; redraw(); }
             else if (seq[1] == 'D' && cursor > 0) { cursor--; redraw(); }
