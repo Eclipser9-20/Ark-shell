@@ -110,8 +110,10 @@ std::vector<Span> classify(const std::string& raw) {
         } else if (atCommandPos) {
             spans.push_back(Span{start, i, SpanKind::Command});
             atCommandPos = false;
+        } else if (!word.empty() && word[0] == '-') {
+            spans.push_back(Span{start, i, SpanKind::Flag}); // -l, --verbose, etc.
         } else {
-            spans.push_back(Span{start, i, SpanKind::Plain});
+            spans.push_back(Span{start, i, SpanKind::Argument});
         }
     }
 
@@ -126,6 +128,8 @@ const char* colorFor(SpanKind kind) {
         case SpanKind::String:   return "\x1b[38;2;158;206;106m";
         case SpanKind::Variable: return "\x1b[38;2;125;207;255m";
         case SpanKind::Operator: return "\x1b[38;2;86;95;137m";
+        case SpanKind::Flag:     return "\x1b[38;2;224;175;104m";
+        case SpanKind::Argument: return "\x1b[38;2;192;202;245m";
         case SpanKind::Plain:    return nullptr;
     }
     return nullptr;

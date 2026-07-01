@@ -5,9 +5,16 @@
 static void test_plain_command() {
     auto spans = classify("echo hi");
     assert(spans.size() == 3);
-    assert(spans[0].start == 0 && spans[0].end == 4 && spans[0].kind == SpanKind::Command); // "echo"
+    assert(spans[0].start == 0 && spans[0].end == 4 && spans[0].kind == SpanKind::Command);  // "echo"
     assert(spans[1].start == 4 && spans[1].end == 5 && spans[1].kind == SpanKind::Plain);    // " "
-    assert(spans[2].start == 5 && spans[2].end == 7 && spans[2].kind == SpanKind::Plain);    // "hi"
+    assert(spans[2].start == 5 && spans[2].end == 7 && spans[2].kind == SpanKind::Argument); // "hi"
+}
+
+static void test_flag_argument() {
+    auto spans = classify("ls -la");
+    assert(spans.size() == 3);
+    assert(spans[2].kind == SpanKind::Flag);
+    assert(spans[2].start == 3 && spans[2].end == 6); // "-la"
 }
 
 static void test_pipeline_resets_command_position() {
@@ -96,6 +103,7 @@ int main() {
     test_variable();
     test_braced_variable();
     test_and_operator();
+    test_flag_argument();
     test_highlight_wraps_command_in_blue();
     test_highlight_preserves_plain_text_unwrapped();
     test_highlight_wraps_string_in_green();
