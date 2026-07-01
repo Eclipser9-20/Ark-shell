@@ -74,6 +74,29 @@ Token Lexer::lexWord() {
             if (!atEnd()) out += advance();
             continue;
         }
+        if (c == '$' && peek(1) == '(') {
+            // Command substitution used bare (not inside "quotes"): without
+            // this, the '(' right after '$' would hit the operator-starting
+            // terminator check above on the very next loop iteration,
+            // splitting "$(echo one)" into a one-character Word("$") plus a
+            // stray LParen token the parser doesn't know what to do with --
+            // that previously hung the parser outright (an unhandled-token
+            // infinite loop, the same bug class as Task 5's unhandled Pipe).
+            // Depth-tracked so nested substitutions ($(echo $(echo x))) are
+            // consumed as one unit; doesn't account for a literal paren
+            // inside a quoted string within the substitution, a known
+            // simplification.
+            out += advance(); // '$'
+            out += advance(); // '('
+            int depth = 1;
+            while (!atEnd() && depth > 0) {
+                char cc = advance();
+                out += cc;
+                if (cc == '(') depth++;
+                else if (cc == ')') depth--;
+            }
+            continue;
+        }
         out += advance();
     }
     TokKind kind = keywordKind(out);

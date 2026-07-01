@@ -2,6 +2,9 @@
 #include "builtins.h"
 #include "expand.h"
 #include "jobs.h"
+#include "lexer.h"
+#include "parser.h"
+#include <cstdio>
 #include <cstring>
 #include <fcntl.h>
 #include <iostream>
@@ -73,6 +76,14 @@ static int runPipelineStage(Node* cmd, ShellState& state, int inFd, int outFd, p
     if (it != reg.end()) {
         // Builtins run in-process normally, but inside a pipeline stage they
         // need their own fd redirection, so fork a child specifically for this.
+        // Flush BEFORE forking: stdout is fully buffered when piped/non-tty,
+        // so any earlier statement's output still sitting unflushed in this
+        // process's stdio buffer would otherwise get copied into the child
+        // by fork() and re-emitted a second time when the child's own
+        // pre-_exit() flush (below) runs -- see captureCommandOutput() for
+        // the fuller explanation of this class of bug.
+        std::cout.flush();
+        fflush(stdout);
         pid_t pid = fork();
         if (pid == 0) {
             if (inFd != -1) { dup2(inFd, STDIN_FILENO); close(inFd); }
@@ -202,6 +213,9 @@ static int runCommand(Node* cmd, ShellState& state) {
         // silently leaving `status` at its zero-initialized value, which
         // WIFEXITED/WEXITSTATUS then misreport as "exited successfully".
         BlockSigchld guard;
+        std::cout.flush(); // flush BEFORE forking -- see captureCommandOutput()
+        fflush(stdout);     // for why (stale buffered output would otherwise
+                            // get duplicated by the child's own flush)
         pid_t pid = fork();
         if (pid == 0) {
             applyRedirectsInChild(cmd->redirects);
@@ -340,6 +354,9 @@ static std::string buildCmdline(Node* node) {
 // duplicating background logic in runCommand AND runPipeline separately.
 int execNode(Node* node, ShellState& state) {
     if (node->background && (node->kind == NodeKind::Command || node->kind == NodeKind::Pipeline)) {
+        std::cout.flush(); // flush BEFORE forking -- see captureCommandOutput()
+        fflush(stdout);     // for why (stale buffered output would otherwise
+                            // get duplicated by the child's own flush)
         pid_t pid = fork();
         if (pid == 0) {
             setpgid(0, 0); // new process group, this child is its own leader
@@ -361,4 +378,50 @@ int execNode(Node* node, ShellState& state) {
                   // comes later via `wait`/`jobs`
     }
     return execNodeDispatch(node, state);
+}
+
+std::string captureCommandOutput(const std::string& cmd, ShellState& state) {
+    int pipefd[2];
+    if (pipe(pipefd) != 0) return "";
+
+    BlockSigchld guard; // same reap-race guard as every other foreground wait
+    // Flush BEFORE forking, not just before the child's _exit(): stdout is
+    // fully buffered here (piped/non-tty), so any prior statement's output
+    // that hasn't hit the fd yet is still sitting in this process's stdio
+    // buffer. fork() copies that buffer into the child verbatim -- without
+    // this flush, the child's own end-of-life flush would re-emit all of
+    // that stale, already-pending-in-the-parent output a second time,
+    // compounding on every subsequent command substitution in a script.
+    std::cout.flush();
+    fflush(stdout);
+    pid_t pid = fork();
+    if (pid == 0) {
+        close(pipefd[0]);
+        dup2(pipefd[1], STDOUT_FILENO);
+        close(pipefd[1]);
+        int rc = 0;
+        try {
+            Lexer lex(cmd);
+            Parser parser(lex.tokenize());
+            auto ast = parser.parse();
+            rc = execNode(ast.get(), state); // fork already gave this
+                                              // process its own copy of
+                                              // ShellState -- real subshell
+                                              // isolation for free
+        } catch (const std::exception&) {
+            rc = 1;
+        }
+        std::cout.flush();
+        _exit(rc);
+    }
+
+    close(pipefd[1]);
+    std::string output;
+    char buf[4096];
+    ssize_t n;
+    while ((n = read(pipefd[0], buf, sizeof(buf))) > 0) output.append(buf, (size_t)n);
+    close(pipefd[0]);
+    int status = 0;
+    waitpid(pid, &status, 0);
+    return output;
 }

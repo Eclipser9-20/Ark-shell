@@ -71,6 +71,27 @@ static void test_keywords() {
     assert(kinds == expected);
 }
 
+static void test_bare_command_substitution_stays_one_word() {
+    // Without special-casing, the '(' in "$(echo one)" hits the same
+    // operator-terminator check as any bare paren and splits the word --
+    // producing Word("$"), LParen, Word("echo"), Word("one"), RParen instead
+    // of one Word("$(echo one)"). The parser has no rule for a stray LParen
+    // following a command word, and previously hung outright on this input.
+    Lexer lex("echo $(echo one)");
+    auto toks = lex.tokenize();
+    assert(toks.size() == 3); // echo, $(echo one), End
+    assert(toks[1].kind == TokKind::Word && toks[1].text == "$(echo one)");
+}
+
+static void test_nested_command_substitution_stays_one_word() {
+    // Paren depth must be tracked, not just "stop at the first )" -- an
+    // inner $(...) also contains parens.
+    Lexer lex("echo $(echo $(echo deep))");
+    auto toks = lex.tokenize();
+    assert(toks.size() == 3);
+    assert(toks[1].text == "$(echo $(echo deep))");
+}
+
 int main() {
     test_simple_words();
     test_single_quotes_are_literal();
@@ -79,5 +100,7 @@ int main() {
     test_comment_stripped();
     test_operators();
     test_keywords();
+    test_bare_command_substitution_stays_one_word();
+    test_nested_command_substitution_stays_one_word();
     std::cout << "all lexer word/quote tests passed\n";
 }

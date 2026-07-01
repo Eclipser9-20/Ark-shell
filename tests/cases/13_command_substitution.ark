@@ -1,0 +1,5 @@
+echo "quoted: $(echo hi)"
+echo bare $(echo one two)
+echo nested $(echo $(echo deep))
+export captured=$(echo abc)
+echo $captured

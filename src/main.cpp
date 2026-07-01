@@ -85,6 +85,13 @@ int main() {
     JobTable jobTable;
     state.jobs = &jobTable;
 
+    // $(...) runs through ark's OWN lexer/parser/exec (captureCommandOutput
+    // forks and recurses, never shelling out to /bin/sh) -- ark is meant to
+    // be fully independent, not a wrapper around bash/zsh. Needed in both
+    // interactive and non-interactive mode, since command substitution can
+    // appear in scripts too.
+    setCaptureHook([&state](const std::string& cmd) { return captureCommandOutput(cmd, state); });
+
     installSigchldHandler();
     // A background job's own process group must not be stopped just because
     // it tries terminal I/O -- POSIX delivers SIGTTOU/SIGTTIN to whichever
