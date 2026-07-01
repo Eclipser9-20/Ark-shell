@@ -49,6 +49,19 @@ static void applyRedirectsInChild(const std::vector<Redirect>& redirects) {
     }
 }
 
+static std::string buildCmdline(Node* node) {
+    std::string cmdline;
+    auto appendWords = [&](Node* cmd) {
+        for (auto& w : cmd->words) { cmdline += w; cmdline += " "; }
+    };
+    if (node->kind == NodeKind::Pipeline) {
+        for (auto& child : node->children) appendWords(child.get());
+    } else {
+        appendWords(node);
+    }
+    return cmdline;
+}
+
 static int runPipelineStage(Node* cmd, ShellState& state, int inFd, int outFd, pid_t& pidOut) {
     auto argv = expandWords(cmd->words, state);
     if (argv.empty()) { pidOut = -1; return 0; }
@@ -167,14 +180,39 @@ static int runPipeline(Node* pipeline, ShellState& state) {
     if (!pipeline->background && jobPgid > 0) tcsetpgrp(STDIN_FILENO, jobPgid);
 
     int status = 0;
+    bool stopped = false;
     for (pid_t pid : pids) {
         if (pid == -1) continue;
         int st = 0;
-        waitpidRetry(pid, &st, 0);
+        // WUNTRACED: notice Ctrl-Z/SIGTSTP (a stop), not just an exit --
+        // same job-control gap runCommand() had for a plain single command.
+        // A terminal-generated stop signal hits every process in the
+        // foreground pgid at roughly the same time, so once one stage
+        // reports stopped, don't keep waiting on the rest (they're either
+        // also stopped or about to be) -- just record it and register the
+        // whole pipeline as one stopped job below.
+        waitpidRetry(pid, &st, WUNTRACED);
+        if (WIFSTOPPED(st)) {
+            stopped = true;
+            status = 128 + WSTOPSIG(st);
+            break;
+        }
         status = WIFEXITED(st) ? WEXITSTATUS(st) : 1; // pipeline status = last stage's
     }
 
     if (!pipeline->background) tcsetpgrp(STDIN_FILENO, shellPgid);
+
+    if (stopped) {
+        int jobId = 0;
+        if (state.jobs) {
+            std::vector<pid_t> alive;
+            for (pid_t pid : pids) if (pid != -1) alive.push_back(pid);
+            jobId = state.jobs->add(jobPgid, alive, buildCmdline(pipeline));
+            Job* j = state.jobs->find(jobId);
+            if (j) j->state = Job::State::Stopped;
+        }
+        std::cerr << "\n[" << jobId << "]+  Stopped                 " << buildCmdline(pipeline) << "\n";
+    }
     return status;
 }
 
@@ -238,17 +276,54 @@ static int runCommand(Node* cmd, ShellState& state) {
     posix_spawn_file_actions_init(&actions);
     applyRedirectsFileActions(cmd->redirects, actions);
 
+    // Give this foreground command its own process group and hand off the
+    // controlling terminal to it -- exactly like runPipeline() already does
+    // for multi-stage pipelines, but this path (a single plain command) never
+    // had it. Without this, standard job control (Ctrl-Z/SIGTSTP suspend,
+    // signals reaching the right process group) simply doesn't work for a
+    // bare foreground command like `./pistin` -- real bug found live
+    // ("I can't exit pistin... give ark everything bash has"). posix_spawn's
+    // attr-based POSIX_SPAWN_SETPGROUP sets the child's pgid atomically as
+    // part of the spawn itself (pgroup=0 means "use the child's own pid"),
+    // so there's no fork+exec-style race window to close here.
+    posix_spawnattr_t attr;
+    posix_spawnattr_init(&attr);
+    posix_spawnattr_setpgroup(&attr, 0);
+    posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
+
     // Same SIGCHLD race as above, guarded the same way.
     BlockSigchld guard;
     pid_t pid;
-    int rc = posix_spawnp(&pid, cargv[0], &actions, nullptr, cargv.data(), environ);
+    int rc = posix_spawnp(&pid, cargv[0], &actions, &attr, cargv.data(), environ);
+    posix_spawnattr_destroy(&attr);
     posix_spawn_file_actions_destroy(&actions);
     if (rc != 0) {
         std::cerr << argv[0] << ": command not found\n";
         return 127;
     }
+
+    pid_t shellPgid = getpgrp();
+    tcsetpgrp(STDIN_FILENO, pid); // pid doubles as the new job's pgid (pgroup=0 above)
     int status = 0;
-    waitpidRetry(pid, &status, 0);
+    waitpidRetry(pid, &status, WUNTRACED); // WUNTRACED: notice Ctrl-Z/SIGTSTP
+                                            // (a stop), not just an exit
+    tcsetpgrp(STDIN_FILENO, shellPgid);
+
+    if (WIFSTOPPED(status)) {
+        int jobId = 0;
+        if (state.jobs) {
+            jobId = state.jobs->add(pid, {pid}, buildCmdline(cmd));
+            Job* j = state.jobs->find(jobId);
+            if (j) j->state = Job::State::Stopped; // JobTable::add() defaults
+                                                     // to Running; correct it
+                                                     // immediately since this
+                                                     // job is already stopped
+        }
+        std::cerr << "\n[" << jobId << "]+  Stopped                 " << argv[0] << "\n";
+        return 128 + WSTOPSIG(status); // matches the 128+signal convention
+                                        // used elsewhere for signal-based
+                                        // termination status
+    }
     return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
 }
 
@@ -334,19 +409,6 @@ static int execNodeDispatch(Node* node, ShellState& state) {
             std::cerr << "ark: internal error: unimplemented node kind\n";
             return 1;
     }
-}
-
-static std::string buildCmdline(Node* node) {
-    std::string cmdline;
-    auto appendWords = [&](Node* cmd) {
-        for (auto& w : cmd->words) { cmdline += w; cmdline += " "; }
-    };
-    if (node->kind == NodeKind::Pipeline) {
-        for (auto& child : node->children) appendWords(child.get());
-    } else {
-        appendWords(node);
-    }
-    return cmdline;
 }
 
 // Background (`&`) is valid on any Command or Pipeline, at any nesting depth

@@ -6,6 +6,7 @@
 #include <csignal>
 #include <cstring>
 #include <iostream>
+#include <sys/select.h>
 #include <sys/time.h>
 #include <termios.h>
 #include <unistd.h>
@@ -51,6 +52,31 @@ static ssize_t readByte(char& out) {
         ssize_t n = read(STDIN_FILENO, &out, 1);
         if (n < 0 && errno == EINTR) continue;
         return n;
+    }
+}
+
+// True if a byte is already available (or arrives within `timeoutMs`) on
+// stdin. A real escape SEQUENCE (arrow keys etc.) arrives as a fast burst --
+// the terminal constructs and sends the whole multi-byte sequence for one
+// physical keypress essentially at once -- while a standalone Escape key
+// press sends JUST the 0x1B byte, with nothing following. Used to
+// distinguish the two instead of blocking forever waiting for continuation
+// bytes that, for a standalone Escape, will never arrive on their own (real
+// bug found live: pressing bare Escape hung ark's line editor indefinitely).
+static bool byteAvailableSoon(int timeoutMs) {
+    for (;;) {
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(STDIN_FILENO, &fds);
+        struct timeval tv;
+        tv.tv_sec = timeoutMs / 1000;
+        tv.tv_usec = (timeoutMs % 1000) * 1000;
+        int rv = select(STDIN_FILENO + 1, &fds, nullptr, nullptr, &tv);
+        if (rv > 0) return true;
+        if (rv == 0) return false;
+        if (errno == EINTR) continue; // a tick/resize signal landing mid-wait
+                                       // isn't a real answer either way -- retry
+        return false;
     }
 }
 
@@ -128,7 +154,17 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
             }
             continue;
         }
-        if (c == '\x1b') { // escape sequence (arrow keys: ESC [ A/B/C/D)
+        if (c == '\x1b') { // escape sequence (arrow keys: ESC [ A/B/C/D) OR a
+                            // standalone Escape key press
+            if (!byteAvailableSoon(50)) {
+                // Nothing followed within 50ms -- a real arrow-key sequence
+                // would have. Treat as a standalone Escape: give it a
+                // defined behavior (cancel the line, matching Ctrl-C)
+                // instead of the previous silent hang waiting for
+                // continuation bytes that were never coming.
+                std::cout << "\n";
+                return std::string();
+            }
             char seq[2];
             if (readByte(seq[0]) <= 0) continue;
             if (readByte(seq[1]) <= 0) continue;

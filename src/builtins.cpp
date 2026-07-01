@@ -94,12 +94,32 @@ static int b_fg(const std::vector<std::string>& argv, ShellState& state) {
     BlockSigchld guard; // same reap-race guard as exec.cpp's foreground waits
     pid_t shellPgid = getpgrp();
     tcsetpgrp(STDIN_FILENO, j->pgid);
+    j->state = Job::State::Running;
     kill(-j->pgid, SIGCONT);
-    int status = 0;
-    for (pid_t pid : j->pids) waitpidRetry(pid, &status, 0);
+
+    int rc = 0;
+    bool stopped = false;
+    for (pid_t pid : j->pids) {
+        int st = 0;
+        // WUNTRACED: a resumed job can get Ctrl-Z'd again -- without this,
+        // waitpid() just blocks forever waiting for a real exit that isn't
+        // coming, hanging ark instead of returning control to the prompt.
+        waitpidRetry(pid, &st, WUNTRACED);
+        if (WIFSTOPPED(st)) { stopped = true; rc = 128 + WSTOPSIG(st); break; }
+        rc = WIFEXITED(st) ? WEXITSTATUS(st) : 1;
+    }
     tcsetpgrp(STDIN_FILENO, shellPgid);
-    state.jobs->remove(j->id);
-    return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+
+    if (stopped) {
+        // Re-stopped, not exited -- it's still a real job, don't drop it
+        // from the table (that would make `fg`/`jobs` unable to find it
+        // again even though the process is still alive).
+        j->state = Job::State::Stopped;
+        std::cerr << "\n[" << j->id << "]+  Stopped                 " << j->cmdline << "\n";
+    } else {
+        state.jobs->remove(j->id);
+    }
+    return rc;
 }
 
 static int b_bg(const std::vector<std::string>& argv, ShellState& state) {

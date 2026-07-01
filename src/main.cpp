@@ -111,6 +111,14 @@ int main() {
     // (starting up, between commands, right as a foreground job exits) would
     // otherwise hit the default SIGINT disposition and kill ark outright.
     signal(SIGINT, SIG_IGN);
+    // Same reasoning as SIGINT above, for Ctrl-Z: real shells ignore SIGTSTP
+    // in their own process -- only the foreground JOB gets suspended (now
+    // that runCommand()/runPipeline() give it its own process group and
+    // tcsetpgrp() the terminal to it), not the shell itself. Without this,
+    // a stray Ctrl-Z landing in a cooked-mode gap (same windows as SIGINT)
+    // would suspend ark itself instead of nothing happening, which is what
+    // real shells do when there's no foreground job to suspend.
+    signal(SIGTSTP, SIG_IGN);
 
     char buf[PATH_MAX];
     if (::getcwd(buf, sizeof(buf))) state.cwd = buf;
