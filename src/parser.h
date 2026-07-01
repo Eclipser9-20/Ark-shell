@@ -9,8 +9,15 @@
 
 struct ParseError : std::runtime_error {
     int line, col;
-    ParseError(int l, int c, const std::string& msg)
-        : std::runtime_error(msg), line(l), col(c) {}
+    bool incomplete; // true if this happened because input ran out
+                      // (current token was End) while still expecting
+                      // something -- e.g. "if foo; then" with no matching
+                      // 'fi' yet. The interactive line editor uses this to
+                      // show a continuation prompt and keep reading instead
+                      // of reporting a hard error (matches bash/zsh's
+                      // secondary "> " prompt for incomplete constructs).
+    ParseError(int l, int c, const std::string& msg, bool inc)
+        : std::runtime_error(msg), line(l), col(c), incomplete(inc) {}
 };
 
 class Parser {
@@ -26,7 +33,10 @@ private:
     const Token& advance() { return toks_[pos_++]; }
     bool check(TokKind k) const { return peek().kind == k; }
     void expect(TokKind k, const std::string& what) {
-        if (!check(k)) throw ParseError(peek().line, peek().col, "expected '" + what + "'");
+        if (!check(k)) {
+            throw ParseError(peek().line, peek().col, "expected '" + what + "'",
+                              peek().kind == TokKind::End);
+        }
         advance();
     }
     bool atStatementEnd() const {
