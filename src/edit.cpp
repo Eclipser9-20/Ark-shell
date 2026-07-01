@@ -148,6 +148,22 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
             if (lines[i].size() > buf.size() && lines[i].compare(0, buf.size(), buf) == 0)
                 return lines[i].substr(buf.size());
         }
+        // No history match -> fall back to a filesystem/command completion, but
+        // ONLY when there's a single candidate that EXTENDS the typed word
+        // (ghost text is an append; a cross-directory replacement like
+        // ~/bin/foo can't be shown this way -- that stays Tab's job). This is
+        // what makes ghost text work for files and commands, not just history.
+        auto [wordStart, word] = wordUnderCursor(buf, cursor);
+        if (word.size() >= 2) {
+            bool cmdPos = isCommandPosition(buf, wordStart);
+            auto cands = cmdPos ? completeCommand(word) : completePath(word);
+            std::string only;
+            int extending = 0;
+            for (const auto& c : cands) {
+                if (c.size() > word.size() && c.compare(0, word.size(), word) == 0) { only = c; extending++; }
+            }
+            if (extending == 1) return only.substr(word.size());
+        }
         return "";
     };
 
