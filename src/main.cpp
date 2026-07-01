@@ -15,6 +15,33 @@
 #include <unistd.h>
 #include <vector>
 
+// TokyoNight Night palette, matching the zsh/Ghostty/vim theming from
+// earlier this session -- blue for the shell name, cyan for cwd, comment-gray
+// for the continuation prompt, green/red arrow tracking the last exit status.
+namespace tn {
+constexpr const char* R = "\x1b[0m";
+constexpr const char* BLUE = "\x1b[38;2;122;162;247m";
+constexpr const char* CYAN = "\x1b[38;2;125;207;255m";
+constexpr const char* GREEN = "\x1b[38;2;158;206;106m";
+constexpr const char* RED = "\x1b[38;2;247;118;142m";
+constexpr const char* COMMENT = "\x1b[38;2;86;95;137m";
+} // namespace tn
+
+static std::string shortCwd(const std::string& cwd, const std::string& home) {
+    if (!home.empty() && cwd.rfind(home, 0) == 0) return "~" + cwd.substr(home.size());
+    return cwd;
+}
+
+static std::string buildPrompt(const ShellState& state, const std::string& home) {
+    std::string arrowColor = state.lastStatus == 0 ? tn::GREEN : tn::RED;
+    return std::string(tn::BLUE) + "ark " + tn::CYAN + shortCwd(state.cwd, home) + " " +
+           arrowColor + "\xe2\x9d\xaf" + tn::R + " "; // "\xe2\x9d\xaf" = UTF-8 for ❯
+}
+
+static std::string continuationPrompt() {
+    return std::string(tn::COMMENT) + "\xe2\x80\xba" + tn::R + " "; // "\xe2\x80\xba" = UTF-8 for ›
+}
+
 static void printParseError(const std::string& source, const ParseError& e) {
     // gcc/`bash -n`-style diagnostic: message + offending source line + a
     // caret pointing at the column. `source` may be a whole multi-line
@@ -96,7 +123,8 @@ int main() {
 
     for (;;) {
         jobTable.drainSignalQueue();
-        auto got = readLine(continuing ? "> " : "ark> ", history);
+        std::string prompt = continuing ? continuationPrompt() : buildPrompt(state, home);
+        auto got = readLine(prompt, history);
         if (!got) break; // Ctrl-D / EOF
         if (!continuing) {
             if (got->empty()) continue;
