@@ -1,6 +1,7 @@
 #include "chrome.h"
 #include <cstdio>
 #include <fstream>
+#include <mach/host_info.h>
 #include <mach/mach.h>
 #include <mach/mach_host.h>
 #include <mach/vm_statistics.h>
@@ -9,6 +10,35 @@
 #include <sys/sysctl.h>
 #include <unistd.h>
 
+// Host-wide CPU utilization since the last call, from the delta between two
+// host_statistics(HOST_CPU_LOAD_INFO) samples. Ticks are cumulative counters
+// since boot, not an instantaneous rate, so this needs two points in time --
+// hence the function-static previous sample. No prior sample yet (first call
+// in the process) reports 0 rather than a bogus/huge percentage.
+static double sampleCpuPercent() {
+    static host_cpu_load_info_data_t prev{};
+    static bool havePrev = false;
+
+    host_cpu_load_info_data_t cur;
+    mach_msg_type_number_t count = HOST_CPU_LOAD_INFO_COUNT;
+    kern_return_t kr = host_statistics(mach_host_self(), HOST_CPU_LOAD_INFO,
+                                        (host_info_t)&cur, &count);
+    if (kr != KERN_SUCCESS) return 0.0;
+
+    double pct = 0.0;
+    if (havePrev) {
+        uint64_t userD = cur.cpu_ticks[CPU_STATE_USER] - prev.cpu_ticks[CPU_STATE_USER];
+        uint64_t sysD = cur.cpu_ticks[CPU_STATE_SYSTEM] - prev.cpu_ticks[CPU_STATE_SYSTEM];
+        uint64_t niceD = cur.cpu_ticks[CPU_STATE_NICE] - prev.cpu_ticks[CPU_STATE_NICE];
+        uint64_t idleD = cur.cpu_ticks[CPU_STATE_IDLE] - prev.cpu_ticks[CPU_STATE_IDLE];
+        uint64_t totalD = userD + sysD + niceD + idleD;
+        if (totalD > 0) pct = 100.0 * (double)(userD + sysD + niceD) / (double)totalD;
+    }
+    prev = cur;
+    havePrev = true;
+    return pct;
+}
+
 HwStats getHwStats() {
     HwStats hw;
 
@@ -16,6 +46,8 @@ HwStats getHwStats() {
     if (getloadavg(loadavg, 3) != -1) {
         hw.load1 = loadavg[0];
     }
+
+    hw.cpuPercent = sampleCpuPercent();
 
     uint64_t memsize = 0;
     size_t len = sizeof(memsize);
@@ -97,7 +129,7 @@ void paintChrome(const std::string& cwd, const std::string& gitBranch,
     std::string left = std::string(user ? user : "user") + "@" + host + " " + formatSession(sessionSeconds);
 
     char hwbuf[128];
-    snprintf(hwbuf, sizeof(hwbuf), "load %.2f  mem %.1f/%.1fG", hw.load1, hw.memUsedGB, hw.memTotalGB);
+    snprintf(hwbuf, sizeof(hwbuf), "cpu %3.0f%%  mem %.1f/%.1fG", hw.cpuPercent, hw.memUsedGB, hw.memTotalGB);
     std::string right = hwbuf;
 
     std::string bottom = left;

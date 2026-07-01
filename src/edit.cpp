@@ -1,26 +1,50 @@
 #include "edit.h"
 #include "complete.h"
 #include "highlight.h"
+#include <cerrno>
+#include <chrono>
 #include <iostream>
+#include <sys/select.h>
 #include <termios.h>
 #include <unistd.h>
 
-namespace {
-struct RawMode {
-    termios orig;
-    RawMode() {
-        tcgetattr(STDIN_FILENO, &orig);
-        termios raw = orig;
-        raw.c_lflag &= ~(ICANON | ECHO | ISIG);
-        raw.c_cc[VMIN] = 1;
-        raw.c_cc[VTIME] = 0;
-        tcsetattr(STDIN_FILENO, TCSANOW, &raw);
-    }
-    ~RawMode() { tcsetattr(STDIN_FILENO, TCSANOW, &orig); }
-};
-} // namespace
+RawMode::RawMode() {
+    tcgetattr(STDIN_FILENO, &orig);
+    termios raw = orig;
+    raw.c_lflag &= ~(ICANON | ECHO | ISIG);
+    raw.c_cc[VMIN] = 1;
+    raw.c_cc[VTIME] = 0;
+    tcsetattr(STDIN_FILENO, TCSANOW, &raw);
+}
+RawMode::~RawMode() { tcsetattr(STDIN_FILENO, TCSANOW, &orig); }
 
-std::optional<std::string> readLine(const std::string& prompt, History& history) {
+// Blocks until STDIN has a byte ready or `deadline` passes. Returns true if a
+// byte is ready to read, false on timeout. EINTR (e.g. a SIGWINCH landing
+// mid-select) just retries against the same deadline rather than bubbling up
+// as an error -- resizing the terminal shouldn't look like a dead input.
+static bool waitForInput(std::chrono::steady_clock::time_point deadline) {
+    for (;;) {
+        auto remaining = deadline - std::chrono::steady_clock::now();
+        if (remaining < std::chrono::microseconds(0)) remaining = std::chrono::microseconds(0);
+        auto us = std::chrono::duration_cast<std::chrono::microseconds>(remaining).count();
+        struct timeval tv;
+        tv.tv_sec = (long)(us / 1000000);
+        tv.tv_usec = (long)(us % 1000000);
+
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(STDIN_FILENO, &fds);
+        int rv = select(STDIN_FILENO + 1, &fds, nullptr, nullptr, &tv);
+        if (rv > 0) return true;
+        if (rv == 0) return false;
+        if (errno == EINTR) continue;
+        return false; // treat any other select() error as "no input" -- the
+                       // following read() will surface the real problem
+    }
+}
+
+std::optional<std::string> readLine(const std::string& prompt, History& history,
+                                     const std::function<void()>& onIdleTick) {
     RawMode raw;
     std::string buf;
     size_t cursor = 0;
@@ -35,7 +59,17 @@ std::optional<std::string> readLine(const std::string& prompt, History& history)
         std::cout << std::flush;
     };
 
+    auto nextTick = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+
     for (;;) {
+        if (onIdleTick) {
+            if (!waitForInput(nextTick)) {
+                onIdleTick();
+                nextTick = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+                continue;
+            }
+            nextTick = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        }
         char c;
         ssize_t n = read(STDIN_FILENO, &c, 1);
         if (n <= 0) return std::nullopt; // EOF/error

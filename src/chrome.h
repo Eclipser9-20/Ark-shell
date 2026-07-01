@@ -5,14 +5,23 @@ struct HwStats {
     double load1 = 0.0;
     double memUsedGB = 0.0;
     double memTotalGB = 0.0;
+    double cpuPercent = 0.0; // host-wide CPU utilization, see getHwStats()
 };
 
 // Direct syscalls only (getloadavg, Mach host_statistics64, sysctlbyname) --
-// NO subprocess calls. This is called on every command boundary in
-// interactive mode, so any fork/exec here reintroduces the exact latency
-// regression already found and fixed once this session (a `top -l 1` call
-// added ~0.2s per call). Never throws -- a failed syscall just leaves the
-// corresponding field at its zero-initialized default.
+// NO subprocess calls. This is called on every command boundary AND roughly
+// once per second while idle at the prompt in interactive mode, so any
+// fork/exec here reintroduces the exact latency regression already found and
+// fixed once this session (a `top -l 1` call added ~0.2s per call). Never
+// throws -- a failed syscall just leaves the corresponding field at its
+// zero-initialized default.
+//
+// cpuPercent is computed from the delta between this call's
+// host_statistics(HOST_CPU_LOAD_INFO) tick counts and the PREVIOUS call's
+// (kept in function-static state) -- there's no "instantaneous CPU usage"
+// syscall on macOS, only cumulative tick counters since boot, so a single
+// call can't produce a percentage. The very first call in a process's
+// lifetime has no prior sample yet and reports 0.
 HwStats getHwStats();
 
 // Walks up from `cwd` looking for a `.git` DIRECTORY (not a `.git` file --

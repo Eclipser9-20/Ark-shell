@@ -126,6 +126,20 @@ int main() {
         return std::chrono::duration<double>(std::chrono::steady_clock::now() - sessionStart).count();
     };
     auto doReassertChrome = [&]() {
+        // RawMode here (not just inside readLine()) closes a real race: this
+        // runs at startup and right before/after each foreground command --
+        // all outside readLine()'s own raw-mode scope, i.e. while the
+        // terminal is still in cooked+echo mode. If the user types during
+        // that window, the kernel's own echo of those keystrokes can
+        // interleave with our chrome escape sequences on the same output
+        // stream, landing characters wherever the cursor happens to be
+        // mid-repaint (e.g. row 1, on top of the cwd bar, right after
+        // DECSTBM's cursor-reset side effect and before paintChrome/DECRC
+        // finish). Suppressing echo for the duration of the repaint means
+        // any keystrokes typed during it get buffered by the tty driver
+        // instead of echoed, so they're just delivered (silently) to the
+        // next readLine() call as normal.
+        RawMode guard;
         reassertChrome(state.cwd, findGitBranch(state.cwd), sessionSeconds(), getHwStats());
     };
 
@@ -160,7 +174,7 @@ int main() {
         jobTable.drainSignalQueue();
         if (g_resized.exchange(false, std::memory_order_relaxed)) doReassertChrome();
         std::string prompt = continuing ? continuationPrompt() : buildPrompt(state, home);
-        auto got = readLine(prompt, history);
+        auto got = readLine(prompt, history, doReassertChrome);
         if (!got) break; // Ctrl-D / EOF
         if (!continuing) {
             if (got->empty()) continue;

@@ -10,6 +10,19 @@ static void test_hwstats_plausible_ranges() {
     assert(hw.memTotalGB > 0.0);       // every real Mac has nonzero total RAM
     assert(hw.memUsedGB >= 0.0);
     assert(hw.memUsedGB <= hw.memTotalGB + 1.0); // +1 slack for rounding
+    assert(hw.cpuPercent >= 0.0 && hw.cpuPercent <= 100.0);
+}
+
+static void test_cpu_percent_uses_delta_between_calls() {
+    // First call in the process has no prior sample -- verified by the
+    // ranges test above already returning a valid (possibly 0) value.
+    // Two back-to-back calls should each still land in [0, 100]; this is
+    // mostly a smoke test that repeated sampling doesn't corrupt the static
+    // previous-sample state (e.g. counter underflow from bad delta math).
+    HwStats a = getHwStats();
+    HwStats b = getHwStats();
+    assert(a.cpuPercent >= 0.0 && a.cpuPercent <= 100.0);
+    assert(b.cpuPercent >= 0.0 && b.cpuPercent <= 100.0);
 }
 
 static void test_find_git_branch_in_real_repo() {
@@ -39,6 +52,7 @@ static void test_find_git_branch_not_a_repo() {
 
 int main() {
     test_hwstats_plausible_ranges();
+    test_cpu_percent_uses_delta_between_calls();
     test_find_git_branch_in_real_repo();
     test_find_git_branch_from_subdirectory();
     test_find_git_branch_not_a_repo();
