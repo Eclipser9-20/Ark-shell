@@ -1,6 +1,7 @@
 #include "expand.h"
 #include <cctype>
 #include <cstdlib>
+#include <cstring>
 #include <glob.h>
 #include <sstream>
 
@@ -12,6 +13,146 @@ static bool isNameChar(char c) { return std::isalnum((unsigned char)c) || c == '
 static std::string lookupVar(const std::string& name, const ShellState& state) {
     auto it = state.vars.find(name);
     return it != state.vars.end() ? it->second : "";
+}
+
+// --- Arithmetic expansion: $(( expr )) --------------------------------------
+// A small recursive-descent integer evaluator with C operator precedence.
+// Bare identifiers resolve to their variable's value parsed as an integer
+// (0 if unset or non-numeric, matching bash). Read-only: no in-expression
+// assignment (x+=1) -- the common idiom `i=$((i+1))` does its assignment on
+// the OUTER `i=` and works fine with a read-only evaluator. Malformed input
+// evaluates to 0 rather than throwing, so a bad expression degrades to "0"
+// instead of crashing the shell.
+namespace {
+struct ArithEval {
+    const std::string& s;
+    size_t pos = 0;
+    const ShellState& state;
+    bool ok = true;
+
+    ArithEval(const std::string& str, const ShellState& st) : s(str), state(st) {}
+
+    void skipSpace() { while (pos < s.size() && std::isspace((unsigned char)s[pos])) pos++; }
+    bool eof() { skipSpace(); return pos >= s.size(); }
+    char peek() { skipSpace(); return pos < s.size() ? s[pos] : '\0'; }
+
+    // Consume a specific multi-char operator if it's next; returns true if so.
+    bool eat(const char* op) {
+        skipSpace();
+        size_t n = std::strlen(op);
+        if (s.compare(pos, n, op) == 0) { pos += n; return true; }
+        return false;
+    }
+
+    long parsePrimary() {
+        skipSpace();
+        if (pos >= s.size()) { ok = false; return 0; }
+        char c = s[pos];
+        if (c == '(') {
+            pos++;
+            long v = parseExpr();
+            skipSpace();
+            if (pos < s.size() && s[pos] == ')') pos++; else ok = false;
+            return v;
+        }
+        if (std::isdigit((unsigned char)c)) {
+            size_t j = pos;
+            while (j < s.size() && std::isdigit((unsigned char)s[j])) j++;
+            long v = std::strtol(s.substr(pos, j - pos).c_str(), nullptr, 10);
+            pos = j;
+            return v;
+        }
+        if (std::isalpha((unsigned char)c) || c == '_') {
+            size_t j = pos;
+            while (j < s.size() && isNameChar(s[j])) j++;
+            std::string name = s.substr(pos, j - pos);
+            pos = j;
+            std::string val = lookupVar(name, state);
+            return val.empty() ? 0 : std::strtol(val.c_str(), nullptr, 10);
+        }
+        ok = false;
+        return 0;
+    }
+
+    long parseUnary() {
+        skipSpace();
+        if (eat("!")) return !parseUnary();
+        if (eat("~")) return ~parseUnary();
+        if (pos < s.size() && s[pos] == '-') { pos++; return -parseUnary(); }
+        if (pos < s.size() && s[pos] == '+') { pos++; return parseUnary(); }
+        return parsePrimary();
+    }
+
+    long parseMul() {
+        long v = parseUnary();
+        for (;;) {
+            skipSpace();
+            if (eat("*")) v = v * parseUnary();
+            else if (eat("/")) { long d = parseUnary(); v = d != 0 ? v / d : 0; }
+            else if (eat("%")) { long d = parseUnary(); v = d != 0 ? v % d : 0; }
+            else break;
+        }
+        return v;
+    }
+
+    long parseAdd() {
+        long v = parseMul();
+        for (;;) {
+            skipSpace();
+            if (pos < s.size() && s[pos] == '+' && !(pos + 1 < s.size() && s[pos + 1] == '+')) { pos++; v = v + parseMul(); }
+            else if (pos < s.size() && s[pos] == '-' && !(pos + 1 < s.size() && s[pos + 1] == '-')) { pos++; v = v - parseMul(); }
+            else break;
+        }
+        return v;
+    }
+
+    long parseShift() {
+        long v = parseAdd();
+        for (;;) {
+            if (eat("<<")) v = v << parseAdd();
+            else if (eat(">>")) v = v >> parseAdd();
+            else break;
+        }
+        return v;
+    }
+
+    long parseRel() {
+        long v = parseShift();
+        for (;;) {
+            // Two-char forms first so "<=" isn't mis-read as "<" then "=".
+            if (eat("<=")) v = (v <= parseShift());
+            else if (eat(">=")) v = (v >= parseShift());
+            else if (eat("<")) v = (v < parseShift());
+            else if (eat(">")) v = (v > parseShift());
+            else break;
+        }
+        return v;
+    }
+
+    long parseEq() {
+        long v = parseRel();
+        for (;;) {
+            if (eat("==")) v = (v == parseRel());
+            else if (eat("!=")) v = (v != parseRel());
+            else break;
+        }
+        return v;
+    }
+
+    long parseBAnd() { long v = parseEq(); while (peek() == '&' && !(pos + 1 < s.size() && s[pos + 1] == '&')) { pos++; v = v & parseEq(); } return v; }
+    long parseBXor() { long v = parseBAnd(); while (peek() == '^') { pos++; v = v ^ parseBAnd(); } return v; }
+    long parseBOr()  { long v = parseBXor(); while (peek() == '|' && !(pos + 1 < s.size() && s[pos + 1] == '|')) { pos++; v = v | parseBXor(); } return v; }
+    long parseLAnd() { long v = parseBOr(); while (eat("&&")) { long r = parseBOr(); v = (v && r); } return v; }
+    long parseLOr()  { long v = parseLAnd(); while (eat("||")) { long r = parseLAnd(); v = (v || r); } return v; }
+
+    long parseExpr() { return parseLOr(); }
+};
+} // namespace
+
+static std::string evalArithmetic(const std::string& expr, const ShellState& state) {
+    ArithEval e(expr, state);
+    long v = e.parseExpr();
+    return std::to_string(v);
 }
 
 // Expands a single ${...} or $NAME form starting at src[i] == '$'.
@@ -36,6 +177,30 @@ static std::string expandOne(const std::string& src, size_t& i, const ShellState
             return val.empty() ? dflt : val;
         }
         return lookupVar(inner, state);
+    }
+    // Arithmetic expansion $(( expr )) -- MUST be checked before the $(...)
+    // command-substitution branch below, since both start with "$(". The
+    // inner expression can contain balanced parens, e.g. $(( (2+3)*4 )).
+    if (i + 1 < src.size() && src[i] == '(' && src[i + 1] == '(') {
+        size_t j = i + 2;
+        int depth = 0;
+        std::string expr;
+        bool closed = false;
+        while (j < src.size()) {
+            if (src[j] == '(') { depth++; expr += src[j]; j++; }
+            else if (src[j] == ')') {
+                if (depth == 0) {
+                    // This ')' plus the next one close the arithmetic.
+                    if (j + 1 < src.size() && src[j + 1] == ')') { j += 2; closed = true; }
+                    else j += 1; // tolerate a single ')' as the close
+                    break;
+                }
+                depth--; expr += src[j]; j++;
+            } else { expr += src[j]; j++; }
+        }
+        i = j;
+        (void)closed;
+        return evalArithmetic(expr, state);
     }
     if (i < src.size() && src[i] == '(') {
         int depth = 1;
