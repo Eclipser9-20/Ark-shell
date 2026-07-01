@@ -1,0 +1,6 @@
+x=global
+f() { local x=inner; echo "in=$x"; return 3; echo unreached; }
+f
+echo "status=$? out=$x"
+counter() { for i in 1 2 3 4 5; do if [ "$i" = "3" ]; then return; fi; echo "n=$i"; done; }
+counter

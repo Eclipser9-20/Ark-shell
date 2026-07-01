@@ -313,8 +313,20 @@ static int runFunctionDef(Node* fn, ShellState& state) {
 static int callFunction(Node* body, const std::vector<std::string>& argv, ShellState& state) {
     std::vector<std::string> params(argv.begin() + 1, argv.end()); // argv[0] is the function name
     state.argStack.push_back(params);
+    state.localScopes.emplace_back(); // fresh local-variable scope for this call
     int status = execNode(body, state);
+    // Restore any variables `local` shadowed in this call.
+    for (auto& [name, saved] : state.localScopes.back()) {
+        if (saved.existed) state.vars[name] = saved.value;
+        else state.vars.erase(name);
+    }
+    state.localScopes.pop_back();
     state.argStack.pop_back();
+    // `return` sets returnFlag; consume it here, turning it into the call's
+    // status. (It stays set while unwinding nested if/while/for inside the
+    // body -- see the runList/loop checks -- and is cleared once we're back
+    // out of the function.)
+    if (state.returnFlag) { status = state.returnStatus; state.returnFlag = false; }
     return status;
 }
 
@@ -576,7 +588,9 @@ static int runIf(Node* ifn, ShellState& state) {
 static int runWhile(Node* wn, ShellState& state) {
     int status = 0;
     while (execNode(wn->children[0].get(), state) == 0) {
+        if (state.returnFlag) break; // condition itself may have returned
         status = execNode(wn->children[1].get(), state);
+        if (state.returnFlag) break; // `return` inside the loop body
     }
     return status;
 }
@@ -586,6 +600,7 @@ static int runFor(Node* fn, ShellState& state) {
     for (const auto& raw : fn->forWords) {
         state.vars[fn->forVar] = expandWord(raw, state);
         status = execNode(fn->children[0].get(), state);
+        if (state.returnFlag) break; // `return` inside the loop body
     }
     return status;
 }
@@ -609,6 +624,7 @@ static int runList(Node* list, ShellState& state) {
         if (prevJoin == JoinOp::Or && status == 0) continue;
         status = execNode(stmt, state);
         state.lastStatus = status;
+        if (state.returnFlag) break; // `return` stops the rest of the list/body
     }
     return status;
 }

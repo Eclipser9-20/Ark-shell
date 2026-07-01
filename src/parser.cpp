@@ -147,7 +147,8 @@ std::unique_ptr<Node> Parser::parseFunctionDef() {
         advance(); // '('
         if (check(TokKind::RParen)) advance(); // ')'
     }
-    advance(); // '{' (a plain Word token with text "{")
+    while (check(TokKind::Newline)) advance(); // allow a newline before the body's '{'
+    expectOpenBrace();
     fn->funcBody = parseStatementList({});
     if (check(TokKind::Word) && peek().text == "}") advance();
     return fn;
@@ -172,7 +173,7 @@ std::unique_ptr<Node> Parser::parseStatement() {
         advance(); // '('
         advance(); // ')'
         while (check(TokKind::Newline)) advance(); // bash allows a newline before the body's '{'
-        advance(); // '{' (a plain Word token with text "{")
+        expectOpenBrace();
         fn->funcBody = parseStatementList({});
         if (check(TokKind::Word) && peek().text == "}") advance();
         return fn;

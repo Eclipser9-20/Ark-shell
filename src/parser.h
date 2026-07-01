@@ -45,6 +45,16 @@ private:
         }
         advance();
     }
+    // A function body's `{` is lexed as a plain Word token with text "{".
+    // Verifying it explicitly (instead of an unconditional advance()) is what
+    // stops `greet()` with no body from advancing PAST the End sentinel and
+    // reading out of bounds -- a SIGBUS crash. On End it throws an
+    // incomplete error so interactive mode shows a continuation prompt.
+    void expectOpenBrace() {
+        if (check(TokKind::Word) && peek().text == "{") { advance(); return; }
+        throw ParseError(peek().line, peek().col, "expected '{' for function body",
+                          peek().kind == TokKind::End);
+    }
     bool atStatementEnd() const {
         TokKind k = peek().kind;
         return k == TokKind::Newline || k == TokKind::Semi || k == TokKind::DSemi || k == TokKind::End;

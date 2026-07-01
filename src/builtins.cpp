@@ -1,9 +1,14 @@
 #include "builtins.h"
+#include "exec.h"
+#include "lexer.h"
+#include "parser.h"
 #include <climits>
 #include <csignal>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <iterator>
+#include <memory>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <termios.h>
@@ -104,6 +109,64 @@ static int b_dirs(const std::vector<std::string>&, ShellState& state) {
 // intended tool but still works on a bare box. Creates the file (with a
 // commented template) if it doesn't exist yet, so the editor always opens
 // something. Runs the editor as a normal foreground child.
+// `source FILE` / `. FILE`: run FILE's commands in the CURRENT shell (so its
+// assignments, aliases, functions, and cd's affect this session), unlike
+// executing it as a subprocess. The parsed AST is retained in a session-
+// lifetime static so any functions it defines keep working after source
+// returns.
+// `return [n]`: stop the current function (or sourced script) and set its
+// status to n (default: last status). Sets a flag that runList and the loop
+// executors honor, unwinding back to callFunction which consumes it.
+static int b_return(const std::vector<std::string>& argv, ShellState& state) {
+    state.returnStatus = argv.size() > 1 ? std::atoi(argv[1].c_str()) : state.lastStatus;
+    state.returnFlag = true;
+    return state.returnStatus;
+}
+
+// `local NAME[=value] ...`: declares function-scoped variables. Each name's
+// prior state is saved in the current function's local scope and restored
+// when the function returns (see callFunction). Outside a function it behaves
+// like a plain assignment (with a warning), matching common shells.
+static int b_local(const std::vector<std::string>& argv, ShellState& state) {
+    bool inFunction = !state.localScopes.empty();
+    if (!inFunction && argv.size() > 1) {
+        std::cerr << "local: can only be used in a function\n";
+    }
+    for (size_t i = 1; i < argv.size(); i++) {
+        auto eq = argv[i].find('=');
+        std::string name = eq == std::string::npos ? argv[i] : argv[i].substr(0, eq);
+        std::string val = eq == std::string::npos ? "" : argv[i].substr(eq + 1);
+        if (inFunction) {
+            auto& scope = state.localScopes.back();
+            if (scope.find(name) == scope.end()) { // first `local` for this name in this call
+                auto vit = state.vars.find(name);
+                scope[name] = ShellState::SavedVar{vit != state.vars.end(), vit != state.vars.end() ? vit->second : std::string()};
+            }
+        }
+        state.vars[name] = val;
+    }
+    return 0;
+}
+
+static int b_source(const std::vector<std::string>& argv, ShellState& state) {
+    if (argv.size() < 2) { std::cerr << "source: filename argument required\n"; return 1; }
+    std::ifstream f(argv[1]);
+    if (!f.is_open()) { std::cerr << "source: " << argv[1] << ": cannot open\n"; return 1; }
+    std::string src((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    static std::vector<std::unique_ptr<Node>> sourcedRoots; // keep function bodies alive for the session
+    try {
+        Lexer lex(src);
+        Parser p(lex.tokenize());
+        auto ast = p.parse();
+        int rc = execNode(ast.get(), state);
+        sourcedRoots.push_back(std::move(ast));
+        return rc;
+    } catch (const std::exception& e) {
+        std::cerr << "source: " << argv[1] << ": " << e.what() << "\n";
+        return 1;
+    }
+}
+
 static int b_ark_settings(const std::vector<std::string>&, ShellState&) {
     const char* home = getenv("HOME");
     std::string dir = std::string(home ? home : "") + "/.config/ark";
@@ -299,6 +362,8 @@ const std::unordered_map<std::string, BuiltinFn>& builtinRegistry() {
         {"alias", b_alias}, {"unalias", b_unalias},
         {"pushd", b_pushd}, {"popd", b_popd}, {"dirs", b_dirs},
         {"ark-settings", b_ark_settings},
+        {"source", b_source}, {".", b_source},
+        {"return", b_return}, {"local", b_local},
     };
     return reg;
 }
