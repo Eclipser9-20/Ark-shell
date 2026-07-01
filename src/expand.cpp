@@ -4,7 +4,6 @@
 #include <cstring>
 #include <fnmatch.h>
 #include <glob.h>
-#include <sstream>
 #include <unistd.h>
 
 static CaptureHook g_captureHook;
@@ -392,11 +391,28 @@ static std::string expandTilde(const std::string& word) {
     return std::string(home) + word.substr(1);
 }
 
-static std::vector<std::string> splitOnWhitespace(const std::string& s) {
+// IFS-style field splitting that is QUOTE-AWARE: whitespace inside a \x01
+// (double-quote) or \x02 (single-quote) sentinel span does NOT split the
+// field, and the sentinel markers themselves are stripped from the output.
+// This is what makes a mixed word like `name=\x02a b\x02` stay a single
+// field "name=a b" instead of splitting on the interior space -- the bug
+// that broke `alias ll='ls -la'` (the value arrived as one arg but got
+// split), and equally `echo a"b c"d` -> should be one word "ab cd".
+static std::vector<std::string> splitFields(const std::string& s) {
     std::vector<std::string> out;
-    std::istringstream iss(s);
-    std::string tok;
-    while (iss >> tok) out.push_back(tok);
+    std::string cur;
+    bool started = false, inDq = false, inSq = false;
+    for (char c : s) {
+        if (c == '\x01' && !inSq) { inDq = !inDq; started = true; continue; }
+        if (c == '\x02' && !inDq) { inSq = !inSq; started = true; continue; }
+        if (!inDq && !inSq && std::isspace((unsigned char)c)) {
+            if (started) { out.push_back(cur); cur.clear(); started = false; }
+            continue; // collapse runs of unquoted whitespace
+        }
+        cur += c;
+        started = true;
+    }
+    if (started) out.push_back(cur);
     return out;
 }
 
@@ -548,7 +564,7 @@ std::vector<std::string> expandWords(const std::vector<std::string>& words, Shel
             result.push_back(expanded);
             continue;
         }
-        auto pieces = splitOnWhitespace(expanded);
+        auto pieces = splitFields(expanded);
         for (auto& p : pieces) {
             auto globbed = globExpand(p);
             for (auto& g : globbed) result.push_back(std::move(g));

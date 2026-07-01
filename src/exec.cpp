@@ -12,6 +12,7 @@
 #include <fcntl.h>
 #include <iostream>
 #include <spawn.h>
+#include <set>
 #include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
@@ -351,6 +352,38 @@ static int runCommand(Node* cmd, ShellState& state) {
     } envRestore{state, savedVars, savedEnvPresent, !assignments.empty()};
 
     std::vector<std::string> tempWords(cmd->words.begin() + firstCmdWord, cmd->words.end());
+
+    // Alias expansion on the command word (bash expands aliases before
+    // function/builtin lookup, so an alias can shadow either). The first word
+    // is matched RAW: a quoted command word (`"ls"`) is sentinel-wrapped and
+    // won't match a bare alias name, which is exactly bash's "quoting
+    // suppresses alias expansion" rule for free. A `visited` set stops
+    // recursive aliases (`alias ll='ll -x'`) from looping. Only alias values
+    // that lex to pure words are spliced -- an alias whose value contains a
+    // pipe/operator (`alias x='a | b'`) can't be represented by word
+    // substitution alone and is left unexpanded (a known limitation).
+    {
+        std::set<std::string> visited;
+        while (!tempWords.empty()) {
+            std::string first = tempWords[0];
+            auto ait = state.aliases.find(first);
+            if (ait == state.aliases.end() || visited.count(first)) break;
+            visited.insert(first);
+            Lexer alex(ait->second);
+            auto toks = alex.tokenize();
+            std::vector<std::string> aliasWords;
+            bool onlyWords = true;
+            for (auto& t : toks) {
+                if (t.kind == TokKind::End) break;
+                if (t.kind == TokKind::Word) aliasWords.push_back(t.text);
+                else { onlyWords = false; break; }
+            }
+            if (!onlyWords || aliasWords.empty()) break;
+            tempWords.erase(tempWords.begin());
+            tempWords.insert(tempWords.begin(), aliasWords.begin(), aliasWords.end());
+        }
+    }
+
     auto argv = expandWords(tempWords, state);
     if (argv.empty()) return 0;
 

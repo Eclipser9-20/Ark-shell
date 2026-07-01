@@ -58,6 +58,40 @@ static int b_unset(const std::vector<std::string>& argv, ShellState& state) {
     return 0;
 }
 
+static int b_alias(const std::vector<std::string>& argv, ShellState& state) {
+    if (argv.size() == 1) {
+        // No args: list all aliases, in `alias name='value'` form.
+        for (const auto& [name, value] : state.aliases) {
+            std::cout << "alias " << name << "='" << value << "'\n";
+        }
+        return 0;
+    }
+    int rc = 0;
+    for (size_t i = 1; i < argv.size(); i++) {
+        auto eq = argv[i].find('=');
+        if (eq == std::string::npos) {
+            // `alias name` -- show that one alias.
+            auto it = state.aliases.find(argv[i]);
+            if (it != state.aliases.end()) std::cout << "alias " << it->first << "='" << it->second << "'\n";
+            else { std::cerr << "alias: " << argv[i] << ": not found\n"; rc = 1; }
+        } else {
+            // `alias name=value` -- define. The value arrived already
+            // unquoted by the lexer/expander (alias ll='ls -la' gives the
+            // arg "ll=ls -la"), so store everything after the first '='.
+            state.aliases[argv[i].substr(0, eq)] = argv[i].substr(eq + 1);
+        }
+    }
+    return rc;
+}
+
+static int b_unalias(const std::vector<std::string>& argv, ShellState& state) {
+    int rc = 0;
+    for (size_t i = 1; i < argv.size(); i++) {
+        if (state.aliases.erase(argv[i]) == 0) { std::cerr << "unalias: " << argv[i] << ": not found\n"; rc = 1; }
+    }
+    return rc;
+}
+
 static int b_type(const std::vector<std::string>& argv, ShellState&) {
     if (argv.size() < 2) return 1;
     auto& reg = builtinRegistry();
@@ -136,6 +170,7 @@ const std::unordered_map<std::string, BuiltinFn>& builtinRegistry() {
         {"cd", b_cd}, {"exit", b_exit}, {"pwd", b_pwd}, {"echo", b_echo},
         {"export", b_export}, {"unset", b_unset}, {"type", b_type}, {"read", b_read},
         {"jobs", b_jobs}, {"fg", b_fg}, {"bg", b_bg},
+        {"alias", b_alias}, {"unalias", b_unalias},
     };
     return reg;
 }
