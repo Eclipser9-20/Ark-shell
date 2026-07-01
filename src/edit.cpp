@@ -1,4 +1,5 @@
 #include "edit.h"
+#include "complete.h"
 #include "highlight.h"
 #include <iostream>
 #include <termios.h>
@@ -44,6 +45,33 @@ std::optional<std::string> readLine(const std::string& prompt, History& history)
         if (c == 4 && buf.empty()) { std::cout << "\n"; return std::nullopt; } // Ctrl-D on empty line: EOF
         if (c == 127 || c == 8) { // Backspace
             if (cursor > 0) { buf.erase(cursor - 1, 1); cursor--; redraw(); }
+            continue;
+        }
+        if (c == 9) { // Tab
+            auto [wordStart, word] = wordUnderCursor(buf, cursor);
+            bool cmdPos = isCommandPosition(buf, wordStart);
+            auto candidates = cmdPos ? completeCommand(word) : completePath(word);
+            if (candidates.empty()) { continue; }
+
+            std::string prefix = longestCommonPrefix(candidates);
+            if (prefix.size() > word.size()) {
+                buf.replace(wordStart, word.size(), prefix);
+                cursor = wordStart + prefix.size();
+                if (candidates.size() == 1) {
+                    char sep = (!cmdPos && isDirectory(prefix)) ? '/' : ' ';
+                    buf.insert(cursor, 1, sep);
+                    cursor++;
+                }
+                redraw();
+            } else if (candidates.size() > 1) {
+                std::cout << "\n";
+                for (size_t i = 0; i < candidates.size(); i++) {
+                    std::cout << candidates[i];
+                    if (i + 1 < candidates.size()) std::cout << "  ";
+                }
+                std::cout << "\n";
+                redraw();
+            }
             continue;
         }
         if (c == '\x1b') { // escape sequence (arrow keys: ESC [ A/B/C/D)
