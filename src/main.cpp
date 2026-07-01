@@ -15,6 +15,24 @@
 #include <unistd.h>
 #include <vector>
 
+static void printParseError(const std::string& source, const ParseError& e) {
+    // gcc/`bash -n`-style diagnostic: message + offending source line + a
+    // caret pointing at the column. `source` may be a whole multi-line
+    // program (non-interactive) or a single accumulated statement
+    // (interactive) -- either way, e.line is 1-indexed into it.
+    std::vector<std::string> lines;
+    std::string cur;
+    for (char c : source) {
+        if (c == '\n') { lines.push_back(cur); cur.clear(); }
+        else cur += c;
+    }
+    lines.push_back(cur);
+    std::string offending = (e.line >= 1 && (size_t)e.line <= lines.size()) ? lines[e.line - 1] : "";
+    std::cerr << "ark: parse error at line " << e.line << ", col " << e.col << ": " << e.what() << "\n";
+    std::cerr << offending << "\n";
+    std::cerr << std::string(e.col > 0 ? e.col - 1 : 0, ' ') << "^\n";
+}
+
 int main() {
     ShellState state;
     JobTable jobTable;
@@ -40,10 +58,21 @@ int main() {
         // multi-line, and parsing a single line like "while cond ; do" in
         // isolation always fails (no matching 'done' on that line yet).
         std::string source((std::istreambuf_iterator<char>(std::cin)), std::istreambuf_iterator<char>());
-        Lexer lex(source);
-        Parser parser(lex.tokenize());
-        auto ast = parser.parse();
-        return execNode(ast.get(), state);
+        try {
+            Lexer lex(source);
+            Parser parser(lex.tokenize());
+            auto ast = parser.parse();
+            return execNode(ast.get(), state);
+        } catch (const ParseError& e) {
+            // A genuine syntax error (not "ran out of input") in a script
+            // is fatal with a clean nonzero exit -- there's no continuation
+            // prompt to fall back to outside interactive mode.
+            printParseError(source, e);
+            return 1;
+        } catch (const std::exception& e) {
+            std::cerr << "ark: internal error: " << e.what() << "\n";
+            return 1;
+        }
     }
 
     // Interactive: read one line at a time via the raw-termios line editor,
@@ -81,8 +110,7 @@ int main() {
             Parser parser(lex.tokenize());
             auto ast = parser.parse();
             execNode(ast.get(), state);
-            if (!continuing) history.append(histPath, pending);
-            else history.append(histPath, pending); // multi-line entry, stored as one history line
+            history.append(histPath, pending); // multi-line entries are stored as one history line
             astRoots.push_back(std::move(ast));
             pending.clear();
             continuing = false;
@@ -90,10 +118,17 @@ int main() {
             if (e.incomplete) {
                 continuing = true; // wait for more input, don't report an error
             } else {
-                std::cerr << "ark: parse error at line " << e.line << ", col " << e.col << ": " << e.what() << "\n";
+                printParseError(pending, e);
                 pending.clear();
                 continuing = false;
             }
+        } catch (const std::exception& e) {
+            // Never let an unexpected internal error kill the whole process
+            // -- this may one day be a login shell, and a crashed login
+            // shell means no terminal at all. Log and keep the REPL alive.
+            std::cerr << "ark: internal error: " << e.what() << "\n";
+            pending.clear();
+            continuing = false;
         }
     }
 
