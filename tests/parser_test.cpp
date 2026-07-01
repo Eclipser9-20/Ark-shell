@@ -76,6 +76,26 @@ static void test_while() {
     assert(wn->children.size() == 2);
 }
 
+static void test_for() {
+    auto root = parseSrc("for x in a b c ; do echo $x ; done");
+    Node* fn = root->children[0].get();
+    assert(fn->kind == NodeKind::For);
+    assert(fn->forVar == "x");
+    assert(fn->forWords.size() == 3);
+    assert(fn->forWords[1] == "b");
+    assert(fn->children.size() == 1); // body
+}
+
+static void test_case() {
+    auto root = parseSrc("case $x in a) echo A ;; b) echo B ;; esac");
+    Node* cn = root->children[0].get();
+    assert(cn->kind == NodeKind::Case);
+    assert(cn->caseWord == "$x");
+    assert(cn->caseClauses.size() == 2);
+    assert(cn->caseClauses[0].first == "a");
+    assert(cn->caseClauses[1].first == "b");
+}
+
 int main() {
     test_simple_command();
     test_redirects();
@@ -85,5 +105,7 @@ int main() {
     test_if();
     test_if_else();
     test_while();
+    test_for();
+    test_case();
     std::cout << "all parser simple-command tests passed\n";
 }

@@ -31,7 +31,7 @@ private:
     }
     bool atStatementEnd() const {
         TokKind k = peek().kind;
-        return k == TokKind::Newline || k == TokKind::Semi || k == TokKind::End;
+        return k == TokKind::Newline || k == TokKind::Semi || k == TokKind::DSemi || k == TokKind::End;
     }
 
     std::unique_ptr<Node> parseCommand();

@@ -87,9 +87,46 @@ std::unique_ptr<Node> Parser::parseWhile() {
     return wn;
 }
 
+std::unique_ptr<Node> Parser::parseFor() {
+    advance(); // 'for'
+    auto fn = std::make_unique<Node>();
+    fn->kind = NodeKind::For;
+    fn->forVar = advance().text; // variable name
+    advance(); // 'in'
+    while (!check(TokKind::Semi) && !check(TokKind::Newline)) {
+        fn->forWords.push_back(advance().text);
+    }
+    while (check(TokKind::Semi) || check(TokKind::Newline)) advance(); // separator(s) before 'do'
+    expect(TokKind::Do, "do");
+    fn->children.push_back(parseStatementList({TokKind::Done}));
+    expect(TokKind::Done, "done");
+    return fn;
+}
+
+std::unique_ptr<Node> Parser::parseCase() {
+    advance(); // 'case'
+    auto cn = std::make_unique<Node>();
+    cn->kind = NodeKind::Case;
+    cn->caseWord = advance().text;
+    advance(); // 'in'
+    while (check(TokKind::Newline) || check(TokKind::Semi)) advance();
+    while (!check(TokKind::Esac)) {
+        std::string pattern = advance().text;
+        advance(); // ')'
+        auto body = parseStatementList({TokKind::DSemi, TokKind::Esac});
+        cn->caseClauses.emplace_back(pattern, std::move(body));
+        if (check(TokKind::DSemi)) advance();
+        while (check(TokKind::Newline) || check(TokKind::Semi)) advance();
+    }
+    expect(TokKind::Esac, "esac");
+    return cn;
+}
+
 std::unique_ptr<Node> Parser::parseStatement() {
     if (check(TokKind::If)) return parseIf();
     if (check(TokKind::While)) return parseWhile();
+    if (check(TokKind::For)) return parseFor();
+    if (check(TokKind::Case)) return parseCase();
     auto stmt = parsePipeline();
     if (check(TokKind::Amp)) { advance(); stmt->background = true; }
     if (check(TokKind::And)) { advance(); stmt->joinOp = JoinOp::And; }
