@@ -4,6 +4,7 @@
 static TokKind keywordKind(const std::string& w) {
     static const std::unordered_map<std::string, TokKind> kw = {
         {"if", TokKind::If}, {"then", TokKind::Then}, {"else", TokKind::Else},
+        {"elif", TokKind::Elif},
         {"fi", TokKind::Fi}, {"while", TokKind::While}, {"do", TokKind::Do},
         {"done", TokKind::Done}, {"for", TokKind::For}, {"in", TokKind::In},
         {"case", TokKind::Case}, {"esac", TokKind::Esac}, {"function", TokKind::Function},

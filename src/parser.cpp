@@ -79,18 +79,23 @@ std::unique_ptr<Node> Parser::parseStatementList(std::initializer_list<TokKind> 
     return list;
 }
 
-std::unique_ptr<Node> Parser::parseIf() {
-    advance(); // consume 'if'
+std::unique_ptr<Node> Parser::parseIf(bool isElif) {
+    advance(); // consume 'if' (or 'elif' when recursed)
     auto ifn = std::make_unique<Node>();
     ifn->kind = NodeKind::If;
-    ifn->children.push_back(parseStatementList({TokKind::Then}));
+    ifn->children.push_back(parseStatementList({TokKind::Then}));           // condition
     expect(TokKind::Then, "then");
-    ifn->children.push_back(parseStatementList({TokKind::Else, TokKind::Fi}));
-    if (check(TokKind::Else)) {
+    ifn->children.push_back(parseStatementList({TokKind::Elif, TokKind::Else, TokKind::Fi})); // then-body
+    // `elif COND; then ...` becomes the else-branch modeled as a nested If.
+    // The nested parseIf(true) does NOT consume the shared `fi` -- only the
+    // outermost `if` does, once the whole chain has unwound.
+    if (check(TokKind::Elif)) {
+        ifn->children.push_back(parseIf(/*isElif=*/true));
+    } else if (check(TokKind::Else)) {
         advance();
-        ifn->children.push_back(parseStatementList({TokKind::Fi}));
+        ifn->children.push_back(parseStatementList({TokKind::Fi}));         // else-body
     }
-    expect(TokKind::Fi, "fi");
+    if (!isElif) expect(TokKind::Fi, "fi");
     return ifn;
 }
 

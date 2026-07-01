@@ -217,12 +217,50 @@ static int b_pwd(const std::vector<std::string>&, ShellState& state) {
     return 0;
 }
 
+// Interprets the standard backslash escapes echo -e supports.
+static std::string echoEscapes(const std::string& s) {
+    std::string out;
+    for (size_t i = 0; i < s.size(); i++) {
+        if (s[i] == '\\' && i + 1 < s.size()) {
+            switch (s[++i]) {
+                case 'n': out += '\n'; break;
+                case 't': out += '\t'; break;
+                case 'r': out += '\r'; break;
+                case '\\': out += '\\'; break;
+                case 'a': out += '\a'; break;
+                case 'b': out += '\b'; break;
+                case '0': out += '\0'; break;
+                default: out += '\\'; out += s[i]; break;
+            }
+        } else {
+            out += s[i];
+        }
+    }
+    return out;
+}
+
 static int b_echo(const std::vector<std::string>& argv, ShellState&) {
-    for (size_t i = 1; i < argv.size(); i++) {
-        std::cout << argv[i];
+    // Parse leading flags: -n (no trailing newline), -e (interpret escapes),
+    // -E (don't). Multiple/combined (-ne) allowed, like bash.
+    size_t start = 1;
+    bool newline = true, escapes = false;
+    while (start < argv.size() && argv[start].size() >= 2 && argv[start][0] == '-') {
+        const std::string& f = argv[start];
+        bool allFlagChars = true;
+        for (size_t k = 1; k < f.size(); k++) if (f[k] != 'n' && f[k] != 'e' && f[k] != 'E') { allFlagChars = false; break; }
+        if (!allFlagChars) break;
+        for (size_t k = 1; k < f.size(); k++) {
+            if (f[k] == 'n') newline = false;
+            else if (f[k] == 'e') escapes = true;
+            else if (f[k] == 'E') escapes = false;
+        }
+        start++;
+    }
+    for (size_t i = start; i < argv.size(); i++) {
+        std::cout << (escapes ? echoEscapes(argv[i]) : argv[i]);
         if (i + 1 < argv.size()) std::cout << " ";
     }
-    std::cout << "\n";
+    if (newline) std::cout << "\n";
     return 0;
 }
 

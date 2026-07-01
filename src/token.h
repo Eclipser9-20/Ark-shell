@@ -4,7 +4,7 @@
 enum class TokKind {
     Word, Pipe, And, Or, Semi, DSemi, Amp, RedirIn, RedirOut, RedirAppend, RedirErrOut,
     RedirHeredoc,
-    LParen, RParen, If, Then, Else, Fi, While, Do, Done, For, In, Case, Esac,
+    LParen, RParen, If, Then, Else, Elif, Fi, While, Do, Done, For, In, Case, Esac,
     Function, Newline, End
 };
 

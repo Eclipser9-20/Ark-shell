@@ -64,7 +64,7 @@ private:
     std::unique_ptr<Node> parsePipeline();
     std::unique_ptr<Node> parseStatement();
     std::unique_ptr<Node> parseStatementList(std::initializer_list<TokKind> stopTokens);
-    std::unique_ptr<Node> parseIf();
+    std::unique_ptr<Node> parseIf(bool isElif = false);
     std::unique_ptr<Node> parseWhile();
     std::unique_ptr<Node> parseFor();
     std::unique_ptr<Node> parseCase();
