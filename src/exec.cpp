@@ -181,6 +181,53 @@ static int runCommand(Node* cmd, ShellState& state) {
     return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
 }
 
+static bool globMatch(const std::string& pattern, const std::string& text) {
+    // Minimal glob: supports '*' and literal chars only (no '?'/'[...]' in phase 1).
+    size_t p = 0, t = 0, star = std::string::npos, match = 0;
+    while (t < text.size()) {
+        if (p < pattern.size() && (pattern[p] == text[t])) { p++; t++; }
+        else if (p < pattern.size() && pattern[p] == '*') { star = p++; match = t; }
+        else if (star != std::string::npos) { p = star + 1; t = ++match; }
+        else return false;
+    }
+    while (p < pattern.size() && pattern[p] == '*') p++;
+    return p == pattern.size();
+}
+
+static int runIf(Node* ifn, ShellState& state) {
+    int cond = execNode(ifn->children[0].get(), state);
+    if (cond == 0) return execNode(ifn->children[1].get(), state);
+    if (ifn->children.size() > 2) return execNode(ifn->children[2].get(), state);
+    return 0;
+}
+
+static int runWhile(Node* wn, ShellState& state) {
+    int status = 0;
+    while (execNode(wn->children[0].get(), state) == 0) {
+        status = execNode(wn->children[1].get(), state);
+    }
+    return status;
+}
+
+static int runFor(Node* fn, ShellState& state) {
+    int status = 0;
+    for (const auto& raw : fn->forWords) {
+        state.vars[fn->forVar] = expandWord(raw, state);
+        status = execNode(fn->children[0].get(), state);
+    }
+    return status;
+}
+
+static int runCase(Node* cn, ShellState& state) {
+    std::string word = expandWord(cn->caseWord, state);
+    for (auto& clause : cn->caseClauses) {
+        if (globMatch(clause.first, word)) {
+            return execNode(clause.second.get(), state);
+        }
+    }
+    return 0;
+}
+
 static int runList(Node* list, ShellState& state) {
     int status = 0;
     for (size_t i = 0; i < list->children.size(); i++) {
@@ -202,10 +249,16 @@ int execNode(Node* node, ShellState& state) {
             return runCommand(node, state);
         case NodeKind::Pipeline:
             return runPipeline(node, state);
+        case NodeKind::If:
+            return runIf(node, state);
+        case NodeKind::While:
+            return runWhile(node, state);
+        case NodeKind::For:
+            return runFor(node, state);
+        case NodeKind::Case:
+            return runCase(node, state);
         default:
-            // Pipeline/If/While/For/Case/FunctionDef land here starting
-            // Tasks 13/15/16 — until then, executing one is a plan bug,
-            // not a runtime input a phase-1 test script should produce.
+            // FunctionDef lands here until Task 16.
             std::cerr << "ark: internal error: unimplemented node kind\n";
             return 1;
     }

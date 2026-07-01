@@ -1,0 +1,2 @@
+if /usr/bin/true ; then echo yes ; else echo no ; fi
+if /usr/bin/false ; then echo yes ; else echo no ; fi
