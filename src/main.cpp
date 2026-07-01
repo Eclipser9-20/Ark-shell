@@ -1,3 +1,4 @@
+#include "chrome.h"
 #include "edit.h"
 #include "exec.h"
 #include "expand.h"
@@ -6,9 +7,13 @@
 #include "lexer.h"
 #include "parser.h"
 #include "shell_state.h"
+#include <atomic>
+#include <chrono>
 #include <climits>
 #include <csignal>
 #include <cstdlib>
+#include <cstring>
+#include <ctime>
 #include <iostream>
 #include <iterator>
 #include <string>
@@ -16,26 +21,25 @@
 #include <vector>
 
 // TokyoNight Night palette, matching the zsh/Ghostty/vim theming from
-// earlier this session -- blue for the shell name, cyan for cwd, comment-gray
-// for the continuation prompt, green/red arrow tracking the last exit status.
+// earlier this session -- comment-gray for the time/continuation prompt,
+// green/red arrow tracking the last exit status.
 namespace tn {
 constexpr const char* R = "\x1b[0m";
-constexpr const char* BLUE = "\x1b[38;2;122;162;247m";
-constexpr const char* CYAN = "\x1b[38;2;125;207;255m";
 constexpr const char* GREEN = "\x1b[38;2;158;206;106m";
 constexpr const char* RED = "\x1b[38;2;247;118;142m";
 constexpr const char* COMMENT = "\x1b[38;2;86;95;137m";
 } // namespace tn
 
-static std::string shortCwd(const std::string& cwd, const std::string& home) {
-    if (!home.empty() && cwd.rfind(home, 0) == 0) return "~" + cwd.substr(home.size());
-    return cwd;
-}
-
-static std::string buildPrompt(const ShellState& state, const std::string& home) {
+static std::string buildPrompt(const ShellState& state, const std::string&) {
+    // cwd now lives in the pinned top bar (chrome.h's paintChrome), so the
+    // per-command prompt simplifies to just the time and the status arrow.
+    time_t now = time(nullptr);
+    struct tm local;
+    localtime_r(&now, &local);
+    char clock[8];
+    strftime(clock, sizeof(clock), "%H:%M", &local);
     std::string arrowColor = state.lastStatus == 0 ? tn::GREEN : tn::RED;
-    return std::string(tn::BLUE) + "ark " + tn::CYAN + shortCwd(state.cwd, home) + " " +
-           arrowColor + "\xe2\x9d\xaf" + tn::R + " "; // "\xe2\x9d\xaf" = UTF-8 for ❯
+    return std::string(tn::COMMENT) + clock + " " + arrowColor + "\xe2\x9d\xaf" + tn::R + " ";
 }
 
 static std::string continuationPrompt() {
@@ -117,12 +121,36 @@ int main() {
     History history;
     history.load(histPath);
 
+    auto sessionStart = std::chrono::steady_clock::now();
+    auto sessionSeconds = [&]() {
+        return std::chrono::duration<double>(std::chrono::steady_clock::now() - sessionStart).count();
+    };
+    auto doReassertChrome = [&]() {
+        reassertChrome(state.cwd, findGitBranch(state.cwd), sessionSeconds(), getHwStats());
+    };
+
+    // The handler only flips an atomic flag -- printf/getHwStats/file I/O
+    // are not async-signal-safe, and calling them directly from a signal
+    // handler risks deadlock if SIGWINCH arrives mid-printf elsewhere (same
+    // class of bug as the SIGCHLD handler earlier this session). The main
+    // loop polls the flag once per iteration and does the real repaint.
+    static std::atomic<bool> g_resized{false};
+    struct sigaction winch;
+    std::memset(&winch, 0, sizeof(winch));
+    winch.sa_handler = [](int) { g_resized.store(true, std::memory_order_relaxed); };
+    sigemptyset(&winch.sa_mask);
+    winch.sa_flags = SA_RESTART;
+    sigaction(SIGWINCH, &winch, nullptr);
+
+    doReassertChrome(); // initial paint before the REPL loop starts
+
     std::vector<std::unique_ptr<Node>> astRoots; // keeps FunctionDef bodies alive
     std::string pending;
     bool continuing = false;
 
     for (;;) {
         jobTable.drainSignalQueue();
+        if (g_resized.exchange(false, std::memory_order_relaxed)) doReassertChrome();
         std::string prompt = continuing ? continuationPrompt() : buildPrompt(state, home);
         auto got = readLine(prompt, history);
         if (!got) break; // Ctrl-D / EOF
@@ -137,7 +165,13 @@ int main() {
         try {
             Parser parser(lex.tokenize());
             auto ast = parser.parse();
+            doReassertChrome(); // preexec-equivalent: reassert before the
+                                // command runs, in case a PRIOR command
+                                // left the terminal in a bad state
             execNode(ast.get(), state);
+            doReassertChrome(); // precmd-equivalent: reassert after, in
+                                // case THIS command (clear/vim/etc) reset
+                                // the scroll region during its own run
             history.append(histPath, pending); // multi-line entries are stored as one history line
             astRoots.push_back(std::move(ast));
             pending.clear();

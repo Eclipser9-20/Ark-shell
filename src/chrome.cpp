@@ -1,8 +1,10 @@
 #include "chrome.h"
+#include <cstdio>
 #include <fstream>
 #include <mach/mach.h>
 #include <mach/mach_host.h>
 #include <mach/vm_statistics.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/sysctl.h>
 #include <unistd.h>
@@ -51,4 +53,73 @@ std::string findGitBranch(const std::string& cwd) {
         auto slash = dir.find_last_of('/');
         dir = (slash == std::string::npos || slash == 0) ? "/" : dir.substr(0, slash);
     }
+}
+
+static bool getTerminalSize(int& rows, int& cols) {
+    struct winsize ws;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) != 0 || ws.ws_row == 0 || ws.ws_col == 0) {
+        return false;
+    }
+    rows = ws.ws_row;
+    cols = ws.ws_col;
+    return true;
+}
+
+void setScrollRegion() {
+    int rows, cols;
+    if (!getTerminalSize(rows, cols) || rows <= 2) return;
+    printf("\x1b[2;%dr", rows - 1);
+    fflush(stdout);
+}
+
+static std::string formatSession(double seconds) {
+    int total = (int)seconds;
+    int h = total / 3600, m = (total % 3600) / 60, s = total % 60;
+    char buf[32];
+    if (h > 0) snprintf(buf, sizeof(buf), "%dh%02dm", h, m);
+    else if (m > 0) snprintf(buf, sizeof(buf), "%dm%02ds", m, s);
+    else snprintf(buf, sizeof(buf), "%ds", s);
+    return buf;
+}
+
+void paintChrome(const std::string& cwd, const std::string& gitBranch,
+                  double sessionSeconds, const HwStats& hw) {
+    int rows, cols;
+    if (!getTerminalSize(rows, cols) || rows <= 2) return;
+
+    std::string top = cwd;
+    if (!gitBranch.empty()) top += "  " + gitBranch;
+    if ((int)top.size() > cols) top = top.substr(0, cols);
+
+    char host[256] = {0};
+    gethostname(host, sizeof(host) - 1);
+    const char* user = getenv("USER");
+    std::string left = std::string(user ? user : "user") + "@" + host + " " + formatSession(sessionSeconds);
+
+    char hwbuf[128];
+    snprintf(hwbuf, sizeof(hwbuf), "load %.2f  mem %.1f/%.1fG", hw.load1, hw.memUsedGB, hw.memTotalGB);
+    std::string right = hwbuf;
+
+    std::string bottom = left;
+    int pad = cols - (int)left.size() - (int)right.size();
+    if (pad < 1) pad = 1;
+    bottom += std::string(pad, ' ') + right;
+    if ((int)bottom.size() > cols) bottom = bottom.substr(0, cols);
+
+    printf("\x1b[?2026h");    // begin synchronized update
+    printf("\x1b" "7");       // save cursor (DECSC) -- split literal: "\x1b7"
+                               // would parse as the hex escape "\x1b7" (a
+                               // 3-digit hex value, out of range), since \x
+                               // greedily consumes hex digits and '7' is one
+    printf("\x1b[1;1H\x1b[2K%s", top.c_str());
+    printf("\x1b[%d;1H\x1b[2K%s", rows, bottom.c_str());
+    printf("\x1b" "8");       // restore cursor (DECRC), same split-literal fix
+    printf("\x1b[?2026l");    // end synchronized update
+    fflush(stdout);
+}
+
+void reassertChrome(const std::string& cwd, const std::string& gitBranch,
+                     double sessionSeconds, const HwStats& hw) {
+    setScrollRegion();
+    paintChrome(cwd, gitBranch, sessionSeconds, hw);
 }
