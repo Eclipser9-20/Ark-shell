@@ -1,0 +1,5 @@
+echo {a,b,c}
+echo file{1,2,3}.txt
+echo {1..5}
+echo {a,b}{1,2}
+echo "{a,b}"

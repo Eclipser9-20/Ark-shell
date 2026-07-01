@@ -266,6 +266,107 @@ static std::vector<std::string> splitOnWhitespace(const std::string& s) {
     return out;
 }
 
+// --- Brace expansion: {a,b,c} and {1..5} ------------------------------------
+// A purely textual, quote-agnostic word transform that runs BEFORE variable/
+// glob expansion (matching bash's ordering). `echo a{b,c}d` -> "abd acd";
+// `echo {1..4}` -> "1 2 3 4"; nesting like {a,b{c,d}} works via recursion.
+// Braces inside a quote sentinel span (\x01.../\x02...) are left alone, so
+// `echo "{a,b}"` stays literal.
+
+// A {..} range: numeric ({1..5}, {5..1}) or single-char ({a..e}). Returns the
+// enumerated items, or empty if `body` isn't a valid range.
+static std::vector<std::string> braceRange(const std::string& body) {
+    size_t dots = body.find("..");
+    if (dots == std::string::npos) return {};
+    std::string lo = body.substr(0, dots);
+    std::string hi = body.substr(dots + 2);
+    if (hi.find("..") != std::string::npos) return {}; // {a..b..c} step form unsupported
+    if (lo.empty() || hi.empty()) return {};
+
+    auto allDigits = [](const std::string& s) {
+        size_t k = (s[0] == '-') ? 1 : 0;
+        if (k == s.size()) return false;
+        for (; k < s.size(); k++) if (!std::isdigit((unsigned char)s[k])) return false;
+        return true;
+    };
+    std::vector<std::string> out;
+    if (allDigits(lo) && allDigits(hi)) {
+        long a = std::strtol(lo.c_str(), nullptr, 10);
+        long b = std::strtol(hi.c_str(), nullptr, 10);
+        if (a <= b) for (long v = a; v <= b; v++) out.push_back(std::to_string(v));
+        else for (long v = a; v >= b; v--) out.push_back(std::to_string(v));
+        return out;
+    }
+    if (lo.size() == 1 && hi.size() == 1 && std::isalpha((unsigned char)lo[0]) && std::isalpha((unsigned char)hi[0])) {
+        char a = lo[0], b = hi[0];
+        if (a <= b) for (char c = a; c <= b; c++) out.push_back(std::string(1, c));
+        else for (char c = a; c >= b; c--) out.push_back(std::string(1, c));
+        return out;
+    }
+    return {};
+}
+
+// Split `body` on top-level commas (not nested inside inner braces), for the
+// {a,b,c} form. Returns fewer than 2 pieces if there's no top-level comma.
+static std::vector<std::string> braceSplitCommas(const std::string& body) {
+    std::vector<std::string> parts;
+    std::string cur;
+    int depth = 0;
+    for (char c : body) {
+        if (c == '{') { depth++; cur += c; }
+        else if (c == '}') { depth--; cur += c; }
+        else if (c == ',' && depth == 0) { parts.push_back(cur); cur.clear(); }
+        else cur += c;
+    }
+    parts.push_back(cur);
+    return parts;
+}
+
+static std::vector<std::string> braceExpand(const std::string& w) {
+    // Find the first VALID brace group: a '{' with a matching '}' whose body
+    // has either a top-level comma or is a range. Braces inside a sentinel
+    // span are skipped. A '{' that isn't a valid group is passed over so a
+    // later valid group can still expand (bash: `{x}{a,b}` -> "{x}a {x}b").
+    size_t n = w.size();
+    for (size_t i = 0; i < n; i++) {
+        if (w[i] == '\x01' || w[i] == '\x02') {
+            // skip to the matching closing sentinel of the same kind
+            char s = w[i];
+            size_t j = i + 1;
+            while (j < n && w[j] != s) j++;
+            i = j;
+            continue;
+        }
+        if (w[i] != '{') continue;
+        // find matching '}' at the same depth
+        int depth = 1;
+        size_t j = i + 1;
+        for (; j < n && depth > 0; j++) {
+            if (w[j] == '{') depth++;
+            else if (w[j] == '}') depth--;
+            if (depth == 0) break;
+        }
+        if (depth != 0) continue; // unbalanced -- not a group
+        std::string body = w.substr(i + 1, j - (i + 1));
+        std::string pre = w.substr(0, i);
+        std::string post = w.substr(j + 1);
+
+        std::vector<std::string> alts = braceSplitCommas(body);
+        if (alts.size() < 2) {
+            alts = braceRange(body);
+            if (alts.empty()) continue; // no comma, no range -> not expandable here
+        }
+        std::vector<std::string> result;
+        for (const auto& alt : alts) {
+            for (const auto& sub : braceExpand(pre + alt + post)) {
+                result.push_back(sub);
+            }
+        }
+        return result;
+    }
+    return {w};
+}
+
 // Expands filesystem glob characters (* ?) via POSIX glob(3). A pattern with
 // no glob chars is returned as-is; a pattern that matches nothing is left
 // literal (bash's default behavior without nullglob), not silently dropped.
@@ -294,7 +395,11 @@ std::string expandNoSplit(const std::string& w, ShellState& state) {
 
 std::vector<std::string> expandWords(const std::vector<std::string>& words, ShellState& state) {
     std::vector<std::string> result;
-    for (const auto& w : words) {
+    for (const auto& rawWord : words) {
+        // Brace expansion runs first (bash ordering) and turns one word into
+        // possibly many; each resulting word then goes through the normal
+        // quote/variable/split/glob pipeline below.
+        for (const auto& w : braceExpand(rawWord)) {
         bool singleQuoted = w.size() >= 2 && w.front() == '\x02' && w.back() == '\x02';
         bool doubleQuoted = w.size() >= 2 && w.front() == '\x01' && w.back() == '\x01';
         if (singleQuoted) {
@@ -314,6 +419,7 @@ std::vector<std::string> expandWords(const std::vector<std::string>& words, Shel
             auto globbed = globExpand(p);
             for (auto& g : globbed) result.push_back(std::move(g));
         }
+        } // brace-expanded word loop
     }
     return result;
 }
