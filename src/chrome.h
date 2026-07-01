@@ -44,22 +44,40 @@ void setScrollRegion();
 void paintChrome(const std::string& cwd, const std::string& gitBranch,
                   double sessionSeconds, const HwStats& hw);
 
+// How reassertChrome() should handle the cursor after painting. Three
+// distinct situations need three distinct answers -- an earlier version
+// collapsed this to one bool ("always reseed to row 2"), which fixed `clear`
+// leaving the cursor on the pinned bar but broke the common case: a normal
+// multi-line command's output should let the next prompt continue right
+// where that output left off (scrolling down normally), not get yanked back
+// to row 2 after every single command -- which looked like text printing
+// upward instead of down.
+enum class CursorPolicy {
+    // Restore to the TRUE prior position (DECSC/DECRC). Correct whenever
+    // there's a real in-progress position to protect: readLine()'s idle
+    // tick (mid-typing -- the user's cursor could be anywhere in their
+    // line), and right before a command runs (readLine() already left the
+    // cursor at a fresh, valid line after Enter).
+    Preserve,
+    // Skip save/restore entirely; explicitly place the cursor at (row 2,
+    // col 1). Correct only at startup, where there's no earlier "real"
+    // position to protect -- whatever the parent shell left is irrelevant.
+    ForceReseed,
+    // Restore to the TRUE prior position like Preserve, then verify it via
+    // a DSR cursor-position query (\x1b[6n) and correct to (row 2, col 1)
+    // ONLY if that position turns out to be outside the scroll region (row
+    // 1, or the last row). Correct for right after a foreground command
+    // finishes: most commands leave the cursor somewhere valid (preserving
+    // it is right), but `clear`-family commands reset it to (1,1) via their
+    // own \x1b[H (on the pinned top bar), which naive preservation would
+    // otherwise hand straight to the next prompt draw.
+    VerifyAndCorrect,
+};
+
 // setScrollRegion() + paintChrome() together -- the single function called
 // at every command boundary (preexec-equivalent and precmd-equivalent) and
 // from the SIGWINCH handler, so the region is reasserted on both sides of
 // anything a child process might have reset it.
-//
-// `reseedToPromptRow`, when true, ignores wherever the cursor's TRUE
-// position was and explicitly places it at the start of the scroll region
-// (row 2, col 1) after painting, instead of restoring the prior position.
-// Real bug found live: `clear`'s own \x1b[H leaves the cursor at (1,1) --
-// the DECSC/DECRC save/restore dance faithfully preserves that, handing row
-// 1 right back to the next prompt draw and printing it on top of the pinned
-// top bar. Pass true for any call site that ISN'T mid-line-editing (command
-// boundaries, resize, startup) where a foreground command could have left
-// the cursor anywhere; pass false only when reasserting DURING active
-// typing (readLine()'s idle tick), where the user's in-progress cursor
-// position must be preserved exactly instead of reset.
 void reassertChrome(const std::string& cwd, const std::string& gitBranch,
                      double sessionSeconds, const HwStats& hw,
-                     bool reseedToPromptRow = false);
+                     CursorPolicy policy = CursorPolicy::Preserve);

@@ -1,11 +1,14 @@
 #include "chrome.h"
+#include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <mach/host_info.h>
 #include <mach/mach.h>
 #include <mach/mach_host.h>
 #include <mach/vm_statistics.h>
 #include <sys/ioctl.h>
+#include <sys/select.h>
 #include <sys/stat.h>
 #include <sys/sysctl.h>
 #include <unistd.h>
@@ -253,8 +256,64 @@ void paintChrome(const std::string& cwd, const std::string& gitBranch,
     fflush(stdout);
 }
 
+// Queries the terminal's actual cursor row via DSR (\x1b[6n), reading the
+// \x1b[<row>;<col>R response synchronously from stdin (only safe to call
+// while stdin is already in raw mode -- see CursorPolicy::VerifyAndCorrect's
+// caller, which holds a RawMode guard for the whole reassert). Returns -1 on
+// any failure (terminal doesn't support DSR, response is malformed, or
+// nothing arrives within ~200ms) -- callers should treat -1 as "unknown,
+// leave the cursor alone" rather than guessing.
+//
+// This does read real bytes off stdin, so it's not entirely free of risk: a
+// keystroke the user types in the same instant could in principle interleave
+// with the response. In practice this window is a handful of milliseconds
+// (terminals answer DSR essentially instantly, far faster than a human can
+// type a next keystroke) -- the same tradeoff tools like fzf/tmux/zsh prompt
+// frameworks already make when they query cursor position this way.
+static int queryCursorRow() {
+    printf("\x1b[6n");
+    fflush(stdout);
+
+    std::string resp;
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+    for (;;) {
+        auto remaining = deadline - std::chrono::steady_clock::now();
+        if (remaining <= std::chrono::milliseconds(0)) return -1;
+        auto us = std::chrono::duration_cast<std::chrono::microseconds>(remaining).count();
+        struct timeval tv;
+        tv.tv_sec = (long)(us / 1000000);
+        tv.tv_usec = (long)(us % 1000000);
+
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(STDIN_FILENO, &fds);
+        int rv = select(STDIN_FILENO + 1, &fds, nullptr, nullptr, &tv);
+        if (rv <= 0) return -1; // timeout, or a signal interrupted the wait
+                                 // (rare here, and not worth retrying for a
+                                 // best-effort correction) -- caller falls
+                                 // back to leaving the cursor alone
+
+        char c;
+        ssize_t n = read(STDIN_FILENO, &c, 1);
+        if (n <= 0) return -1;
+        resp += c;
+        if (c == 'R') break;
+        if (resp.size() > 32) return -1; // sanity guard against runaway input
+    }
+
+    size_t esc = resp.find("\x1b[");
+    size_t semi = esc == std::string::npos ? std::string::npos : resp.find(';', esc);
+    if (esc == std::string::npos || semi == std::string::npos) return -1;
+    std::string rowStr = resp.substr(esc + 2, semi - (esc + 2));
+    if (rowStr.empty()) return -1;
+    for (char ch : rowStr) {
+        if (!isdigit((unsigned char)ch)) return -1;
+    }
+    return std::atoi(rowStr.c_str());
+}
+
 void reassertChrome(const std::string& cwd, const std::string& gitBranch,
-                     double sessionSeconds, const HwStats& hw, bool reseedToPromptRow) {
+                     double sessionSeconds, const HwStats& hw, CursorPolicy policy) {
     // Real bug found live: DECSTBM (sent by setScrollRegion()) has a
     // documented side effect -- it moves the cursor to absolute row 1, col 1
     // (since origin mode/DECOM is off by default). paintChrome() used to
@@ -267,30 +326,37 @@ void reassertChrome(const std::string& cwd, const std::string& gitBranch,
     // cursor ONCE, here, before setScrollRegion() runs, and restoring once
     // after paintChrome() -- paintChrome() itself no longer touches the
     // saved-cursor slot at all.
-    //
-    // That fix assumed the TRUE saved position was always somewhere safe to
-    // restore to. It isn't: `clear`'s own \x1b[H leaves the cursor at (1,1)
-    // -- outside the scroll region, right on the pinned top bar -- and
-    // restoring to that exact spot just hands row 1 back to the next prompt
-    // draw. When reseedToPromptRow is set, skip the save/restore dance
-    // entirely and explicitly place the cursor at a known-good spot (row 2,
-    // col 1) instead of trusting whatever a foreground command left behind.
-    printf("\x1b[?2026h");         // begin synchronized update
-    if (!reseedToPromptRow) {
-        printf("\x1b" "7");        // DECSC: save the TRUE cursor position,
-                                    // before DECSTBM's cursor-reset side
-                                    // effect -- only meaningful if we're
-                                    // going to restore to it below
+    printf("\x1b[?2026h"); // begin synchronized update
+    if (policy != CursorPolicy::ForceReseed) {
+        printf("\x1b" "7"); // DECSC: save the TRUE cursor position, before
+                             // DECSTBM's cursor-reset side effect
     }
     setScrollRegion();
     paintChrome(cwd, gitBranch, sessionSeconds, hw);
-    if (reseedToPromptRow) {
-        printf("\x1b[2;1H");       // known-good position inside the scroll
-                                    // region, ignoring wherever the cursor
-                                    // actually was
+    if (policy == CursorPolicy::ForceReseed) {
+        printf("\x1b[2;1H"); // no valid prior position to protect (startup)
     } else {
-        printf("\x1b" "8");        // DECRC: restore to the TRUE original position
+        printf("\x1b" "8"); // DECRC: restore to the TRUE original position
     }
-    printf("\x1b[?2026l");         // end synchronized update
+    printf("\x1b[?2026l"); // end synchronized update
     fflush(stdout);
+
+    if (policy == CursorPolicy::VerifyAndCorrect) {
+        // A second bug found live: unconditionally forcing the cursor to
+        // row 2 after EVERY command (this policy's first attempt) fixed
+        // `clear` but broke the common case -- a normal multi-line
+        // command's output should let the next prompt continue right where
+        // it left off, not get yanked back to the top every time (looked
+        // like text printing upward instead of down). The DECRC above
+        // already restores to wherever the command actually left the
+        // cursor, which is correct for ordinary commands; only verify and
+        // correct if that turns out to be genuinely invalid (`clear`-family
+        // commands home the cursor to (1,1) via their own \x1b[H).
+        int rows, cols;
+        int row = getTerminalSize(rows, cols) ? queryCursorRow() : -1;
+        if (row != -1 && (row <= 1 || row >= rows)) {
+            printf("\x1b[2;1H");
+            fflush(stdout);
+        }
+    }
 }
