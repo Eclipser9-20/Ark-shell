@@ -2,6 +2,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <fnmatch.h>
 #include <glob.h>
 #include <sstream>
 
@@ -156,6 +157,127 @@ static std::string evalArithmetic(const std::string& expr, const ShellState& sta
 }
 
 // Expands a single ${...} or $NAME form starting at src[i] == '$'.
+// Expands the INNER text of a ${...} form (everything between the braces).
+// Supports the common bash parameter-expansion operators. Read-only (the
+// assigning form ${var:=word} behaves like ${var:-word} without persisting,
+// since expandOne runs on a const ShellState -- noted, low-frequency).
+static std::string expandParam(const std::string& inner, const ShellState& state) {
+    if (inner.empty()) return "";
+
+    // ${#name} -- length
+    if (inner[0] == '#' && inner.size() > 1) {
+        return std::to_string(lookupVar(inner.substr(1), state).size());
+    }
+
+    // Operators that use a colon-prefixed form (treat unset AND empty alike)
+    // vs the non-colon form (unset only). Scan for the first operator char
+    // after the name. Name is the leading run of name-chars.
+    size_t np = 0;
+    while (np < inner.size() && isNameChar(inner[np])) np++;
+    std::string name = inner.substr(0, np);
+    std::string rest = inner.substr(np); // operator + operand, or ""
+    std::string val = lookupVar(name, state);
+    bool isSet = state.vars.find(name) != state.vars.end();
+
+    if (rest.empty()) return val; // plain ${name}
+
+    // ${name:offset:length} and ${name:offset} -- substring. Distinguished
+    // from ${name:-word} etc. by the char after ':' being a digit or '-'
+    // sign/space that forms a number (here: only when it's NOT one of the
+    // :- := :+ :? operators).
+    auto isModifierColon = [&](char after) {
+        return after == '-' || after == '=' || after == '+' || after == '?';
+    };
+    if (rest[0] == ':' && rest.size() > 1 && !isModifierColon(rest[1])) {
+        // substring: parse offset[:length]
+        std::string body = rest.substr(1);
+        size_t colon2 = body.find(':');
+        long offset = std::strtol(body.substr(0, colon2).c_str(), nullptr, 10);
+        long length = colon2 == std::string::npos ? -1 : std::strtol(body.substr(colon2 + 1).c_str(), nullptr, 10);
+        long n = (long)val.size();
+        if (offset < 0) offset = n + offset; // negative offset counts from end
+        if (offset < 0) offset = 0;
+        if (offset > n) return "";
+        if (length < 0) return val.substr(offset); // to end
+        long end = offset + length;
+        if (end > n) end = n;
+        if (end < offset) end = offset;
+        return val.substr(offset, end - offset);
+    }
+
+    // Colon-modifier forms: :- := :+ :? (colon => also trigger on empty)
+    if (rest.size() >= 2 && rest[0] == ':' && isModifierColon(rest[1])) {
+        char op = rest[1];
+        std::string word = rest.substr(2);
+        bool unsetOrEmpty = val.empty();
+        if (op == '-') return unsetOrEmpty ? word : val;
+        if (op == '=') return unsetOrEmpty ? word : val; // read-only: no persist
+        if (op == '+') return unsetOrEmpty ? "" : word;
+        if (op == '?') return val; // error form unsupported; just return value
+    }
+    // Non-colon modifier forms: - = + ? (trigger on UNSET only)
+    if (rest[0] == '-' || rest[0] == '=' || rest[0] == '+' || rest[0] == '?') {
+        char op = rest[0];
+        std::string word = rest.substr(1);
+        if (op == '-') return isSet ? val : word;
+        if (op == '=') return isSet ? val : word;
+        if (op == '+') return isSet ? word : "";
+        if (op == '?') return val;
+    }
+
+    // ${name#pat} / ${name##pat} -- remove matching prefix (shortest/longest)
+    if (rest[0] == '#') {
+        bool longest = rest.size() > 1 && rest[1] == '#';
+        std::string pat = rest.substr(longest ? 2 : 1);
+        if (longest) {
+            for (size_t len = val.size(); (long)len >= 0; len--)
+                if (fnmatch(pat.c_str(), val.substr(0, len).c_str(), 0) == 0) return val.substr(len);
+        } else {
+            for (size_t len = 0; len <= val.size(); len++)
+                if (fnmatch(pat.c_str(), val.substr(0, len).c_str(), 0) == 0) return val.substr(len);
+        }
+        return val;
+    }
+    // ${name%pat} / ${name%%pat} -- remove matching suffix (shortest/longest)
+    if (rest[0] == '%') {
+        bool longest = rest.size() > 1 && rest[1] == '%';
+        std::string pat = rest.substr(longest ? 2 : 1);
+        if (longest) {
+            for (size_t len = val.size(); (long)len >= 0; len--)
+                if (fnmatch(pat.c_str(), val.substr(val.size() - len).c_str(), 0) == 0) return val.substr(0, val.size() - len);
+        } else {
+            for (size_t len = 0; len <= val.size(); len++)
+                if (fnmatch(pat.c_str(), val.substr(val.size() - len).c_str(), 0) == 0) return val.substr(0, val.size() - len);
+        }
+        return val;
+    }
+    // ${name/pat/repl} / ${name//pat/repl} -- literal substring replace
+    // (first / all). Glob patterns in the search side are treated literally
+    // here -- the overwhelmingly common use (${p//\//_}, ${f/.txt/.bak}) is
+    // literal, and full glob-substring matching is a much larger feature.
+    if (rest[0] == '/') {
+        bool all = rest.size() > 1 && rest[1] == '/';
+        std::string body = rest.substr(all ? 2 : 1);
+        size_t slash = body.find('/');
+        std::string pat = slash == std::string::npos ? body : body.substr(0, slash);
+        std::string repl = slash == std::string::npos ? "" : body.substr(slash + 1);
+        if (pat.empty()) return val;
+        std::string out;
+        size_t p = 0;
+        for (;;) {
+            size_t hit = val.find(pat, p);
+            if (hit == std::string::npos) { out += val.substr(p); break; }
+            out += val.substr(p, hit - p);
+            out += repl;
+            p = hit + pat.size();
+            if (!all) { out += val.substr(p); break; }
+        }
+        return out;
+    }
+
+    return val; // unrecognized operator: fall back to the plain value
+}
+
 // Advances i past the whole expansion and returns the substituted text.
 static std::string expandOne(const std::string& src, size_t& i, const ShellState& state) {
     size_t start = i;
@@ -165,18 +287,7 @@ static std::string expandOne(const std::string& src, size_t& i, const ShellState
         if (close == std::string::npos) { i = src.size(); return src.substr(start); }
         std::string inner = src.substr(i + 1, close - i - 1);
         i = close + 1;
-        if (!inner.empty() && inner[0] == '#') {
-            std::string name = inner.substr(1);
-            return std::to_string(lookupVar(name, state).size());
-        }
-        size_t op = inner.find(":-");
-        if (op != std::string::npos) {
-            std::string name = inner.substr(0, op);
-            std::string dflt = inner.substr(op + 2);
-            std::string val = lookupVar(name, state);
-            return val.empty() ? dflt : val;
-        }
-        return lookupVar(inner, state);
+        return expandParam(inner, state);
     }
     // Arithmetic expansion $(( expr )) -- MUST be checked before the $(...)
     // command-substitution branch below, since both start with "$(". The
