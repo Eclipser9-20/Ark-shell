@@ -13,6 +13,7 @@
 #include <iostream>
 #include <spawn.h>
 #include <set>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
@@ -443,6 +444,20 @@ static int runCommand(Node* cmd, ShellState& state) {
 
     auto& reg = builtinRegistry();
     auto it = reg.find(argv[0]);
+
+    // zsh auto_cd: a bare word that names an existing directory (and isn't a
+    // builtin/function) is treated as `cd <that dir>` instead of an attempt to
+    // execute it. Only for a single word with no redirects -- `./foo` with
+    // args is still a command. Requires the word to look path-like (contain
+    // '/', or be '.'/'..') OR be an existing directory entry, so a stray typo
+    // that happens to match a dir name in $PATH-ish spots isn't surprising.
+    if (it == reg.end() && argv.size() == 1 && cmd->redirects.empty()) {
+        struct stat st;
+        if (stat(argv[0].c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
+            return reg.at("cd")({"cd", argv[0]}, state);
+        }
+    }
+
     if (it != reg.end() && cmd->redirects.empty()) {
         return it->second(argv, state);
     }

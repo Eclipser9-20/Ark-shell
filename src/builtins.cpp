@@ -9,12 +9,30 @@
 
 static int b_cd(const std::vector<std::string>& argv, ShellState& state) {
     std::string target = argv.size() > 1 ? argv[1] : (getenv("HOME") ? getenv("HOME") : "/");
+    // `cd -` returns to the previous directory (OLDPWD) and echoes it, like
+    // bash/zsh. OLDPWD is tracked in the shell's own vars (and mirrored to the
+    // environment so child processes see it).
+    bool printResult = false;
+    if (target == "-") {
+        auto it = state.vars.find("OLDPWD");
+        if (it == state.vars.end() || it->second.empty()) {
+            std::cerr << "cd: OLDPWD not set\n";
+            return 1;
+        }
+        target = it->second;
+        printResult = true;
+    }
+    std::string prevCwd = state.cwd;
     if (::chdir(target.c_str()) != 0) {
         std::cerr << "cd: " << target << ": No such file or directory\n";
         return 1;
     }
     char buf[PATH_MAX];
     if (::getcwd(buf, sizeof(buf))) state.cwd = buf;
+    state.vars["OLDPWD"] = prevCwd;
+    ::setenv("OLDPWD", prevCwd.c_str(), 1);
+    ::setenv("PWD", state.cwd.c_str(), 1);
+    if (printResult) std::cout << state.cwd << "\n";
     return 0;
 }
 
