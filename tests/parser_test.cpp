@@ -106,6 +106,21 @@ static void test_function_def() {
     assert(f->funcBody->children[0]->words[0] == "echo");
 }
 
+static void test_function_def_with_parens() {
+    // Real bug found live: `function name() { ... }` (with the optional,
+    // semantically-empty parens bash also allows) hung the parser outright
+    // -- the unconditional advance() for '{' consumed '(' instead, leaving
+    // a stray ')' with no parse rule. Same assertions as the no-parens form
+    // above; only the source text differs.
+    auto root = parseSrc("function greet() { echo hi ; }");
+    Node* f = root->children[0].get();
+    assert(f->kind == NodeKind::FunctionDef);
+    assert(f->funcName == "greet");
+    assert(f->funcBody->kind == NodeKind::List);
+    assert(f->funcBody->children.size() == 1);
+    assert(f->funcBody->children[0]->words[0] == "echo");
+}
+
 int main() {
     test_simple_command();
     test_redirects();
@@ -118,5 +133,6 @@ int main() {
     test_for();
     test_case();
     test_function_def();
+    test_function_def_with_parens();
     std::cout << "all parser simple-command tests passed\n";
 }

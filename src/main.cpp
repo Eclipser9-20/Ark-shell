@@ -62,6 +62,31 @@ static void mkdirRecursive(const std::string& path) {
     }
 }
 
+// Real bug found live ("I think we got a memory leak"): the interactive
+// loop's astRoots vector kept EVERY executed top-level statement's AST
+// alive for the entire session -- needed for FunctionDef nodes, since
+// `state.functions[name]` stores a raw `Node*` into the body that must stay
+// valid for as long as the function might ever be called again, but there's
+// no reason a plain `echo hi` or `ls` needs to be kept around forever after
+// it's already run. In a long interactive session (the whole point of a
+// login/daily-driver shell) this grows without bound, each entry retaining
+// its full parsed tree (words, redirects, nested children) for no further
+// purpose. Only keep a statement alive if it (or something nested inside
+// it -- an `if`/`while`/case branch/etc. can itself define a function) is
+// or contains a FunctionDef; everything else's AST is freed the moment its
+// unique_ptr goes out of scope right after execution finishes.
+static bool containsFunctionDef(Node* node) {
+    if (!node) return false;
+    if (node->kind == NodeKind::FunctionDef) return true;
+    for (auto& child : node->children) {
+        if (containsFunctionDef(child.get())) return true;
+    }
+    for (auto& clause : node->caseClauses) {
+        if (containsFunctionDef(clause.second.get())) return true;
+    }
+    return containsFunctionDef(node->funcBody.get());
+}
+
 static void printParseError(const std::string& source, const ParseError& e) {
     // gcc/`bash -n`-style diagnostic: message + offending source line + a
     // caret pointing at the column. `source` may be a whole multi-line
@@ -246,7 +271,10 @@ int main() {
         doReassertChromeStartup(); // initial paint before the REPL loop starts
     }
 
-    std::vector<std::unique_ptr<Node>> astRoots; // keeps FunctionDef bodies alive
+    std::vector<std::unique_ptr<Node>> astRoots; // keeps FunctionDef bodies alive --
+                                                  // ONLY statements that define a
+                                                  // function get pushed here, see
+                                                  // containsFunctionDef() above
     std::string pending;
     bool continuing = false;
 
@@ -278,7 +306,11 @@ int main() {
                                 // somewhere invalid -- e.g. `clear`'s own
                                 // \x1b[H parks it at row 1, on the pinned bar
             history.append(histPath, pending); // multi-line entries are stored as one history line
-            astRoots.push_back(std::move(ast));
+            // Only keep this AST alive if a function body inside it needs
+            // to keep pointing at it -- otherwise let it free immediately
+            // (see containsFunctionDef()'s doc comment for why this matters
+            // for a long-running interactive session).
+            if (containsFunctionDef(ast.get())) astRoots.push_back(std::move(ast));
             pending.clear();
             continuing = false;
         } catch (const ParseError& e) {

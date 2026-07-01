@@ -127,6 +127,18 @@ std::unique_ptr<Node> Parser::parseFunctionDef() {
     auto fn = std::make_unique<Node>();
     fn->kind = NodeKind::FunctionDef;
     fn->funcName = advance().text;
+    // Optional `()` after the name -- both `function name { ... }` and
+    // `function name() { ... }` are valid bash syntax (the parens carry no
+    // semantic meaning here, unlike a real command's argument list). Without
+    // this, the unconditional advance() below for '{' would instead consume
+    // the '(' itself, leaving a stray ')' that parseStatementList has no
+    // rule for -- the same "unhandled token stalls the parser" bug class
+    // hit (and fixed) several times before in this codebase, this time
+    // specific to `function name() { ... }` hanging outright.
+    if (check(TokKind::LParen)) {
+        advance(); // '('
+        if (check(TokKind::RParen)) advance(); // ')'
+    }
     advance(); // '{' (a plain Word token with text "{")
     fn->funcBody = parseStatementList({});
     if (check(TokKind::Word) && peek().text == "}") advance();
