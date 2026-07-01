@@ -1,6 +1,7 @@
 #pragma once
 #include <csignal>
 #include <string>
+#include <sys/types.h>
 #include <vector>
 
 struct Job {
@@ -51,3 +52,18 @@ public:
 private:
     sigset_t old_;
 };
+
+// Real bug found live: `waitpid(pid, &status, 0)` (a blocking, foreground
+// wait -- every one of these in exec.cpp/builtins.cpp) returns -1/EINTR if
+// a signal interrupts it, and installIdleTicker()'s 1-second SIGALRM
+// (deliberately NOT SA_RESTART, so it can interrupt readLine()'s blocking
+// read()) does exactly that to ANY blocking syscall, including this one --
+// meaning any foreground command running past a 1-second tick boundary had
+// its wait aborted early. Code that didn't check for EINTR just fell
+// through treating the STILL-RUNNING child's untouched `status` as if it
+// had exited, returning control to the caller (and printing the next
+// prompt) while the real process kept running in the background -- exactly
+// the "draws the next prompt before the program finishes" bug reported
+// live. This wraps every blocking waitpid() call so a signal landing
+// mid-wait just retries instead of giving up.
+pid_t waitpidRetry(pid_t pid, int* status, int options);

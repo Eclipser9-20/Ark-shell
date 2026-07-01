@@ -4,6 +4,7 @@
 #include "jobs.h"
 #include "lexer.h"
 #include "parser.h"
+#include <cerrno>
 #include <cstdio>
 #include <cstring>
 #include <fcntl.h>
@@ -169,7 +170,7 @@ static int runPipeline(Node* pipeline, ShellState& state) {
     for (pid_t pid : pids) {
         if (pid == -1) continue;
         int st = 0;
-        waitpid(pid, &st, 0);
+        waitpidRetry(pid, &st, 0);
         status = WIFEXITED(st) ? WEXITSTATUS(st) : 1; // pipeline status = last stage's
     }
 
@@ -225,7 +226,7 @@ static int runCommand(Node* cmd, ShellState& state) {
             _exit(rc);
         }
         int status = 0;
-        waitpid(pid, &status, 0);
+        waitpidRetry(pid, &status, 0);
         return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
     }
 
@@ -247,7 +248,7 @@ static int runCommand(Node* cmd, ShellState& state) {
         return 127;
     }
     int status = 0;
-    waitpid(pid, &status, 0);
+    waitpidRetry(pid, &status, 0);
     return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
 }
 
@@ -418,10 +419,19 @@ std::string captureCommandOutput(const std::string& cmd, ShellState& state) {
     close(pipefd[1]);
     std::string output;
     char buf[4096];
-    ssize_t n;
-    while ((n = read(pipefd[0], buf, sizeof(buf))) > 0) output.append(buf, (size_t)n);
+    for (;;) {
+        ssize_t n = read(pipefd[0], buf, sizeof(buf));
+        if (n > 0) { output.append(buf, (size_t)n); continue; }
+        if (n < 0 && errno == EINTR) continue; // same SIGALRM hazard as the
+                                                 // waitpid() below -- a signal
+                                                 // landing mid-read() would
+                                                 // otherwise look like EOF
+                                                 // and silently truncate the
+                                                 // captured output
+        break; // n == 0 (real EOF) or a genuine read error
+    }
     close(pipefd[0]);
     int status = 0;
-    waitpid(pid, &status, 0);
+    waitpidRetry(pid, &status, 0);
     return output;
 }

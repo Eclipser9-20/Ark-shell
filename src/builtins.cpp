@@ -96,7 +96,7 @@ static int b_fg(const std::vector<std::string>& argv, ShellState& state) {
     tcsetpgrp(STDIN_FILENO, j->pgid);
     kill(-j->pgid, SIGCONT);
     int status = 0;
-    for (pid_t pid : j->pids) waitpid(pid, &status, 0);
+    for (pid_t pid : j->pids) waitpidRetry(pid, &status, 0);
     tcsetpgrp(STDIN_FILENO, shellPgid);
     state.jobs->remove(j->id);
     return WIFEXITED(status) ? WEXITSTATUS(status) : 1;

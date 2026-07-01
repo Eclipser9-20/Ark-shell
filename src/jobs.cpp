@@ -1,6 +1,7 @@
 #include "jobs.h"
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <csignal>
 #include <cstring>
 #include <sys/wait.h>
@@ -44,6 +45,14 @@ BlockSigchld::BlockSigchld() {
 
 BlockSigchld::~BlockSigchld() {
     sigprocmask(SIG_SETMASK, &old_, nullptr);
+}
+
+pid_t waitpidRetry(pid_t pid, int* status, int options) {
+    for (;;) {
+        pid_t r = waitpid(pid, status, options);
+        if (r < 0 && errno == EINTR) continue;
+        return r;
+    }
 }
 
 int JobTable::add(pid_t pgid, std::vector<pid_t> pids, std::string cmdline) {

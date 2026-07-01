@@ -1,2 +1,5 @@
 build/
 ark
+.DS_Store
+.swp
+*.swp
