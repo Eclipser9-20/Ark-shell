@@ -81,7 +81,17 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
         }
 
         char c;
-        ssize_t n = readByte(c);
+        // NOT readByte() here, deliberately: readByte()'s internal EINTR
+        // retry swallows the SIGALRM interruption before this loop ever
+        // sees it, so while genuinely idle (blocked in read(), no bytes
+        // arriving) the tick would never fire -- only the escape-sequence
+        // continuation bytes below use readByte(), where transparently
+        // retrying is correct because we're already committed to that
+        // multi-byte parse. A raw read() here lets EINTR propagate back to
+        // the top of the loop, where the tick actually gets checked, before
+        // retrying the read.
+        ssize_t n = read(STDIN_FILENO, &c, 1);
+        if (n < 0 && errno == EINTR) continue;
         if (n <= 0) return std::nullopt; // EOF/error
 
         if (c == '\r' || c == '\n') { std::cout << "\n"; return buf; }

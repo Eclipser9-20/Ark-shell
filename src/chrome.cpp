@@ -254,7 +254,7 @@ void paintChrome(const std::string& cwd, const std::string& gitBranch,
 }
 
 void reassertChrome(const std::string& cwd, const std::string& gitBranch,
-                     double sessionSeconds, const HwStats& hw) {
+                     double sessionSeconds, const HwStats& hw, bool reseedToPromptRow) {
     // Real bug found live: DECSTBM (sent by setScrollRegion()) has a
     // documented side effect -- it moves the cursor to absolute row 1, col 1
     // (since origin mode/DECOM is off by default). paintChrome() used to
@@ -267,12 +267,30 @@ void reassertChrome(const std::string& cwd, const std::string& gitBranch,
     // cursor ONCE, here, before setScrollRegion() runs, and restoring once
     // after paintChrome() -- paintChrome() itself no longer touches the
     // saved-cursor slot at all.
-    printf("\x1b[?2026h");   // begin synchronized update
-    printf("\x1b" "7");      // DECSC: save the TRUE cursor position, before
-                              // DECSTBM's cursor-reset side effect
+    //
+    // That fix assumed the TRUE saved position was always somewhere safe to
+    // restore to. It isn't: `clear`'s own \x1b[H leaves the cursor at (1,1)
+    // -- outside the scroll region, right on the pinned top bar -- and
+    // restoring to that exact spot just hands row 1 back to the next prompt
+    // draw. When reseedToPromptRow is set, skip the save/restore dance
+    // entirely and explicitly place the cursor at a known-good spot (row 2,
+    // col 1) instead of trusting whatever a foreground command left behind.
+    printf("\x1b[?2026h");         // begin synchronized update
+    if (!reseedToPromptRow) {
+        printf("\x1b" "7");        // DECSC: save the TRUE cursor position,
+                                    // before DECSTBM's cursor-reset side
+                                    // effect -- only meaningful if we're
+                                    // going to restore to it below
+    }
     setScrollRegion();
     paintChrome(cwd, gitBranch, sessionSeconds, hw);
-    printf("\x1b" "8");      // DECRC: restore to the TRUE original position
-    printf("\x1b[?2026l");   // end synchronized update
+    if (reseedToPromptRow) {
+        printf("\x1b[2;1H");       // known-good position inside the scroll
+                                    // region, ignoring wherever the cursor
+                                    // actually was
+    } else {
+        printf("\x1b" "8");        // DECRC: restore to the TRUE original position
+    }
+    printf("\x1b[?2026l");         // end synchronized update
     fflush(stdout);
 }

@@ -172,6 +172,16 @@ int main() {
         RawMode guard;
         reassertChrome(state.cwd, findGitBranch(state.cwd), sessionSeconds(), getHwStats());
     };
+    // Same repaint, but explicitly reseeds the cursor to (row 2, col 1)
+    // instead of restoring wherever it truly was -- see reassertChrome()'s
+    // reseedToPromptRow doc. Used at every call site EXCEPT readLine()'s
+    // idle tick: startup (nothing valid to restore to yet), and before/after
+    // a foreground command (which may have left the cursor anywhere, e.g.
+    // `clear`'s own \x1b[H parking it at row 1 -- directly on the pinned bar).
+    auto doReassertChromeReseed = [&]() {
+        RawMode guard;
+        reassertChrome(state.cwd, findGitBranch(state.cwd), sessionSeconds(), getHwStats(), true);
+    };
 
     // The handler only flips an atomic flag -- printf/getHwStats/file I/O
     // are not async-signal-safe, and calling them directly from a signal
@@ -207,16 +217,11 @@ int main() {
                                 // have left the terminal mode enabled
         mkdirRecursive(histDir);
         history.load(histPath);
-        doReassertChrome(); // initial paint before the REPL loop starts
-        // Seed the cursor inside the scroll region (row 2) for the very
-        // first prompt: reassertChrome()'s save/restore preserves whatever
-        // the cursor's TRUE position was, but on a fresh terminal that's
-        // row 1 -- outside the scroll region -- since there's no earlier
-        // "real" position to restore to yet. Every later reassertChrome()
-        // call correctly preserves the actual in-progress cursor position
-        // instead; this is a one-time seed.
-        printf("\x1b[2;1H");
-        fflush(stdout);
+        // Reseed variant: a fresh terminal has no earlier "real" cursor
+        // position to restore to (it'd just be wherever the shell that
+        // launched ark left it, often row 1), so explicitly land inside the
+        // scroll region instead of trying to preserve that.
+        doReassertChromeReseed(); // initial paint before the REPL loop starts
     }
 
     std::vector<std::unique_ptr<Node>> astRoots; // keeps FunctionDef bodies alive
@@ -225,7 +230,7 @@ int main() {
 
     for (;;) {
         jobTable.drainSignalQueue();
-        if (g_resized.exchange(false, std::memory_order_relaxed)) doReassertChrome();
+        if (g_resized.exchange(false, std::memory_order_relaxed)) doReassertChromeReseed();
         std::string prompt = continuing ? continuationPrompt() : buildPrompt(state, home);
         auto got = readLine(prompt, history, doReassertChrome);
         if (!got) break; // Ctrl-D / EOF
@@ -240,13 +245,16 @@ int main() {
         try {
             Parser parser(lex.tokenize());
             auto ast = parser.parse();
-            doReassertChrome(); // preexec-equivalent: reassert before the
-                                // command runs, in case a PRIOR command
+            doReassertChromeReseed(); // preexec-equivalent: reassert before
+                                // the command runs, in case a PRIOR command
                                 // left the terminal in a bad state
             execNode(ast.get(), state);
-            doReassertChrome(); // precmd-equivalent: reassert after, in
-                                // case THIS command (clear/vim/etc) reset
-                                // the scroll region during its own run
+            doReassertChromeReseed(); // precmd-equivalent: reassert after,
+                                // in case THIS command (clear/vim/etc) reset
+                                // the scroll region OR left the cursor
+                                // somewhere invalid during its own run --
+                                // e.g. `clear`'s own \x1b[H parks it at
+                                // row 1, right on the pinned top bar
             history.append(histPath, pending); // multi-line entries are stored as one history line
             astRoots.push_back(std::move(ast));
             pending.clear();

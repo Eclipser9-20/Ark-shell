@@ -48,5 +48,18 @@ void paintChrome(const std::string& cwd, const std::string& gitBranch,
 // at every command boundary (preexec-equivalent and precmd-equivalent) and
 // from the SIGWINCH handler, so the region is reasserted on both sides of
 // anything a child process might have reset it.
+//
+// `reseedToPromptRow`, when true, ignores wherever the cursor's TRUE
+// position was and explicitly places it at the start of the scroll region
+// (row 2, col 1) after painting, instead of restoring the prior position.
+// Real bug found live: `clear`'s own \x1b[H leaves the cursor at (1,1) --
+// the DECSC/DECRC save/restore dance faithfully preserves that, handing row
+// 1 right back to the next prompt draw and printing it on top of the pinned
+// top bar. Pass true for any call site that ISN'T mid-line-editing (command
+// boundaries, resize, startup) where a foreground command could have left
+// the cursor anywhere; pass false only when reasserting DURING active
+// typing (readLine()'s idle tick), where the user's in-progress cursor
+// position must be preserved exactly instead of reset.
 void reassertChrome(const std::string& cwd, const std::string& gitBranch,
-                     double sessionSeconds, const HwStats& hw);
+                     double sessionSeconds, const HwStats& hw,
+                     bool reseedToPromptRow = false);
