@@ -47,29 +47,57 @@ std::unique_ptr<Node> Parser::parsePipeline() {
     return pipe;
 }
 
-std::unique_ptr<Node> Parser::parse() {
-    auto root = std::make_unique<Node>();
-    root->kind = NodeKind::List;
+std::unique_ptr<Node> Parser::parseStatementList(std::initializer_list<TokKind> stopTokens) {
+    auto list = std::make_unique<Node>();
+    list->kind = NodeKind::List;
     for (;;) {
         while (check(TokKind::Newline) || check(TokKind::Semi)) advance();
-        if (check(TokKind::End)) break;
-        auto stmt = parsePipeline();
-        if (check(TokKind::Amp)) {
-            advance();
-            stmt->background = true;
-        }
-        if (check(TokKind::And)) {
-            advance();
-            stmt->joinOp = JoinOp::And;
-        } else if (check(TokKind::Or)) {
-            advance();
-            stmt->joinOp = JoinOp::Or;
-        } else if (check(TokKind::Semi)) {
-            stmt->joinOp = JoinOp::Seq;
-            // don't advance here — the while loop at the top of the next
-            // iteration consumes the Semi/Newline run
-        }
-        root->children.push_back(std::move(stmt));
+        bool stop = false;
+        for (TokKind t : stopTokens) if (check(t)) { stop = true; break; }
+        if (stop || check(TokKind::End)) break;
+        if (check(TokKind::Word) && peek().text == "}") break;
+        list->children.push_back(parseStatement());
     }
-    return root;
+    return list;
+}
+
+std::unique_ptr<Node> Parser::parseIf() {
+    advance(); // consume 'if'
+    auto ifn = std::make_unique<Node>();
+    ifn->kind = NodeKind::If;
+    ifn->children.push_back(parseStatementList({TokKind::Then}));
+    expect(TokKind::Then, "then");
+    ifn->children.push_back(parseStatementList({TokKind::Else, TokKind::Fi}));
+    if (check(TokKind::Else)) {
+        advance();
+        ifn->children.push_back(parseStatementList({TokKind::Fi}));
+    }
+    expect(TokKind::Fi, "fi");
+    return ifn;
+}
+
+std::unique_ptr<Node> Parser::parseWhile() {
+    advance(); // consume 'while'
+    auto wn = std::make_unique<Node>();
+    wn->kind = NodeKind::While;
+    wn->children.push_back(parseStatementList({TokKind::Do}));
+    expect(TokKind::Do, "do");
+    wn->children.push_back(parseStatementList({TokKind::Done}));
+    expect(TokKind::Done, "done");
+    return wn;
+}
+
+std::unique_ptr<Node> Parser::parseStatement() {
+    if (check(TokKind::If)) return parseIf();
+    if (check(TokKind::While)) return parseWhile();
+    auto stmt = parsePipeline();
+    if (check(TokKind::Amp)) { advance(); stmt->background = true; }
+    if (check(TokKind::And)) { advance(); stmt->joinOp = JoinOp::And; }
+    else if (check(TokKind::Or)) { advance(); stmt->joinOp = JoinOp::Or; }
+    else if (check(TokKind::Semi)) { stmt->joinOp = JoinOp::Seq; }
+    return stmt;
+}
+
+std::unique_ptr<Node> Parser::parse() {
+    return parseStatementList({});
 }

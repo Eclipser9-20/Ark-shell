@@ -54,11 +54,36 @@ static void test_background() {
     assert(cmd->background == true);
 }
 
+static void test_if() {
+    auto root = parseSrc("if true ; then echo yes ; fi");
+    Node* ifn = root->children[0].get();
+    assert(ifn->kind == NodeKind::If);
+    assert(ifn->children.size() == 2); // cond, then (no else)
+    assert(ifn->children[0]->kind == NodeKind::List);
+    assert(ifn->children[1]->kind == NodeKind::List);
+}
+
+static void test_if_else() {
+    auto root = parseSrc("if false ; then echo a ; else echo b ; fi");
+    Node* ifn = root->children[0].get();
+    assert(ifn->children.size() == 3); // cond, then, else
+}
+
+static void test_while() {
+    auto root = parseSrc("while true ; do echo loop ; done");
+    Node* wn = root->children[0].get();
+    assert(wn->kind == NodeKind::While);
+    assert(wn->children.size() == 2);
+}
+
 int main() {
     test_simple_command();
     test_redirects();
     test_pipeline();
     test_and_or_seq();
     test_background();
+    test_if();
+    test_if_else();
+    test_while();
     std::cout << "all parser simple-command tests passed\n";
 }
