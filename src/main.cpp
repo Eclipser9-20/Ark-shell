@@ -143,6 +143,14 @@ int main() {
     sigaction(SIGWINCH, &winch, nullptr);
 
     doReassertChrome(); // initial paint before the REPL loop starts
+    // Seed the cursor inside the scroll region (row 2) for the very first
+    // prompt: reassertChrome()'s save/restore preserves whatever the cursor's
+    // TRUE position was, but on a fresh terminal that's row 1 -- outside the
+    // scroll region -- since there's no earlier "real" position to restore
+    // to yet. Every later reassertChrome() call correctly preserves the
+    // actual in-progress cursor position instead; this is a one-time seed.
+    printf("\x1b[2;1H");
+    fflush(stdout);
 
     std::vector<std::unique_ptr<Node>> astRoots; // keeps FunctionDef bodies alive
     std::string pending;

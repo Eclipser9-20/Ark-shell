@@ -106,20 +106,34 @@ void paintChrome(const std::string& cwd, const std::string& gitBranch,
     bottom += std::string(pad, ' ') + right;
     if ((int)bottom.size() > cols) bottom = bottom.substr(0, cols);
 
-    printf("\x1b[?2026h");    // begin synchronized update
-    printf("\x1b" "7");       // save cursor (DECSC) -- split literal: "\x1b7"
-                               // would parse as the hex escape "\x1b7" (a
-                               // 3-digit hex value, out of range), since \x
-                               // greedily consumes hex digits and '7' is one
+    // NOTE: no save/restore-cursor here anymore -- see reassertChrome() for
+    // why. This function only ever writes the two chrome rows; whoever
+    // calls it is responsible for cursor safety around the call.
     printf("\x1b[1;1H\x1b[2K%s", top.c_str());
     printf("\x1b[%d;1H\x1b[2K%s", rows, bottom.c_str());
-    printf("\x1b" "8");       // restore cursor (DECRC), same split-literal fix
-    printf("\x1b[?2026l");    // end synchronized update
     fflush(stdout);
 }
 
 void reassertChrome(const std::string& cwd, const std::string& gitBranch,
                      double sessionSeconds, const HwStats& hw) {
+    // Real bug found live: DECSTBM (sent by setScrollRegion()) has a
+    // documented side effect -- it moves the cursor to absolute row 1, col 1
+    // (since origin mode/DECOM is off by default). paintChrome() used to
+    // save the cursor with DECSC *after* that jump already happened, so its
+    // own DECRC restore just put the cursor back on row 1 every time --
+    // exactly why typing appeared to land on top of the pinned top bar.
+    // Also: DECSC/DECRC only hold ONE saved position (not a stack), so
+    // nesting an outer save/restore around an inner one doesn't compose --
+    // the inner save silently clobbers the outer one. Fixed by saving the
+    // cursor ONCE, here, before setScrollRegion() runs, and restoring once
+    // after paintChrome() -- paintChrome() itself no longer touches the
+    // saved-cursor slot at all.
+    printf("\x1b[?2026h");   // begin synchronized update
+    printf("\x1b" "7");      // DECSC: save the TRUE cursor position, before
+                              // DECSTBM's cursor-reset side effect
     setScrollRegion();
     paintChrome(cwd, gitBranch, sessionSeconds, hw);
+    printf("\x1b" "8");      // DECRC: restore to the TRUE original position
+    printf("\x1b[?2026l");   // end synchronized update
+    fflush(stdout);
 }
