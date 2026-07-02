@@ -162,10 +162,59 @@ static int execSource(const std::string& source, ShellState& state) {
     }
 }
 
+// Guarantee the standard command directories are on $PATH. A login shell can
+// be handed a bare/minimal PATH (or none), which makes Homebrew and other
+// /usr/local/bin tools "disappear". Prepend the usual dirs that aren't already
+// present, in order, so `brew`-installed and hand-installed commands (ark,
+// pistin, pullio, timeout...) always resolve -- without duplicating entries a
+// richer inherited PATH already has. Runs for every mode (interactive, login,
+// -c, script), before any command executes; the user's config can still add more.
+static void ensureStandardPath() {
+    const char* cur = getenv("PATH");
+    std::string path = cur ? cur : "";
+    // Split existing PATH into a set for dedup.
+    auto has = [&](const std::string& dir) {
+        size_t pos = 0;
+        while (pos <= path.size()) {
+            size_t colon = path.find(':', pos);
+            std::string seg = colon == std::string::npos ? path.substr(pos) : path.substr(pos, colon - pos);
+            if (seg == dir) return true;
+            if (colon == std::string::npos) break;
+            pos = colon + 1;
+        }
+        return false;
+    };
+    // Order matters: earlier = higher priority. /usr/local/bin and Homebrew's
+    // dirs first so user/brew tools win over system ones.
+    const char* dirs[] = {"/usr/local/bin", "/opt/homebrew/bin", "/opt/homebrew/sbin",
+                          "/usr/bin", "/bin", "/usr/sbin", "/sbin"};
+    std::string prefix;
+    for (const char* d : dirs)
+        if (!has(d)) prefix += (prefix.empty() ? "" : ":") + std::string(d);
+    if (!prefix.empty()) path = path.empty() ? prefix : prefix + ":" + path;
+    setenv("PATH", path.c_str(), 1);
+}
+
+// Import every environment variable into the shell's own variable namespace,
+// so `$PATH`, `$HOME`, `$USER`, `$TERM` etc. expand correctly (bash does this
+// at startup). Without it ark's `$VAR` -- which reads state.vars -- can't see
+// anything the environment handed us, even though child processes inherit it.
+extern char** environ;
+static void importEnvironment(ShellState& state) {
+    for (char** e = environ; *e; e++) {
+        std::string kv = *e;
+        size_t eq = kv.find('=');
+        if (eq == std::string::npos) continue;
+        state.vars[kv.substr(0, eq)] = kv.substr(eq + 1);
+    }
+}
+
 int main(int argc, char** argv) {
     ShellState state;
     JobTable jobTable;
     state.jobs = &jobTable;
+    ensureStandardPath();      // brew / /usr/local/bin tools resolve even under a bare login PATH
+    importEnvironment(state);  // $PATH/$HOME/$USER/... visible to ark's own expansion
 
     // $(...) runs through ark's OWN lexer/parser/exec (captureCommandOutput
     // forks and recurses, never shelling out to /bin/sh) -- ark is meant to
