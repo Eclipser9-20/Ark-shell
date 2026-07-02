@@ -23,56 +23,66 @@
 #include <unistd.h>
 
 const char* arkDefaultConfig() {
-    return R"CFG(# ark.config -- sourced at startup (interactive sessions).
-# Aliases, exports, and functions here persist across sessions.
-# Edit any time with `ark-settings`.
+    return R"CFG(# ark.config -- sourced at startup (interactive sessions), like ~/.zshrc.
+# Your aliases, exports, and functions here persist across sessions. Everything
+# below the YOUR SETTINGS block is COMMENTED OUT -- uncomment only what you want.
+#   ark-settings   open this file in your editor
+#   ark-reload     re-read this file into the running shell (no restart needed)
 
 # ─── YOUR SETTINGS ─────────────────────────────────────────────────────────
 # alias ll='ls -la'
+# alias gs='git status'
 # export EDITOR=nvim        # your editor for `ark-settings`
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  EVERYTHING ARK CAN DO  —  uncomment / edit to taste
+#  EVERYTHING ARK CAN DO  —  every knob below is a comment; uncomment to change
 # ═══════════════════════════════════════════════════════════════════════════
 
-# ─── TOGGLES (all default ON; set to 0 to disable) ─────────────────────────
+# ─── FEATURES THAT ARE ON BY DEFAULT (set to 0 to turn OFF) ─────────────────
 # export ARK_GHOST_TEXT=0          # fish-style autosuggestions (dim ghost text)
 # export ARK_SYNTAX_HIGHLIGHT=0    # colored command line as you type
-# export ARK_VALIDATE=0            # red-underline unknown commands as you type
-# export ARK_CHROME=0              # pinned top/bottom status bars
+# export ARK_VALIDATE=0            # red unknown-command highlight as you type
+# export ARK_CHROME=0              # inline top bar + pinned bottom status bar
 # export ARK_AUTOCD=0              # type a directory name to cd into it
-# export ARK_NU_MODE=1             # nushell-style: `ls` shows a bordered table
-# export ARK_BANNER=0              # neofetch-style startup panel (logo + system info)
-# export ARK_BANNER_LOGO=bolt      # startup logo:  ark (rounded wordmark) | bolt | none
-# export ARK_BANNER_ACCENT=purple  # logo color: blue/green/red/purple/pink/cyan/yellow/orange or hex 7aa2f7
-# export ARK_BANNER_INFO=os,cpu,mem  # which lines: user,os,kernel,shell,host,cpu,mem,uptime (or 'all')
-# export ARK_BANNER_SUBTITLE="heaven"  # the tagline shown under the logo
 # export ARK_SPELLCHECK=0          # "did you mean X?" on an unknown command
-# export ARK_AUTOCORRECT=1         # auto-fix a typo'd command and run it (gti->git)
-# export ARK_BREW_SUGGEST=0        # disable brew's reverse lookup (rg->ripgrep)
+# export ARK_BREW_SUGGEST=0        # brew reverse lookup for installs (rg->ripgrep)
 # export ARK_MANPAGE_COMPLETE=0    # Tab-complete flags from a command's man page
+# export ARK_BANNER=0              # neofetch-style startup panel (logo + sysinfo)
+# export ARK_INDEX=0               # background home-tree index (Tab finds anything)
+# export ARK_FRESHLINE=0           # auto-add a newline when output lacks a final one
+
+# ─── FEATURES THAT ARE OFF BY DEFAULT (set to 1 to turn ON) ─────────────────
+# export ARK_NU_MODE=1             # nushell-style: `ls` prints a bordered table
+# export ARK_AUTOCORRECT=1         # auto-fix a typo'd command and run it (gti->git)
 # export ARK_PRIVATE=1             # start in private mode (nothing saved to history)
-# export ARK_CTRLC=append          # Ctrl-C shows ^C after the command (default: own line)
-# export ARK_FRESHLINE=0           # don't auto-add a newline when output lacks one
+
+# ─── STARTUP BANNER (only shown when ARK_BANNER is on) ─────────────────────
+# export ARK_BANNER_LOGO=bolt      # ark (rounded wordmark) | bolt | none
+# export ARK_BANNER_ACCENT=purple  # blue/green/red/purple/pink/cyan/yellow/orange or hex 7aa2f7
+# export ARK_BANNER_INFO=os,cpu,mem  # user,os,kernel,shell,host,cpu,mem,uptime (or 'all')
+# export ARK_BANNER_SUBTITLE="heaven"  # tagline shown under the logo
+
+# ─── PROMPT / TERMINAL BEHAVIOR ────────────────────────────────────────────
+# export ARK_CTRLC=append          # Ctrl-C shows ^C after the line (default: own line)
+# export ARK_DSR_MS=40             # advanced: cursor-query timeout in ms (perf tuning;
+#                                  #   lower = snappier, too low may misplace chrome)
 
 # ─── COMMAND-NOT-FOUND: OFFER TO INSTALL IT ────────────────────────────────
 # When you run a command ark can't find (and it isn't a close typo of a real
 # one), ark offers to install it with your package manager — press y (no Enter)
-# and it runs the install, handing the terminal over so sudo/brew can prompt.
-#   unset  → autodetect: brew/port (macOS), apt/dnf/pacman/zypper/apk (Linux),
-#            winget/scoop (Windows). System managers get a `sudo` prefix.
+# and it runs the install, handing over the terminal so sudo/brew can prompt.
+#   unset  → autodetect: brew/port (macOS), apt/dnf/pacman/zypper/apk/yum (Linux),
+#            winget/scoop/choco (Windows). System managers get a `sudo` prefix.
 #   ""     → turn the whole feature off.
-#   path   → force a specific manager; syntax is inferred from its name.
+#   path   → force a specific manager; install syntax is inferred from its name.
 # export ARK_PACKAGE_MANAGER=""              # disable install prompts entirely
 # export ARK_PACKAGE_MANAGER=/opt/homebrew/bin/brew   # force a specific one
 # export ARK_PACKAGE_MANAGER=pacman          # or just a name found on $PATH
 
 # ─── COMPLETION: FIND ANYTHING, ANYWHERE ───────────────────────────────────
 # Tab accepts the ghost suggestion if one's showing, else completes the word.
-# A background index of your whole home tree (built at startup) lets Tab find
-# any file/program by name from anywhere. `ark-reindex` rebuilds it. Flag args
-# (-x/--long) tab-complete from the command's man page (ARK_MANPAGE_COMPLETE).
-# export ARK_INDEX=0                        # disable the filesystem index
+# The background index (ARK_INDEX above) lets Tab find any file/program by name
+# from anywhere; `ark-reindex` rebuilds it after you add files this session.
 # export ARK_INDEX_ROOTS="$HOME:/opt"       # roots to index (default: $HOME)
 # Extra dirs whose entries complete by FULL PATH (lighter than the index):
 # export ARK_SEARCH_DIRS="$HOME/bin:$HOME/projects:$HOME/scripts"
@@ -90,29 +100,62 @@ const char* arkDefaultConfig() {
 
 # ─── ALIASES ───────────────────────────────────────────────────────────────
 # alias la='ls -A'
-# alias gs='git status'
+# alias gd='git diff'
 # alias ..='cd ..'
 # alias ...='cd ../..'
+# alias grep='grep --color=auto'
+
+# ─── ENVIRONMENT ───────────────────────────────────────────────────────────
+# export PAGER=less
+# export PATH="$HOME/bin:$PATH"   # note: re-runs on `ark-reload`; keep it idempotent
 
 # ─── FUNCTIONS ─────────────────────────────────────────────────────────────
-# mkcd() { mkdir -p "$1" && cd "$1"; }
+# mkcd() { mkdir -p "$1" && cd "$1"; }        # make a dir and enter it
+# backup() { cp "$1" "$1.bak"; }
 # greet() { echo "hi, ${1:-world}"; }
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  REFERENCE  —  the ark language (always-on; a cheat sheet, nothing to enable)
 # ═══════════════════════════════════════════════════════════════════════════
-#  EXPANSION  $VAR ${VAR:-def} ${VAR:+alt} ${#VAR} ${VAR#pfx} ${VAR%sfx}
-#             ${VAR/a/b} ${VAR//a/b} ${VAR:off:len}  $(cmd) `cmd`
-#             $(( 2+3*4 ))  {a,b,c} {1..9}  * ? [abc] **/  ~  $? $$ $# $@ $0
-#  CONTROL    if/elif/else/fi  for..do..done  while..do..done  case..esac
-#             break continue return  cmd && cmd || cmd ; cmd  ! cmd  ( subshell )
-#  FUNCTIONS  name() { .. }   function name { .. }   local VAR=val
-#  REDIRECT   > >> < 2>  | (pipe)  & (background)  << EOF  <<'EOF'  <<- EOF
-#  BUILTINS   cd(cd -/auto_cd) pwd echo(-n -e) export unset type read
-#             alias unalias pushd popd dirs source(.) return local break continue
-#             jobs fg bg exit ark-settings ark-reindex
-#             private  uvar  history(-c)
-#  EDITING    Ctrl-A/E Ctrl-K/U Ctrl-W Ctrl-Y  Alt-←/→  Ctrl-R  Tab  →/Ctrl-F  ↑/↓
+#
+#  EXPANSION
+#    $VAR  ${VAR}  ${VAR:-default}  ${VAR:+alt}  ${#VAR}   (length)
+#    ${VAR#prefix} ${VAR##prefix}   strip prefix (## longest)  → basename: ${p##*/}
+#    ${VAR%suffix} ${VAR%%suffix}   strip suffix (%% longest)  → dirname:  ${p%/*}
+#    ${VAR/a/b}    ${VAR//a/b}      replace first / all
+#    ${VAR:off:len}                 substring (negative off counts from end)
+#    $(cmd)   `cmd`                 command substitution
+#    $(( 2 + 3*4 ))                 arithmetic: + - * / % << >> & | ^ && || < <= == !=
+#    {a,b,c}  {1..9}  {a..z}        brace expansion (+ cartesian: a{b,c}{1,2})
+#    *  ?  [abc]  **/               globs; ** recurses to any depth
+#    ~  ~/path                      home expansion
+#    "$x"  '$x'  a"b c"d            double / single / mixed quoting
+#    $?  $$  $#  $@  $*  $0         special parameters
+#
+#  CONTROL FLOW
+#    if COND; then ..; elif COND; then ..; else ..; fi
+#    for x in LIST; do ..; done          while COND; do ..; done
+#    case WORD in pat) .. ;; *) .. ;; esac
+#    break [N]   continue [N]   return [N]
+#    cmd && cmd   cmd || cmd   cmd ; cmd   ! cmd   ( subshell )
+#
+#  FUNCTIONS   name() { .. }      function name { .. }      local VAR=val
+#
+#  REDIRECTION
+#    > file   >> file   < file   2> file        cmd | cmd | cmd      cmd &
+#    << EOF .. EOF      <<'EOF' (literal)        <<- EOF (strip tabs)
+#
+#  BUILTINS
+#    cd (cd -, auto_cd)  pwd  echo (-n -e)  export  unset  type  read
+#    alias unalias  pushd popd dirs  source (.)  return local break continue
+#    jobs fg bg  exit
+#    ark-settings (edit config)  ark-reload (re-source it)  ark-reindex (rebuild index)
+#    private  uvar  history(-c)
+#
+#  LINE EDITING (at the prompt)
+#    Ctrl-A/E start/end   Ctrl-K/U kill to end/start   Ctrl-W kill word
+#    Ctrl-Y yank   Alt-←/→ word jump   Ctrl-R history search
+#    Tab complete   →/Ctrl-F accept autosuggestion   Up/Down history
 )CFG";
 }
 
@@ -437,6 +480,42 @@ static int b_ark_settings(const std::vector<std::string>&, ShellState&) {
     return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
 }
 
+// `ark-reload`: re-source ~/.config/ark/ark.config into the LIVE session, so an
+// edit (a new alias/export/function, a flipped toggle) takes effect without
+// quitting and reopening the shell -- the config counterpart to bash's
+// `source ~/.bashrc`. Like source, it re-applies the file: it sets what the
+// file sets but does not undo settings the file no longer mentions, and it
+// re-runs any side-effecting commands in it, so a self-idempotent config
+// reloads cleanly (prefer `alias`/`export`/function defs over `PATH="...:$PATH"`
+// prepends that stack on each reload). Function bodies defined in the config are
+// referenced by raw Node* from state.functions and must outlive this call, so
+// the parsed AST is kept in a session-lifetime static (same contract as
+// b_source and main.cpp's startup astRoots).
+static int b_ark_reload(const std::vector<std::string>&, ShellState& state) {
+    const char* home = getenv("HOME");
+    std::string cfg = std::string(home ? home : "") + "/.config/ark/ark.config";
+    std::ifstream f(cfg);
+    if (!f.is_open()) { std::cerr << "ark-reload: no config at " << cfg << "\n"; return 1; }
+    std::string src((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    if (src.empty()) { std::cout << "ark: reloaded " << cfg << " (empty)\n"; return 0; }
+    static std::vector<std::unique_ptr<Node>> reloadedRoots; // keep function bodies alive
+    try {
+        Lexer lex(src);
+        Parser p(lex.tokenize());
+        auto ast = p.parse();
+        execNode(ast.get(), state);
+        reloadedRoots.push_back(std::move(ast));
+    } catch (const ParseError& e) {
+        std::cerr << "ark-reload: parse error at line " << e.line << ": " << e.what() << "\n";
+        return 1;
+    } catch (const std::exception& e) {
+        std::cerr << "ark-reload: " << e.what() << "\n";
+        return 1;
+    }
+    std::cout << "ark: reloaded " << cfg << "\n";
+    return 0;
+}
+
 static int b_pwd(const std::vector<std::string>&, ShellState& state) {
     std::cout << state.cwd << "\n";
     return 0;
@@ -694,7 +773,7 @@ const std::unordered_map<std::string, BuiltinFn>& builtinRegistry() {
         {"jobs", b_jobs}, {"fg", b_fg}, {"bg", b_bg},
         {"alias", b_alias}, {"unalias", b_unalias},
         {"pushd", b_pushd}, {"popd", b_popd}, {"dirs", b_dirs},
-        {"ark-settings", b_ark_settings}, {"ark-reindex", b_ark_reindex},
+        {"ark-settings", b_ark_settings}, {"ark-reindex", b_ark_reindex}, {"ark-reload", b_ark_reload},
         {"source", b_source}, {".", b_source},
         {"return", b_return}, {"local", b_local},
         {"break", b_break}, {"continue", b_continue},
