@@ -10,6 +10,7 @@
 #include "lexer.h"
 #include "parser.h"
 #include "shell_state.h"
+#include "version.h"
 #include <atomic>
 #include <chrono>
 #include <climits>
@@ -307,6 +308,12 @@ int main(int argc, char** argv) {
     int ai = 1;
     if (ai < argc && (std::string(argv[ai]) == "-l" || std::string(argv[ai]) == "--login")) ai++;
 
+    // `ark --version` / `-v`: print the version and exit.
+    if (ai < argc && (std::string(argv[ai]) == "--version" || std::string(argv[ai]) == "-v")) {
+        std::cout << "ark " ARK_VERSION "\n";
+        return 0;
+    }
+
     // `ark --setup` / `ark --init`: provision ~/.config/ark and exit (install scripts).
     if (ai < argc && (std::string(argv[ai]) == "--setup" || std::string(argv[ai]) == "--init"))
         return setupConfigDir();
@@ -516,16 +523,16 @@ int main(int argc, char** argv) {
             history.sync(histPath);
             uvar::loadInto(state.vars);
         }
-        // Top bar (cwd + git branch). In the default "inline" mode it's printed
-        // as a header ABOVE each fresh prompt, so it scrolls with output into
-        // scrollback. ARK_CHROME_TOP=pinned instead fixes it at row 1 (painted by
-        // reassertChrome/paintChrome, not here), and =off hides it; either way we
-        // skip the inline print. ARK_CHROME=0 hides all chrome. Not on continuations.
+        // Top bar (cwd + git branch). Default is PINNED (fixed at row 1, painted
+        // by reassertChrome/paintChrome, not here). Only ARK_CHROME_TOP=inline
+        // prints it here as a per-prompt header that scrolls with output (and
+        // keeps scrollback); =off and =pinned both skip the inline print.
+        // ARK_CHROME=0 hides all chrome. Never printed on continuation lines.
         if (!continuing) {
             const char* c = getenv("ARK_CHROME");
             const char* t = getenv("ARK_CHROME_TOP");
             bool chromeOn = !(c && std::string(c) == "0");
-            bool inlineTop = !(t && (std::string(t) == "pinned" || std::string(t) == "off"));
+            bool inlineTop = t && std::string(t) == "inline";
             if (chromeOn && inlineTop)
                 std::cout << topBar(state.cwd, findGitBranch(state.cwd)) << "\r\n" << std::flush;
         }

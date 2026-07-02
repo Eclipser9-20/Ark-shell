@@ -43,9 +43,9 @@ const char* arkDefaultConfig() {
 # export ARK_SYNTAX_HIGHLIGHT=0    # colored command line as you type
 # export ARK_VALIDATE=0            # red unknown-command highlight as you type
 # export ARK_CHROME=0              # inline top bar + pinned bottom status bar
-# export ARK_CHROME_TOP=pinned     # top bar: inline (default; scrolls with output,
-#                                  #   keeps scrollback) | pinned (fixed top-left,
-#                                  #   NO scrollback) | off (hide the top bar)
+# export ARK_CHROME_TOP=inline     # top bar: pinned (default; fixed top-left, NO
+#                                  #   scrollback) | inline (scrolls with output,
+#                                  #   keeps scrollback) | off (hide the top bar)
 # export ARK_AUTOCD=0              # type a directory name to cd into it
 # export ARK_SPELLCHECK=0          # "did you mean X?" on an unknown command
 # export ARK_BREW_SUGGEST=0        # brew reverse lookup for installs (rg->ripgrep)
@@ -60,7 +60,7 @@ const char* arkDefaultConfig() {
 # export ARK_PRIVATE=1             # start in private mode (nothing saved to history)
 
 # ─── STARTUP BANNER (only shown when ARK_BANNER is on) ─────────────────────
-# export ARK_BANNER_LOGO=bolt      # ark (rounded wordmark) | bolt | none
+# export ARK_BANNER_LOGO=ark       # bolt (default lightning bolt) | ark (wordmark) | none
 # export ARK_BANNER_ACCENT=purple  # blue/green/red/purple/pink/cyan/yellow/orange or hex 7aa2f7
 # export ARK_BANNER_INFO=os,cpu,mem  # user,os,kernel,shell,host,cpu,mem,uptime (or 'all')
 # export ARK_BANNER_SUBTITLE="heaven"  # tagline shown under the logo
