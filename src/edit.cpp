@@ -3,6 +3,7 @@
 #include "complete.h"
 #include "features.h"
 #include "highlight.h"
+#include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <cerrno>
