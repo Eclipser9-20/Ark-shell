@@ -155,7 +155,10 @@ static bool getTerminalSize(int& rows, int& cols) {
 void setScrollRegion() {
     int rows, cols;
     if (!getTerminalSize(rows, cols) || rows <= 2) return;
-    printf("\x1b[2;%dr", rows - 1);
+    // Region = rows 1 .. N-1. Starting at row 1 (not 2) is what makes the
+    // terminal's SCROLLBACK work: lines are only saved to scrollback when they
+    // scroll off row 1. Row N is excluded so the pinned bottom bar survives.
+    printf("\x1b[1;%dr", rows - 1);
     fflush(stdout);
 }
 
@@ -255,39 +258,41 @@ static std::string sshClientIp() {
     return sp == std::string::npos ? s : s.substr(0, sp);
 }
 
-void paintChrome(const std::string& cwd, const std::string& gitBranch,
-                  double sessionSeconds, const HwStats& hw) {
+// The top-bar content -- a rounded [dir pill][branch pill] -- as a STRING, not
+// painted to a fixed row. It's printed inline as a header above each prompt (see
+// main.cpp) so it scrolls with your output and lands in the terminal's
+// scrollback, instead of being pinned to row 1. Pinning row 1 forced the scroll
+// region to start at row 2, and terminals only feed scrollback from lines that
+// scroll off row 1 -- so the old pinned top bar silently broke scroll-back
+// entirely. Now only the BOTTOM stats bar is pinned (row N, outside a row-1..N-1
+// region), which keeps scrollback working AND the live stats.
+std::string topBar(const std::string& cwd, const std::string& gitBranch) {
     int rows, cols;
-    if (!getTerminalSize(rows, cols) || rows <= 2) return;
-
-    // ---- top bar: [dir pill][branch pill] ----
-    // Adjacent pills now touch directly instead of leaving a plain-space gap
-    // between them: with every pill sharing the same dark fill, a lone
-    // rounded cap between two chips would be invisible (fg would equal bg,
-    // no color boundary to reveal the bump) -- but placing one chip's
-    // CLOSING cap immediately against the next chip's OPENING cap (no space
-    // between them) still reads as a distinct rounded divider notch, the
-    // classic lualine/powerline "connected rounded segments" look.
+    if (!getTerminalSize(rows, cols)) cols = 80;
     int pillOverhead = 1 + 1 + 4; // icon + space-after-icon + 2 padding + 2 rounded caps
     std::string dirText = cwd;
     int dirVisible = (int)cwd.size();
     if (dirVisible + pillOverhead > cols) {
         int room = cols - pillOverhead;
         if (room < 0) room = 0;
-        // Keep the tail of the path (e.g. ".../ark-terminal") -- the most
-        // specific, most useful part when truncated -- rather than the head.
-        dirText = (int)cwd.size() > room ? cwd.substr(cwd.size() - room) : cwd;
+        dirText = (int)cwd.size() > room ? cwd.substr(cwd.size() - room) : cwd; // keep the tail
         dirVisible = (int)dirText.size();
     }
     Chip dirPill = makePill(FG_BLUE, std::string(ICON_FOLDER) + " " + dirText, 1 + 1 + dirVisible);
-
-    std::string topLine = dirPill.ansi;
-    int topWidth = dirPill.width;
-    if (!gitBranch.empty() && topWidth + (int)gitBranch.size() + pillOverhead <= cols) {
+    std::string line = dirPill.ansi;
+    int width = dirPill.width;
+    if (!gitBranch.empty() && width + (int)gitBranch.size() + pillOverhead <= cols) {
         Chip branchPill = makePill(FG_GREEN, std::string(ICON_BRANCH) + " " + gitBranch,
                                     1 + 1 + (int)gitBranch.size());
-        topLine += branchPill.ansi; // no gap -- caps touch, forming the divider notch
+        line += branchPill.ansi; // no gap -- caps touch, forming the divider notch
     }
+    return line;
+}
+
+void paintChrome(const std::string&, const std::string&,
+                  double sessionSeconds, const HwStats& hw) {
+    int rows, cols;
+    if (!getTerminalSize(rows, cols) || rows <= 2) return;
 
     // ---- bottom bar: [user+session pill] ... padding ... [cpu+mem pill] ----
     char host[256] = {0};
@@ -323,10 +328,11 @@ void paintChrome(const std::string& cwd, const std::string& gitBranch,
 
     std::string bottomLine = leftPill.ansi + std::string(pad, ' ') + rightPill.ansi;
 
-    // NOTE: no save/restore-cursor here anymore -- see reassertChrome() for
-    // why. This function only ever writes the two chrome rows; whoever
-    // calls it is responsible for cursor safety around the call.
-    printf("\x1b[1;1H\x1b[2K%s", topLine.c_str());
+    // Only the pinned BOTTOM bar is painted here now (the top bar is an inline
+    // prompt header, see topBar()). Absolute-positioned to the last row, which
+    // sits OUTSIDE the row-1..N-1 scroll region, so ordinary output never
+    // disturbs it. Cursor safety around this call is the caller's job
+    // (reassertChrome saves/restores).
     printf("\x1b[%d;1H\x1b[2K%s", rows, bottomLine.c_str());
     fflush(stdout);
 }
@@ -668,7 +674,7 @@ void reassertChrome(const std::string& cwd, const std::string& gitBranch,
         printf("\x1b[2J");     // erase the whole visible screen -- ghosts and all
         setScrollRegion();     // re-establish the top/bottom margins
         paintChrome(cwd, gitBranch, sessionSeconds, hw);
-        printf("\x1b[2;1H");   // fresh cursor home inside the scroll region
+        printf("\x1b[1;1H");   // fresh cursor home (row 1 is normal content now)
         printf("\x1b[?2026l"); // end synchronized update
         fflush(stdout);
         g_didResizeRepaint = true;
@@ -697,7 +703,7 @@ void reassertChrome(const std::string& cwd, const std::string& gitBranch,
     setScrollRegion();
     paintChrome(cwd, gitBranch, sessionSeconds, hw);
     if (policy == CursorPolicy::ForceReseed) {
-        printf("\x1b[2;1H"); // no valid prior position to protect (startup)
+        printf("\x1b[1;1H"); // no valid prior position to protect (startup)
     } else {
         printf("\x1b" "8"); // DECRC: restore to the TRUE original position
     }
@@ -717,8 +723,12 @@ void reassertChrome(const std::string& cwd, const std::string& gitBranch,
         // commands home the cursor to (1,1) via their own \x1b[H).
         int rows, cols, row = -1, col = -1;
         bool got = getTerminalSize(rows, cols) && queryCursorPos(row, col);
-        if (got && (row <= 1 || row >= rows)) {
-            printf("\x1b[2;1H"); // clear-family homed to (1,1) -> park at row 2
+        if (got && row >= rows) {
+            // Cursor ended up ON the pinned bottom bar -- pull it up one row so
+            // the next prompt isn't drawn over the stats. (Row 1 is fine now --
+            // it's normal scrollable content, not a pinned bar -- so `clear`
+            // homing to (1,1) no longer needs correcting.)
+            printf("\x1b[%d;1H", rows - 1);
             fflush(stdout);
         } else if (got && col > 1) {
             // Fresh-line (zsh PROMPT_SP behavior): the command's output did NOT
