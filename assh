@@ -44,5 +44,11 @@ if ! scp -q "$bin" "$host:$remote"; then
     echo "assh: couldn't copy ark to '$host', falling back to plain ssh" >&2
     exec ssh "$host"
 fi
+# Run it, then ALWAYS remove it. The cleanup is a trap on EXIT + the hang-up /
+# interrupt / terminate signals, so the shipped binary is deleted even if the
+# connection drops or the session is killed -- not just on a clean `exit`.
 # ARK_REMOTE marks an auto-shipped session (ark can skip writing config there).
-ssh -t "$host" "chmod +x ~/'$remote'; ARK_REMOTE=1 ~/'$remote'; rm -f ~/'$remote'"
+# -tt FORCES a pty even if assh's own stdin isn't a terminal, so ark always runs
+# interactively on the remote. \$HOME / \$r are escaped so they evaluate on the
+# REMOTE; $remote (the filename) is filled in locally.
+ssh -tt "$host" "r=\"\$HOME/$remote\"; trap 'rm -f \"\$r\"' EXIT HUP INT TERM; chmod +x \"\$r\"; ARK_REMOTE=1 \"\$r\""
