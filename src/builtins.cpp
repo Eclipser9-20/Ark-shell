@@ -5,7 +5,11 @@
 #include <algorithm>
 #include <climits>
 #include <csignal>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <ctime>
+#include <dirent.h>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -33,6 +37,7 @@ const char* arkDefaultConfig() {
 # export ARK_SYNTAX_HIGHLIGHT=0    # colored command line as you type
 # export ARK_CHROME=0              # pinned top/bottom status bars
 # export ARK_AUTOCD=0              # type a directory name to cd into it
+# export ARK_NU_MODE=1             # nushell-style: `ls` shows a bordered table
 
 # ─── CROSS-DIRECTORY COMPLETION ────────────────────────────────────────────
 # Dirs searched for files/programs from ANYWHERE (Tab + ghost text). A program
@@ -64,6 +69,114 @@ const char* arkDefaultConfig() {
 #             jobs fg bg exit ark-settings
 #  EDITING    Ctrl-A/E Ctrl-K/U Ctrl-W Ctrl-Y  Alt-←/→  Ctrl-R  Tab  →/Ctrl-F  ↑/↓
 )CFG";
+}
+
+// ── Nushell-flavored `ls` (ARK_NU_MODE=1) ──────────────────────────────────
+static std::string nuHumanSize(off_t bytes) {
+    const char* units[] = {"B", "K", "M", "G", "T"};
+    double v = (double)bytes;
+    int u = 0;
+    while (v >= 1024.0 && u < 4) { v /= 1024.0; u++; }
+    char buf[32];
+    if (u == 0) snprintf(buf, sizeof(buf), "%lld B", (long long)bytes);
+    else snprintf(buf, sizeof(buf), "%.1f %s", v, units[u]);
+    return buf;
+}
+
+static std::string nuRelTime(time_t t, time_t now) {
+    long d = (long)(now - t);
+    if (d < 0) d = 0;
+    char buf[32];
+    if (d < 60) snprintf(buf, sizeof(buf), "%lds ago", d);
+    else if (d < 3600) snprintf(buf, sizeof(buf), "%ldm ago", d / 60);
+    else if (d < 86400) snprintf(buf, sizeof(buf), "%ldh ago", d / 3600);
+    else snprintf(buf, sizeof(buf), "%ldd ago", d / 86400);
+    return buf;
+}
+
+// Renders a nushell-style bordered table of a directory's entries. Columns:
+// index, name, type, size, modified. The rounded box-drawing borders and
+// column layout are nushell's signature look.
+static int nuLs(const std::string& dir, time_t now) {
+    DIR* d = opendir(dir.c_str());
+    if (!d) { std::cerr << "ls: cannot open " << dir << "\n"; return 1; }
+    struct Row { std::string idx, name, type, size, mod; };
+    std::vector<Row> rows;
+    struct dirent* e;
+    std::vector<std::string> names;
+    while ((e = readdir(d)) != nullptr) {
+        std::string n = e->d_name;
+        if (n == "." || n == "..") continue;
+        if (!n.empty() && n[0] == '.') continue; // hide dotfiles, like plain ls
+        names.push_back(n);
+    }
+    closedir(d);
+    std::sort(names.begin(), names.end());
+    int i = 0;
+    for (const auto& n : names) {
+        struct stat st;
+        std::string full = dir + "/" + n;
+        Row r;
+        r.idx = std::to_string(i++);
+        r.name = n;
+        if (stat(full.c_str(), &st) == 0) {
+            r.type = S_ISDIR(st.st_mode) ? "dir" : "file";
+            r.size = S_ISDIR(st.st_mode) ? "" : nuHumanSize(st.st_size);
+            r.mod = nuRelTime(st.st_mtime, now);
+        }
+        rows.push_back(std::move(r));
+    }
+    // Column widths (header vs widest cell).
+    const char* hdr[5] = {"#", "name", "type", "size", "modified"};
+    size_t w[5] = {1, 4, 4, 4, 8};
+    for (auto& r : rows) {
+        std::string* c[5] = {&r.idx, &r.name, &r.type, &r.size, &r.mod};
+        for (int k = 0; k < 5; k++) w[k] = std::max(w[k], c[k]->size());
+    }
+    auto pad = [](const std::string& s, size_t width) { return s + std::string(width - s.size(), ' '); };
+    auto rule = [&](const char* l, const char* m, const char* r) {
+        std::string out = l;
+        for (int k = 0; k < 5; k++) { for (size_t j = 0; j < w[k] + 2; j++) out += "\xe2\x94\x80"; out += (k < 4 ? m : r); }
+        return out;
+    };
+    const std::string V = "\xe2\x94\x82"; // │
+    std::cout << rule("\xe2\x95\xad", "\xe2\x94\xac", "\xe2\x95\xae") << "\n"; // ╭┬╮
+    std::cout << V;
+    for (int k = 0; k < 5; k++) std::cout << " " << pad(hdr[k], w[k]) << " " << V;
+    std::cout << "\n" << rule("\xe2\x94\x9c", "\xe2\x94\xbc", "\xe2\x94\xa4") << "\n"; // ├┼┤
+    for (auto& r : rows) {
+        std::string* c[5] = {&r.idx, &r.name, &r.type, &r.size, &r.mod};
+        std::cout << V;
+        for (int k = 0; k < 5; k++) std::cout << " " << pad(*c[k], w[k]) << " " << V;
+        std::cout << "\n";
+    }
+    std::cout << rule("\xe2\x95\xb0", "\xe2\x94\xb4", "\xe2\x95\xaf") << "\n"; // ╰┴╯
+    return 0;
+}
+
+// `ls`: in nushell mode (ARK_NU_MODE=1) render a bordered table; otherwise
+// exec the real /bin/ls so default behavior is unchanged.
+static int b_ls(const std::vector<std::string>& argv, ShellState& state) {
+    const char* nu = getenv("ARK_NU_MODE");
+    if (nu && std::string(nu) == "1") {
+        std::string dir = argv.size() > 1 ? argv[1] : state.cwd;
+        if (dir.empty()) dir = ".";
+        return nuLs(dir, time(nullptr));
+    }
+    // Passthrough to the real ls.
+    BlockSigchld guard;
+    pid_t pid = fork();
+    if (pid == 0) {
+        std::vector<char*> av;
+        av.push_back(const_cast<char*>("ls"));
+        for (size_t i = 1; i < argv.size(); i++) av.push_back(const_cast<char*>(argv[i].c_str()));
+        av.push_back(nullptr);
+        execvp("ls", av.data());
+        _exit(127);
+    }
+    int status = 0;
+    waitpidRetry(pid, &status, 0);
+    return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
 }
 
 static int b_cd(const std::vector<std::string>& argv, ShellState& state) {
@@ -461,6 +574,7 @@ const std::unordered_map<std::string, BuiltinFn>& builtinRegistry() {
         {"source", b_source}, {".", b_source},
         {"return", b_return}, {"local", b_local},
         {"break", b_break}, {"continue", b_continue},
+        {"ls", b_ls},
     };
     return reg;
 }
