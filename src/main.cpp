@@ -184,13 +184,16 @@ static void ensureStandardPath() {
         }
         return false;
     };
-    // Order matters: earlier = higher priority. /usr/local/bin and Homebrew's
-    // dirs first so user/brew tools win over system ones.
-    const char* dirs[] = {"/usr/local/bin", "/opt/homebrew/bin", "/opt/homebrew/sbin",
-                          "/usr/bin", "/bin", "/usr/sbin", "/sbin"};
+    // Order matters: earlier = higher priority. The user's own ~/bin wins,
+    // then /usr/local/bin + Homebrew, then the system dirs.
+    std::vector<std::string> dirs;
+    if (const char* home = getenv("HOME")) dirs.push_back(std::string(home) + "/bin");
+    for (const char* d : {"/usr/local/bin", "/opt/homebrew/bin", "/opt/homebrew/sbin",
+                          "/usr/bin", "/bin", "/usr/sbin", "/sbin"})
+        dirs.push_back(d);
     std::string prefix;
-    for (const char* d : dirs)
-        if (!has(d)) prefix += (prefix.empty() ? "" : ":") + std::string(d);
+    for (const auto& d : dirs)
+        if (!has(d)) prefix += (prefix.empty() ? "" : ":") + d;
     if (!prefix.empty()) path = path.empty() ? prefix : prefix + ":" + path;
     setenv("PATH", path.c_str(), 1);
 }
