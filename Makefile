@@ -20,9 +20,17 @@ build/%.o: src/%.cpp
 
 -include $(DEP)
 
-.PHONY: clean test unittest check
+.PHONY: clean test unittest check install
 clean:
 	rm -rf build $(BIN)
+
+# Install to a stable path so it can be a login shell that survives rebuilds.
+# Re-run after `make` to update the installed copy.
+PREFIX ?= /usr/local
+install: $(BIN)
+	install -d $(PREFIX)/bin
+	install -m 755 $(BIN) $(PREFIX)/bin/ark
+	@echo "installed ark -> $(PREFIX)/bin/ark"
 
 test: $(BIN)
 	bash tests/run_tests.sh
