@@ -1,8 +1,9 @@
 #include "edit.h"
 #include "chrome.h"
 #include "complete.h"
-#include "features.h"
+#include "arkfeatures.h"
 #include "highlight.h"
+#include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <cerrno>
@@ -263,15 +264,19 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
 
         if (c == '\r' || c == '\n') { endLine(); return buf; }
         if (c == 3) {
-            // Ctrl-C at the prompt: exactly what bash & zsh do -- leave the
-            // typed text on screen, print a literal "^C" after it, drop to a
-            // fresh prompt, and DISCARD the line (return empty so the REPL loop
-            // just re-prompts, running nothing). We echo "^C" ourselves because
-            // raw mode has ISIG off (the kernel never sees Ctrl-C as a signal
-            // here, so it can't echo the marker like it does for a running
-            // command). Move past the real input + clear any ghost first.
+            // Ctrl-C at the prompt: leave the typed text on screen, show "^C",
+            // drop to a fresh prompt, and DISCARD the line (return empty so the
+            // REPL loop re-prompts, running nothing). We echo "^C" ourselves
+            // because raw mode has ISIG off (the kernel never sees Ctrl-C as a
+            // signal here). Move past the real input + clear any ghost first.
+            // ARK_CTRLC = "line" (default): "^C" on its OWN line, between the
+            //   command and the next prompt:   cmd / ^C / ❯
+            // ARK_CTRLC = "append": bash style, "^C" right after the command:
+            //   cmd^C / ❯
             if (cursor < buf.size()) std::cout << "\x1b[" << (buf.size() - cursor) << "C";
-            std::cout << "\x1b[K^C\n" << std::flush;
+            const char* mode = getenv("ARK_CTRLC");
+            bool append = mode && std::string(mode) == "append";
+            std::cout << "\x1b[K" << (append ? "^C\n" : "\n^C\n") << std::flush;
             return std::string();
         }
         if (c == 4 && buf.empty()) { endLine(); return std::nullopt; } // Ctrl-D on empty line: EOF
