@@ -1,0 +1,54 @@
+#!/bin/sh
+# ── assh — "ark over SSH" ────────────────────────────────────────────────────
+# Run ark as your shell on ANY host you connect to, with nothing installed on
+# the remote. assh detects the remote's OS+arch, ships the matching prebuilt
+# ark to the remote's home, execs it as an interactive shell for that session,
+# and deletes it on exit. The remote box needs no ark, no compiler, no setup.
+#
+#   assh [user@]host
+#
+# Prebuilt binaries live under (one dir per target, file named `ark`):
+#   ~/.config/ark/remotes/<uname-s>-<uname-m>/ark      e.g. Linux-x86_64/ark
+# Override the dir with $ARK_REMOTES. If there's no binary for the remote's
+# platform, assh says so and falls back to a normal ssh session.
+set -u
+
+if [ $# -ne 1 ] || [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+    echo "usage: assh [user@]host        # ark on any host over ssh, no remote install"
+    echo "binaries: \${ARK_REMOTES:-~/.config/ark/remotes}/<OS>-<ARCH>/ark"
+    exit 2
+fi
+host="$1"
+bindir="${ARK_REMOTES:-$HOME/.config/ark/remotes}"
+
+# 1. What is the remote? (also our reachability check)
+osarch=$(ssh "$host" 'echo "$(uname -s)-$(uname -m)"' 2>/dev/null | tr -d '\r')
+if [ -z "$osarch" ]; then
+    echo "assh: couldn't reach '$host' (or ssh failed)" >&2
+    exit 1
+fi
+
+bin="$bindir/$osarch/ark"
+if [ ! -f "$bin" ]; then
+    echo "assh: no ark binary for '$osarch'." >&2
+    echo "      build ark on a $osarch machine and place it at:" >&2
+    echo "        $bin" >&2
+    echo "      — falling back to a normal ssh session —" >&2
+    exec ssh "$host"
+fi
+
+# 2. Ship it (unique name in the remote's home; ~ is reliably exec, unlike some
+#    hardened /tmp mounts), run it interactively, remove it when the shell exits.
+remote=".ark-session-$(id -u 2>/dev/null || echo x)-$$"
+if ! scp -q "$bin" "$host:$remote"; then
+    echo "assh: couldn't copy ark to '$host', falling back to plain ssh" >&2
+    exec ssh "$host"
+fi
+# Run it, then ALWAYS remove it. The cleanup is a trap on EXIT + the hang-up /
+# interrupt / terminate signals, so the shipped binary is deleted even if the
+# connection drops or the session is killed -- not just on a clean `exit`.
+# ARK_REMOTE marks an auto-shipped session (ark can skip writing config there).
+# -tt FORCES a pty even if assh's own stdin isn't a terminal, so ark always runs
+# interactively on the remote. \$HOME / \$r are escaped so they evaluate on the
+# REMOTE; $remote (the filename) is filled in locally.
+ssh -tt "$host" "r=\"\$HOME/$remote\"; trap 'rm -f \"\$r\"' EXIT HUP INT TERM; chmod +x \"\$r\"; ARK_REMOTE=1 \"\$r\""
