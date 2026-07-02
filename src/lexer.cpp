@@ -1,4 +1,5 @@
 #include "lexer.h"
+#include "parser.h" // ParseError (thrown for an unterminated here-document)
 #include <unordered_map>
 
 static TokKind keywordKind(const std::string& w) {
@@ -159,9 +160,10 @@ std::vector<Token> Lexer::tokenize() {
             // whose `<<` appeared on that line, in order.
             for (auto& ph : pending) {
                 std::string body;
+                bool terminated = false;
                 for (;;) {
                     std::string lineText;
-                    if (!readRawLine(lineText)) break; // EOF before delimiter -- stop
+                    if (!readRawLine(lineText)) break; // ran out of input before the delimiter
                     std::string cmp = lineText;
                     if (ph.stripTabs) {
                         size_t t = 0;
@@ -171,10 +173,21 @@ std::vector<Token> Lexer::tokenize() {
                         while (bt < lineText.size() && lineText[bt] == '\t') bt++;
                         lineText = lineText.substr(bt);
                     }
-                    if (cmp == ph.delimiter) break; // terminator line -- consumed, not added
+                    if (cmp == ph.delimiter) { terminated = true; break; } // terminator, not added
                     body += lineText;
                     body += '\n';
                 }
+                // The closing delimiter never arrived in the input we have. In
+                // interactive mode that just means the user hasn't typed the
+                // rest yet -- signal `incomplete` so the REPL keeps collecting
+                // lines (the continuation prompt), exactly like an unfinished
+                // if/while/quote. Without this the opener ran immediately with
+                // an empty body and the body lines became bogus commands
+                // ("hello: command not found"). Reported as a normal (fatal)
+                // parse error in non-interactive mode, where there IS no more.
+                if (!terminated)
+                    throw ParseError(line_, col_,
+                                     "unterminated here-document (want `" + ph.delimiter + "')", true);
                 toks[ph.tokenIndex].text = body;
                 toks[ph.tokenIndex].heredocNoExpand = ph.noExpand;
             }
@@ -249,6 +262,15 @@ std::vector<Token> Lexer::tokenize() {
         }
         toks.push_back(w);
     }
+    // A here-doc opener with NO following newline yet (the common interactive
+    // case: you just typed `cat << EOF` and pressed Enter -- readLine strips the
+    // newline, so the body-collection above, which only fires on a '\n', never
+    // ran). The body/delimiter are still coming on later lines, so signal
+    // `incomplete` and let the REPL keep collecting -- otherwise the opener runs
+    // instantly with an empty body and your body lines become stray commands.
+    if (!pending.empty())
+        throw ParseError(line_, col_,
+                         "unterminated here-document (want `" + pending.front().delimiter + "')", true);
     toks.push_back(Token{TokKind::End, "", line_, col_});
     return toks;
 }
