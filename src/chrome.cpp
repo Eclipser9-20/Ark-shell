@@ -1,4 +1,5 @@
 #include "chrome.h"
+#include "input.h"
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -589,50 +590,69 @@ static bool queryCursorPos(int& outRow, int& outCol) {
     printf("\x1b[6n");
     fflush(stdout);
 
-    std::string resp;
-    // 40ms cap (was 200): a terminal answers DSR in well under 5ms, so a real
-    // response always arrives; but if the terminal is momentarily busy or the
-    // reply is lost, we wait 40ms not 200 -- this runs after EVERY command, so a
-    // 200ms stall there was a per-command "the shell feels slow." Overridable
-    // via ARK_DSR_MS for slow remotes.
-    long dsrMs = 40;
+    // 60ms cap (was 200): a terminal answers DSR in well under 5ms, so a real
+    // reply always arrives; if the terminal is momentarily busy or the reply is
+    // lost we wait 60ms not 200 -- this runs after EVERY command, so a 200ms
+    // stall there was a per-command "the shell feels slow." Overridable via
+    // ARK_DSR_MS for slow remotes.
+    long dsrMs = 60;
     if (const char* m = getenv("ARK_DSR_MS")) { long v = atol(m); if (v > 0) dsrMs = v; }
     auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(dsrMs);
+
+    // Strictly match the reply "ESC [ <digits> ; <digits> R". Any byte that
+    // doesn't fit the grammar at its position is NOT part of the reply -- it's
+    // the user's own input (a keystroke, or a paste that landed mid-query) -- so
+    // it's handed back to the line editor via arkinput::enqueue() IN ORDER rather
+    // than eaten. This is what stops a paste from losing its leading characters
+    // and stops the reply from leaking onto the command line.
+    enum State { WantEsc, WantBracket, WantRow, WantCol };
+    State st = WantEsc;
+    std::string pending, rowStr, colStr; // `pending` = bytes tentatively in the reply
+    auto flushPending = [&]() { // reclassify the tentative reply bytes as user input
+        if (!pending.empty()) arkinput::enqueue(pending.data(), pending.size());
+        pending.clear(); rowStr.clear(); colStr.clear(); st = WantEsc;
+    };
+
     for (;;) {
-        auto remaining = deadline - std::chrono::steady_clock::now();
-        if (remaining <= std::chrono::milliseconds(0)) return false;
-        auto us = std::chrono::duration_cast<std::chrono::microseconds>(remaining).count();
-        struct timeval tv;
-        tv.tv_sec = (long)(us / 1000000);
-        tv.tv_usec = (long)(us % 1000000);
-
-        fd_set fds;
-        FD_ZERO(&fds);
-        FD_SET(STDIN_FILENO, &fds);
-        int rv = select(STDIN_FILENO + 1, &fds, nullptr, nullptr, &tv);
-        if (rv <= 0) return false; // timeout / interrupted -- caller leaves cursor alone
-
+        auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             deadline - std::chrono::steady_clock::now()).count();
+        if (remaining <= 0) {
+            // Timed out. If we're mid-reply (pending looks like an "ESC[..."
+            // prefix), it's almost certainly a slow/late DSR reply, NOT user
+            // input -- DISCARD it so it never leaks onto the line. Only a stray
+            // non-prefix byte would be worth handing back, and there is none here.
+            return false;
+        }
         char c;
-        ssize_t n = read(STDIN_FILENO, &c, 1);
-        if (n <= 0) return false;
-        resp += c;
-        if (c == 'R') break;
-        if (resp.size() > 32) return false; // sanity guard against runaway input
-    }
+        int rv = arkinput::readRawTimed(c, (int)remaining);
+        if (rv == -2) return false; // timeout: discard any partial reply (see above)
+        if (rv <= 0) { flushPending(); return false; } // EOF/error
 
-    // Parse "\x1b[<row>;<col>R".
-    size_t esc = resp.find("\x1b[");
-    size_t semi = esc == std::string::npos ? std::string::npos : resp.find(';', esc);
-    size_t rr = resp.find('R', esc == std::string::npos ? 0 : esc);
-    if (esc == std::string::npos || semi == std::string::npos || rr == std::string::npos) return false;
-    std::string rowStr = resp.substr(esc + 2, semi - (esc + 2));
-    std::string colStr = resp.substr(semi + 1, rr - (semi + 1));
-    if (rowStr.empty() || colStr.empty()) return false;
-    for (char ch : rowStr) if (!isdigit((unsigned char)ch)) return false;
-    for (char ch : colStr) if (!isdigit((unsigned char)ch)) return false;
-    outRow = std::atoi(rowStr.c_str());
-    outCol = std::atoi(colStr.c_str());
-    return true;
+        switch (st) {
+            case WantEsc:
+                if (c == '\x1b') { pending = c; st = WantBracket; }
+                else arkinput::enqueue(&c, 1);           // plain user byte
+                break;
+            case WantBracket:
+                if (c == '[') { pending += c; st = WantRow; }
+                else { flushPending(); arkinput::enqueue(&c, 1); } // ESC then non-'[': user input
+                break;
+            case WantRow:
+                if (isdigit((unsigned char)c)) { rowStr += c; pending += c; }
+                else if (c == ';' && !rowStr.empty()) { pending += c; st = WantCol; }
+                else { flushPending(); arkinput::enqueue(&c, 1); }
+                break;
+            case WantCol:
+                if (isdigit((unsigned char)c)) { colStr += c; pending += c; }
+                else if (c == 'R' && !colStr.empty()) {
+                    outRow = std::atoi(rowStr.c_str());
+                    outCol = std::atoi(colStr.c_str());
+                    return true;
+                }
+                else { flushPending(); arkinput::enqueue(&c, 1); }
+                break;
+        }
+    }
 }
 
 // Set once by reassertChrome() when it does a resize-driven full repaint;

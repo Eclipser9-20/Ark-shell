@@ -3,6 +3,7 @@
 #include "complete.h"
 #include "arkfeatures.h"
 #include "highlight.h"
+#include "input.h"
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -83,12 +84,10 @@ void installIdleTicker() {
 // badly-timed signal can never truncate a multi-byte escape sequence --
 // the outer loop in readLine() is what checks g_tick, once per full
 // keystroke/action, not here.
+// Routed through the shared FIFO (arkinput) so the chrome's DSR cursor query and
+// this editor never steal each other's bytes -- see input.h.
 static ssize_t readByte(char& out) {
-    for (;;) {
-        ssize_t n = read(STDIN_FILENO, &out, 1);
-        if (n < 0 && errno == EINTR) continue;
-        return n;
-    }
+    return (ssize_t)arkinput::readByte(out, /*retryEINTR=*/true);
 }
 
 // True if a byte is already available (or arrives within `timeoutMs`) on
@@ -100,20 +99,7 @@ static ssize_t readByte(char& out) {
 // bytes that, for a standalone Escape, will never arrive on their own (real
 // bug found live: pressing bare Escape hung ark's line editor indefinitely).
 static bool byteAvailableSoon(int timeoutMs) {
-    for (;;) {
-        fd_set fds;
-        FD_ZERO(&fds);
-        FD_SET(STDIN_FILENO, &fds);
-        struct timeval tv;
-        tv.tv_sec = timeoutMs / 1000;
-        tv.tv_usec = (timeoutMs % 1000) * 1000;
-        int rv = select(STDIN_FILENO + 1, &fds, nullptr, nullptr, &tv);
-        if (rv > 0) return true;
-        if (rv == 0) return false;
-        if (errno == EINTR) continue; // a tick/resize signal landing mid-wait
-                                       // isn't a real answer either way -- retry
-        return false;
-    }
+    return arkinput::available(timeoutMs);
 }
 
 // Move cursor left past any whitespace then the whole preceding word --
@@ -311,16 +297,14 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
         }
 
         char c;
-        // NOT readByte() here, deliberately: readByte()'s internal EINTR
-        // retry swallows the SIGALRM interruption before this loop ever
-        // sees it, so while genuinely idle (blocked in read(), no bytes
-        // arriving) the tick would never fire -- only the escape-sequence
-        // continuation bytes below use readByte(), where transparently
-        // retrying is correct because we're already committed to that
-        // multi-byte parse. A raw read() here lets EINTR propagate back to
-        // the top of the loop, where the tick actually gets checked, before
-        // retrying the read.
-        ssize_t n = read(STDIN_FILENO, &c, 1);
+        // retryEINTR=false here, deliberately: the auto-retry would swallow the
+        // SIGALRM interruption before this loop ever sees it, so while genuinely
+        // idle (blocked in read(), no bytes arriving) the tick would never fire.
+        // Letting EINTR propagate back to the top of the loop is where the tick
+        // actually gets checked before retrying. (arkinput drains any FIFO'd
+        // bytes -- e.g. paste handed back by the DSR reader -- before touching
+        // the fd, so pushed-back input is never lost to a tick.)
+        ssize_t n = (ssize_t)arkinput::readByte(c, /*retryEINTR=*/false);
         if (n < 0 && errno == EINTR) continue;
         if (n <= 0) return std::nullopt; // EOF/error
 
@@ -398,7 +382,7 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
             bool accepted = false;
             for (;;) {
                 char sc;
-                ssize_t sn = read(STDIN_FILENO, &sc, 1);
+                ssize_t sn = (ssize_t)arkinput::readByte(sc, /*retryEINTR=*/true);
                 if (sn < 0 && errno == EINTR) continue;
                 if (sn <= 0) { cancelled = true; break; }
 
