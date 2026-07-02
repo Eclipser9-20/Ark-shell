@@ -39,7 +39,10 @@ install: $(BIN)
 	@cp $(BIN) $(PREFIX)/bin/ark
 	@chmod u+rwx,go+rx $(PREFIX)/bin/ark
 	@codesign --force --sign - $(PREFIX)/bin/ark 2>/dev/null || true
-	@echo "installed ark -> $(PREFIX)/bin/ark (signed)"
+	@# assh: the "ark over SSH" companion (a plain script, no signing needed).
+	@rm -f $(PREFIX)/bin/assh
+	@cp assh $(PREFIX)/bin/assh && chmod u+rwx,go+rx $(PREFIX)/bin/assh
+	@echo "installed ark -> $(PREFIX)/bin/ark (signed)  +  assh -> $(PREFIX)/bin/assh"
 
 test: $(BIN)
 	bash tests/run_tests.sh
