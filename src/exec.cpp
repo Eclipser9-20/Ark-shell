@@ -24,17 +24,26 @@
 
 extern char** environ;
 
-// "command not found", then EITHER a spelling suggestion (it's a typo of a
-// command you HAVE) or a Homebrew install suggestion (it's a real tool you
-// DON'T have) -- the apt-get command-not-found experience, brew edition.
-// Spelling is tried first; brew is only consulted when nothing close exists,
-// so a typo like `gti` suggests `git` rather than `brew install gti`.
-static void reportCommandNotFound(const std::string& name) {
+// Reports why a command couldn't run. `err` is the errno posix_spawnp returned.
+// Only a genuine "not found" (ENOENT) gets the command-not-found treatment
+// (spelling / brew-install suggestions); any OTHER failure -- a permission
+// problem, an exec-format error, a broken symlink target -- reports the REAL
+// reason (strerror) instead of the misleading "command not found". Spelling is
+// tried first; brew only when nothing close exists (so `gti` -> `git`, not
+// `brew install gti`). A suggestion identical to what was typed is never shown.
+static void reportCommandNotFound(const std::string& name, int err) {
+    if (err != ENOENT) { // the file exists but couldn't be executed
+        std::cerr << name << ": " << std::strerror(err) << "\n";
+        return;
+    }
     std::cerr << name << ": command not found\n";
     const char* spellOff = getenv("ARK_SPELLCHECK");
     if (!(spellOff && std::string(spellOff) == "0")) {
         std::string guess = suggestCommand(name);
-        if (!guess.empty()) { std::cerr << "ark: did you mean '" << guess << "'?\n"; return; }
+        if (!guess.empty() && guess != name) {
+            std::cerr << "ark: did you mean '" << guess << "'?\n";
+            return;
+        }
     }
     std::string formula = brewFormulaFor(name);
     if (!formula.empty())
@@ -268,7 +277,7 @@ static int runPipelineStage(Node* cmd, ShellState& state, int inFd, int outFd, p
     posix_spawn_file_actions_destroy(&actions);
     closeHeredocFds();
     if (rc != 0) {
-        reportCommandNotFound(argv[0]);
+        reportCommandNotFound(argv[0], rc);
         pidOut = -1;
         return 127;
     }
@@ -600,7 +609,7 @@ static int runCommand(Node* cmd, ShellState& state) {
     posix_spawn_file_actions_destroy(&actions);
     for (int fd : heredocFds) close(fd); // parent-side here-doc temp fds
     if (rc != 0) {
-        reportCommandNotFound(argv[0]);
+        reportCommandNotFound(argv[0], rc);
         return 127;
     }
 

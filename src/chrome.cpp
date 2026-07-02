@@ -436,7 +436,7 @@ void printStartupBanner() {
 // (terminals answer DSR essentially instantly, far faster than a human can
 // type a next keystroke) -- the same tradeoff tools like fzf/tmux/zsh prompt
 // frameworks already make when they query cursor position this way.
-static int queryCursorRow() {
+static bool queryCursorPos(int& outRow, int& outCol) {
     printf("\x1b[6n");
     fflush(stdout);
 
@@ -444,7 +444,7 @@ static int queryCursorRow() {
     auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
     for (;;) {
         auto remaining = deadline - std::chrono::steady_clock::now();
-        if (remaining <= std::chrono::milliseconds(0)) return -1;
+        if (remaining <= std::chrono::milliseconds(0)) return false;
         auto us = std::chrono::duration_cast<std::chrono::microseconds>(remaining).count();
         struct timeval tv;
         tv.tv_sec = (long)(us / 1000000);
@@ -454,28 +454,29 @@ static int queryCursorRow() {
         FD_ZERO(&fds);
         FD_SET(STDIN_FILENO, &fds);
         int rv = select(STDIN_FILENO + 1, &fds, nullptr, nullptr, &tv);
-        if (rv <= 0) return -1; // timeout, or a signal interrupted the wait
-                                 // (rare here, and not worth retrying for a
-                                 // best-effort correction) -- caller falls
-                                 // back to leaving the cursor alone
+        if (rv <= 0) return false; // timeout / interrupted -- caller leaves cursor alone
 
         char c;
         ssize_t n = read(STDIN_FILENO, &c, 1);
-        if (n <= 0) return -1;
+        if (n <= 0) return false;
         resp += c;
         if (c == 'R') break;
-        if (resp.size() > 32) return -1; // sanity guard against runaway input
+        if (resp.size() > 32) return false; // sanity guard against runaway input
     }
 
+    // Parse "\x1b[<row>;<col>R".
     size_t esc = resp.find("\x1b[");
     size_t semi = esc == std::string::npos ? std::string::npos : resp.find(';', esc);
-    if (esc == std::string::npos || semi == std::string::npos) return -1;
+    size_t rr = resp.find('R', esc == std::string::npos ? 0 : esc);
+    if (esc == std::string::npos || semi == std::string::npos || rr == std::string::npos) return false;
     std::string rowStr = resp.substr(esc + 2, semi - (esc + 2));
-    if (rowStr.empty()) return -1;
-    for (char ch : rowStr) {
-        if (!isdigit((unsigned char)ch)) return -1;
-    }
-    return std::atoi(rowStr.c_str());
+    std::string colStr = resp.substr(semi + 1, rr - (semi + 1));
+    if (rowStr.empty() || colStr.empty()) return false;
+    for (char ch : rowStr) if (!isdigit((unsigned char)ch)) return false;
+    for (char ch : colStr) if (!isdigit((unsigned char)ch)) return false;
+    outRow = std::atoi(rowStr.c_str());
+    outCol = std::atoi(colStr.c_str());
+    return true;
 }
 
 // Set once by reassertChrome() when it does a resize-driven full repaint;
@@ -571,11 +572,22 @@ void reassertChrome(const std::string& cwd, const std::string& gitBranch,
         // cursor, which is correct for ordinary commands; only verify and
         // correct if that turns out to be genuinely invalid (`clear`-family
         // commands home the cursor to (1,1) via their own \x1b[H).
-        int rows, cols;
-        int row = getTerminalSize(rows, cols) ? queryCursorRow() : -1;
-        if (row != -1 && (row <= 1 || row >= rows)) {
-            printf("\x1b[2;1H");
+        int rows, cols, row = -1, col = -1;
+        bool got = getTerminalSize(rows, cols) && queryCursorPos(row, col);
+        if (got && (row <= 1 || row >= rows)) {
+            printf("\x1b[2;1H"); // clear-family homed to (1,1) -> park at row 2
             fflush(stdout);
+        } else if (got && col > 1) {
+            // Fresh-line (zsh PROMPT_SP behavior): the command's output did NOT
+            // end at column 1 -- either it lacked a trailing newline (echo -n)
+            // or a terminal-echoed "^C" left the cursor mid-line. Emit ONE
+            // newline so the next prompt starts clean instead of printing on
+            // top of that leftover text. When output DID end at column 1 we add
+            // nothing, so a normal command never gains a spurious blank line.
+            if (const char* f = getenv("ARK_FRESHLINE"); !(f && std::string(f) == "0")) {
+                printf("\r\n");
+                fflush(stdout);
+            }
         }
     }
 }
