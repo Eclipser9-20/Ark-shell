@@ -541,14 +541,14 @@ void printStartupBanner() {
         // bar, then a second stroke offset right slants down to the point. Wide
         // enough to read as a bolt, not a thin leaning stick.
         art = {
-            "      █████",
-            "     █████",
-            "    █████",
-            "   ██████████",
-            "        █████",
-            "       █████",
-            "      █████",
+            "      ███",
             "     ███",
+            "    ███",
+            "   ████████",
+            "       ███",
+            "      ███",
+            "     ███",
+            "    ██",
         };
     } // "none" -> no art
 
