@@ -1,18 +1,65 @@
 #include "features.h"
 #include "builtins.h"
 #include <algorithm>
-#include <array>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <dirent.h>
+#include <fcntl.h>
 #include <fstream>
 #include <mutex>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include <unordered_set>
+
+// Run a command DIRECTLY (fork + execvp) and capture its stdout; stderr is
+// discarded. No shell is involved -- ark is meant to be the only shell on the
+// system, so it never routes helper commands through /bin/sh (which may be ark
+// itself, or absent). argv[0] is looked up on $PATH. Returns "" on any failure.
+static std::string captureCommand(const std::vector<std::string>& argv) {
+    if (argv.empty()) return "";
+    int pipefd[2];
+    if (pipe(pipefd) != 0) return "";
+    pid_t pid = fork();
+    if (pid < 0) { close(pipefd[0]); close(pipefd[1]); return ""; }
+    if (pid == 0) {
+        dup2(pipefd[1], STDOUT_FILENO);
+        int dn = open("/dev/null", O_WRONLY);
+        if (dn >= 0) { dup2(dn, STDERR_FILENO); close(dn); }
+        close(pipefd[0]);
+        close(pipefd[1]);
+        std::vector<char*> c;
+        for (auto& a : argv) c.push_back(const_cast<char*>(a.c_str()));
+        c.push_back(nullptr);
+        execvp(c[0], c.data());
+        _exit(127);
+    }
+    close(pipefd[1]);
+    std::string out;
+    char buf[4096];
+    ssize_t n;
+    while ((n = read(pipefd[0], buf, sizeof(buf))) > 0) out.append(buf, (size_t)n);
+    close(pipefd[0]);
+    int status = 0;
+    waitpid(pid, &status, 0);
+    return out;
+}
+
+// Strip terminal backspace-overstrike (what `col -b` does): a byte followed by
+// '\b' means "erase the previous output char" -- man pages use it for bold
+// (X\bX) and underline (_\bX). Done in-process so ark needs no `col` binary.
+static std::string stripOverstrike(const std::string& in) {
+    std::string out;
+    out.reserve(in.size());
+    for (char c : in) {
+        if (c == '\b') { if (!out.empty()) out.pop_back(); }
+        else out += c;
+    }
+    return out;
+}
 
 // ── Private Mode ────────────────────────────────────────────────────────────
 namespace {
@@ -192,15 +239,9 @@ std::vector<std::string> parseManFlags(const std::string& cmd) {
     for (char c : cmd)
         if (!(std::isalnum((unsigned char)c) || c == '-' || c == '_' || c == '.' || c == '+'))
             return flags;
-    std::string sh = "man " + cmd + " 2>/dev/null | col -b 2>/dev/null";
-    FILE* p = popen(sh.c_str(), "r");
-    if (!p) return flags;
+    // Run `man <cmd>` directly (no shell) and strip overstrike in-process.
+    std::string text = stripOverstrike(captureCommand({"man", cmd}));
     std::unordered_set<std::string> seen;
-    std::array<char, 4096> buf{};
-    std::string text;
-    size_t n;
-    while ((n = fread(buf.data(), 1, buf.size(), p)) > 0) text.append(buf.data(), n);
-    pclose(p);
 
     size_t i = 0;
     while (i < text.size()) {
@@ -235,16 +276,6 @@ std::string brewPath() {
         if (access(p, X_OK) == 0) return p;
     return "";
 }
-std::string runCapture(const std::string& shellCmd) {
-    FILE* p = popen(shellCmd.c_str(), "r");
-    if (!p) return "";
-    std::string out;
-    std::array<char, 4096> buf{};
-    size_t n;
-    while ((n = fread(buf.data(), 1, buf.size(), p)) > 0) out.append(buf.data(), n);
-    pclose(p);
-    return out;
-}
 std::string firstToken(const std::string& s) {
     size_t a = s.find_first_not_of(" \t\r\n");
     if (a == std::string::npos) return "";
@@ -271,7 +302,7 @@ const std::unordered_set<std::string>& brewFormulaeSet(const std::string& brew) 
         std::ifstream in(cachePath);
         out.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     } else {
-        out = runCapture("'" + brew + "' formulae 2>/dev/null");
+        out = captureCommand({brew, "formulae"});
         if (!out.empty()) { // atomic write so a concurrent reader never sees a half file
             std::string tmp = cachePath + ".tmp";
             { std::ofstream o(tmp); o << out; }
@@ -307,7 +338,7 @@ std::string brewFormulaFor(const std::string& cmd) {
     if (!brew.empty()) {
         // 1) Authoritative reverse lookup (handles cmd != formula) when the
         //    homebrew/command-not-found tap is installed.
-        std::string wf = firstToken(runCapture("'" + brew + "' which-formula " + cmd + " 2>/dev/null"));
+        std::string wf = firstToken(captureCommand({brew, "which-formula", cmd}));
         if (!wf.empty()) result = wf;
         // 2) Fallback: a formula literally named `cmd`.
         else if (brewFormulaeSet(brew).count(cmd)) result = cmd;
