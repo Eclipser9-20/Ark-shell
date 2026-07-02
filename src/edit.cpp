@@ -262,7 +262,18 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
         if (n <= 0) return std::nullopt; // EOF/error
 
         if (c == '\r' || c == '\n') { endLine(); return buf; }
-        if (c == 3) { endLine(); return std::string(); } // Ctrl-C: cancel line
+        if (c == 3) {
+            // Ctrl-C at the prompt: exactly what bash & zsh do -- leave the
+            // typed text on screen, print a literal "^C" after it, drop to a
+            // fresh prompt, and DISCARD the line (return empty so the REPL loop
+            // just re-prompts, running nothing). We echo "^C" ourselves because
+            // raw mode has ISIG off (the kernel never sees Ctrl-C as a signal
+            // here, so it can't echo the marker like it does for a running
+            // command). Move past the real input + clear any ghost first.
+            if (cursor < buf.size()) std::cout << "\x1b[" << (buf.size() - cursor) << "C";
+            std::cout << "\x1b[K^C\n" << std::flush;
+            return std::string();
+        }
         if (c == 4 && buf.empty()) { endLine(); return std::nullopt; } // Ctrl-D on empty line: EOF
         if (c == 127 || c == 8) { // Backspace
             if (cursor > 0) { buf.erase(cursor - 1, 1); cursor--; redraw(); }
