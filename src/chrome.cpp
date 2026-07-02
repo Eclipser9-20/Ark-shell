@@ -153,13 +153,28 @@ static bool getTerminalSize(int& rows, int& cols) {
     return true;
 }
 
+// Top-bar mode (ARK_CHROME_TOP): "pinned" fixes the cwd+branch bar at row 1
+// (top-left, always visible) at the cost of native scrollback -- a scroll
+// region that doesn't start at row 1 can't feed the terminal's scrollback
+// buffer. "off" hides the top bar entirely. Anything else (the default) is
+// "inline": the bar is printed as a per-prompt header that scrolls with output,
+// so scrollback keeps working (main.cpp prints it; see topBar()).
+static bool chromeTopPinned() {
+    const char* t = getenv("ARK_CHROME_TOP");
+    return t && std::string(t) == "pinned";
+}
+// The first scrollable row = the top margin of the scroll region. It's row 2
+// only when a pinned top bar occupies row 1; otherwise row 1 is normal content.
+static int chromeHomeRow() { return chromeTopPinned() ? 2 : 1; }
+
 void setScrollRegion() {
     int rows, cols;
     if (!getTerminalSize(rows, cols) || rows <= 2) return;
-    // Region = rows 1 .. N-1. Starting at row 1 (not 2) is what makes the
-    // terminal's SCROLLBACK work: lines are only saved to scrollback when they
-    // scroll off row 1. Row N is excluded so the pinned bottom bar survives.
-    printf("\x1b[1;%dr", rows - 1);
+    // Region = <top> .. N-1. Row N is always excluded so the pinned bottom bar
+    // survives. <top> is row 1 by default -- lines only feed SCROLLBACK when
+    // they scroll off row 1 -- or row 2 when a pinned top bar sits on row 1
+    // (ARK_CHROME_TOP=pinned), which trades scrollback for the fixed header.
+    printf("\x1b[%d;%dr", chromeHomeRow(), rows - 1);
     fflush(stdout);
 }
 
@@ -290,7 +305,7 @@ std::string topBar(const std::string& cwd, const std::string& gitBranch) {
     return line;
 }
 
-void paintChrome(const std::string&, const std::string&,
+void paintChrome(const std::string& cwd, const std::string& gitBranch,
                   double sessionSeconds, const HwStats& hw) {
     int rows, cols;
     if (!getTerminalSize(rows, cols) || rows <= 2) return;
@@ -329,11 +344,16 @@ void paintChrome(const std::string&, const std::string&,
 
     std::string bottomLine = leftPill.ansi + std::string(pad, ' ') + rightPill.ansi;
 
-    // Only the pinned BOTTOM bar is painted here now (the top bar is an inline
-    // prompt header, see topBar()). Absolute-positioned to the last row, which
-    // sits OUTSIDE the row-1..N-1 scroll region, so ordinary output never
-    // disturbs it. Cursor safety around this call is the caller's job
-    // (reassertChrome saves/restores).
+    // Pinned top bar (ARK_CHROME_TOP=pinned only): the cwd+branch header fixed
+    // at row 1, which sits OUTSIDE the 2..N-1 scroll region so output never
+    // disturbs it. In the default "inline" mode this is skipped -- the header is
+    // printed by main.cpp above each prompt so it scrolls into scrollback.
+    if (chromeTopPinned())
+        printf("\x1b[1;1H\x1b[2K%s", topBar(cwd, gitBranch).c_str());
+
+    // The pinned BOTTOM bar, absolute-positioned to the last row (outside the
+    // scroll region, so ordinary output never disturbs it). Cursor safety around
+    // this call is the caller's job (reassertChrome saves/restores).
     printf("\x1b[%d;1H\x1b[2K%s", rows, bottomLine.c_str());
     fflush(stdout);
 }
@@ -701,7 +721,8 @@ void reassertChrome(const std::string& cwd, const std::string& gitBranch,
         printf("\x1b[2J");     // erase the whole visible screen -- ghosts and all
         setScrollRegion();     // re-establish the top/bottom margins
         paintChrome(cwd, gitBranch, sessionSeconds, hw);
-        printf("\x1b[1;1H");   // fresh cursor home (row 1 is normal content now)
+        printf("\x1b[%d;1H", chromeHomeRow()); // fresh cursor home (row 2 if a
+                                               // pinned top bar owns row 1)
         printf("\x1b[?2026l"); // end synchronized update
         fflush(stdout);
         g_didResizeRepaint = true;
@@ -730,7 +751,9 @@ void reassertChrome(const std::string& cwd, const std::string& gitBranch,
     setScrollRegion();
     paintChrome(cwd, gitBranch, sessionSeconds, hw);
     if (policy == CursorPolicy::ForceReseed) {
-        printf("\x1b[1;1H"); // no valid prior position to protect (startup)
+        printf("\x1b[%d;1H", chromeHomeRow()); // no valid prior position to
+                                               // protect (startup); row 2 if a
+                                               // pinned top bar owns row 1
     } else {
         printf("\x1b" "8"); // DECRC: restore to the TRUE original position
     }
@@ -760,6 +783,11 @@ void reassertChrome(const std::string& cwd, const std::string& gitBranch,
         bool got = getTerminalSize(rows, cols) && queryCursorPos(row, col);
         if (got && row >= rows) {
             printf("\x1b[%d;1H", rows - 1); // cursor on the bottom bar -> pull up one row
+            fflush(stdout);
+        } else if (got && row < chromeHomeRow()) {
+            // `clear` homed the cursor to (1,1), which is ON the pinned top bar
+            // (ARK_CHROME_TOP=pinned) -> push it down to the first scrollable row.
+            printf("\x1b[%d;1H", chromeHomeRow());
             fflush(stdout);
         } else if (got && col > 1) {
             // Command output didn't end at column 1 (echo -n, a ^C mid-line) ->

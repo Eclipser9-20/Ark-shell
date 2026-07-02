@@ -222,6 +222,37 @@ static void importEnvironment(ShellState& state) {
     }
 }
 
+// `ark --setup` (alias `--init`): provision ~/.config/ark non-interactively, for
+// install scripts. Creates the config dir, writes the fully-commented default
+// ark.config if none exists (every feature listed, all commented out / nothing
+// enabled), and creates an EMPTY history file. Idempotent -- an existing config
+// or history is kept, never clobbered. Prints what it did and exits.
+static int setupConfigDir() {
+    const char* home = getenv("HOME");
+    if (!home || !*home) { std::cerr << "ark --setup: $HOME is not set\n"; return 1; }
+    std::string dir = std::string(home) + "/.config/ark";
+    mkdirRecursive(dir);
+    std::string cfg = dir + "/ark.config";
+    std::string hist = dir + "/.history";
+    struct stat st;
+    bool wroteCfg = false, wroteHist = false;
+    if (stat(cfg.c_str(), &st) != 0) {
+        std::ofstream f(cfg);
+        if (!f) { std::cerr << "ark --setup: cannot write " << cfg << "\n"; return 1; }
+        f << arkDefaultConfig();
+        wroteCfg = true;
+    }
+    if (stat(hist.c_str(), &st) != 0) {
+        std::ofstream f(hist); // touch: an empty history to start
+        if (!f) { std::cerr << "ark --setup: cannot write " << hist << "\n"; return 1; }
+        wroteHist = true;
+    }
+    std::cout << "ark: config ready at " << dir << "\n"
+              << "  ark.config  " << (wroteCfg  ? "created (every feature listed, none enabled)" : "kept existing") << "\n"
+              << "  .history    " << (wroteHist ? "created (empty)" : "kept existing") << "\n";
+    return 0;
+}
+
 int main(int argc, char** argv) {
     ShellState state;
     JobTable jobTable;
@@ -275,6 +306,10 @@ int main(int argc, char** argv) {
     // accepted and ignored -- ark's config sourcing already covers login setup.
     int ai = 1;
     if (ai < argc && (std::string(argv[ai]) == "-l" || std::string(argv[ai]) == "--login")) ai++;
+
+    // `ark --setup` / `ark --init`: provision ~/.config/ark and exit (install scripts).
+    if (ai < argc && (std::string(argv[ai]) == "--setup" || std::string(argv[ai]) == "--init"))
+        return setupConfigDir();
 
     if (ai < argc && std::string(argv[ai]) == "-c") {
         if (ai + 1 >= argc) { std::cerr << "ark: -c: option requires an argument\n"; return 2; }
@@ -481,13 +516,17 @@ int main(int argc, char** argv) {
             history.sync(histPath);
             uvar::loadInto(state.vars);
         }
-        // Top bar (cwd + git branch) is printed inline as a header ABOVE each
-        // fresh prompt, so it scrolls with output into scrollback (it used to be
-        // pinned to row 1, which disabled scrollback). ARK_CHROME=0 hides it,
-        // matching the bars toggle. Not printed on continuation lines.
+        // Top bar (cwd + git branch). In the default "inline" mode it's printed
+        // as a header ABOVE each fresh prompt, so it scrolls with output into
+        // scrollback. ARK_CHROME_TOP=pinned instead fixes it at row 1 (painted by
+        // reassertChrome/paintChrome, not here), and =off hides it; either way we
+        // skip the inline print. ARK_CHROME=0 hides all chrome. Not on continuations.
         if (!continuing) {
             const char* c = getenv("ARK_CHROME");
-            if (!(c && std::string(c) == "0"))
+            const char* t = getenv("ARK_CHROME_TOP");
+            bool chromeOn = !(c && std::string(c) == "0");
+            bool inlineTop = !(t && (std::string(t) == "pinned" || std::string(t) == "off"));
+            if (chromeOn && inlineTop)
                 std::cout << topBar(state.cwd, findGitBranch(state.cwd)) << "\r\n" << std::flush;
         }
         std::string prompt = continuing ? continuationPrompt() : buildPrompt(state, home);

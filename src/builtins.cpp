@@ -43,6 +43,9 @@ const char* arkDefaultConfig() {
 # export ARK_SYNTAX_HIGHLIGHT=0    # colored command line as you type
 # export ARK_VALIDATE=0            # red unknown-command highlight as you type
 # export ARK_CHROME=0              # inline top bar + pinned bottom status bar
+# export ARK_CHROME_TOP=pinned     # top bar: inline (default; scrolls with output,
+#                                  #   keeps scrollback) | pinned (fixed top-left,
+#                                  #   NO scrollback) | off (hide the top bar)
 # export ARK_AUTOCD=0              # type a directory name to cd into it
 # export ARK_SPELLCHECK=0          # "did you mean X?" on an unknown command
 # export ARK_BREW_SUGGEST=0        # brew reverse lookup for installs (rg->ripgrep)
