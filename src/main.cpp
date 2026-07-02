@@ -4,6 +4,7 @@
 #include "edit.h"
 #include "exec.h"
 #include "expand.h"
+#include "features.h"
 #include "history.h"
 #include "jobs.h"
 #include "lexer.h"
@@ -268,6 +269,8 @@ int main(int argc, char** argv) {
     std::string histPath = histDir + "/.history";
 
     History history;
+    state.history = &history;   // for the `history` builtin
+    state.histPath = histPath;
 
     auto sessionStart = std::chrono::steady_clock::now();
     auto sessionSeconds = [&]() {
@@ -362,6 +365,14 @@ int main(int argc, char** argv) {
     // the very first command typed.
     sourceConfig(histDir + "/ark.config", state, astRoots);
 
+    // Universal variables: load the cross-window/cross-reboot store into the
+    // shell (and the environment) now that config has run. Primed once here;
+    // re-synced at each prompt below so another window's `uvar` shows up live.
+    uvar::loadInto(state.vars);
+    // Private mode can be primed from the environment/config (ARK_PRIVATE=1).
+    if (const char* p = getenv("ARK_PRIVATE"); p && std::string(p) == "1")
+        arkSetPrivateMode(true);
+
     // Neofetch-style startup panel (⚡ + system info), printed once after the
     // config is loaded (so ARK_BANNER=0 can suppress it) and before the first
     // prompt. The startup chrome paint already left the cursor at row 2, so
@@ -376,10 +387,33 @@ int main(int argc, char** argv) {
     std::string pending;
     bool continuing = false;
 
+    // Real-time command validation for the syntax highlighter: a command-
+    // position word turns red if it resolves to nothing runnable. Aliases and
+    // functions come from live shell state; builtins/$PATH from commandExists;
+    // an explicit slash-path is checked for executability directly.
+    std::function<bool(const std::string&)> cmdValidator = [&state](const std::string& name) -> bool {
+        if (name.empty()) return true;
+        if (state.aliases.count(name) || state.functions.count(name)) return true;
+        if (name.find('/') != std::string::npos) {
+            std::string p = name;
+            if (p[0] == '~') { if (const char* h = getenv("HOME")) p = std::string(h) + p.substr(1); }
+            return access(p.c_str(), X_OK) == 0;
+        }
+        return commandExists(name);
+    };
+
     for (;;) {
         jobTable.drainSignalQueue();
+        if (!continuing) {
+            // Cross-window live sync at each fresh prompt (cheap: a stat + a
+            // tail read only when the files actually changed). Shared Command
+            // History picks up other windows' commands; Universal Variables
+            // pick up another window's `uvar` edits.
+            history.sync(histPath);
+            uvar::loadInto(state.vars);
+        }
         std::string prompt = continuing ? continuationPrompt() : buildPrompt(state, home);
-        auto got = readLine(prompt, history, doReassertChrome);
+        auto got = readLine(prompt, history, doReassertChrome, cmdValidator);
         if (!got) break; // Ctrl-D / EOF
         if (!continuing) {
             if (got->empty()) continue;
@@ -402,7 +436,10 @@ int main(int argc, char** argv) {
                                 // case THIS command (clear/vim/etc) left it
                                 // somewhere invalid -- e.g. `clear`'s own
                                 // \x1b[H parks it at row 1, on the pinned bar
-            history.append(histPath, pending); // multi-line entries are stored as one history line
+            // Private Mode: while on, write NOTHING to history/disk. Otherwise
+            // record the command tagged with the cwd it ran in (context-aware
+            // autosuggestions use that). Multi-line entries stored as one line.
+            if (!arkPrivateMode()) history.append(histPath, pending, state.cwd);
             // Only keep this AST alive if a function body inside it needs
             // to keep pointing at it -- otherwise let it free immediately
             // (see containsFunctionDef()'s doc comment for why this matters

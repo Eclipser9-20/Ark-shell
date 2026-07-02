@@ -1,10 +1,12 @@
 #include "exec.h"
 #include "builtins.h"
 #include "expand.h"
+#include "features.h"
 #include "jobs.h"
 #include "lexer.h"
 #include "parser.h"
 #include <cctype>
+#include <cstdlib>
 #include <cerrno>
 #include <csignal>
 #include <cstdio>
@@ -21,6 +23,16 @@
 #include <vector>
 
 extern char** environ;
+
+// "command not found" plus a spelling suggestion (Intelligent Spelling
+// Correction). Suppressed by ARK_SPELLCHECK=0.
+static void reportCommandNotFound(const std::string& name) {
+    std::cerr << name << ": command not found\n";
+    const char* off = getenv("ARK_SPELLCHECK");
+    if (off && std::string(off) == "0") return;
+    std::string guess = suggestCommand(name);
+    if (!guess.empty()) std::cerr << "ark: did you mean '" << guess << "'?\n";
+}
 
 // Real bug found live: neither Ctrl-C nor Ctrl-Z worked on ANY foreground
 // child (a plain external command, a shell script). Root cause: ark ignores
@@ -231,7 +243,7 @@ static int runPipelineStage(Node* cmd, ShellState& state, int inFd, int outFd, p
     posix_spawn_file_actions_destroy(&actions);
     closeHeredocFds();
     if (rc != 0) {
-        std::cerr << argv[0] << ": command not found\n";
+        reportCommandNotFound(argv[0]);
         pidOut = -1;
         return 127;
     }
@@ -561,7 +573,7 @@ static int runCommand(Node* cmd, ShellState& state) {
     posix_spawn_file_actions_destroy(&actions);
     for (int fd : heredocFds) close(fd); // parent-side here-doc temp fds
     if (rc != 0) {
-        std::cerr << argv[0] << ": command not found\n";
+        reportCommandNotFound(argv[0]);
         return 127;
     }
 

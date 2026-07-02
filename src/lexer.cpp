@@ -229,7 +229,25 @@ std::vector<Token> Lexer::tokenize() {
             toks.push_back(Token{kind, text, l, c});
             continue;
         }
-        toks.push_back(lexWord());
+        Token w = lexWord();
+        // zsh-style glob qualifier: a `(...)` attached with NO space directly
+        // after a word that already contains a glob metacharacter (* ? [) is
+        // part of that word (e.g. `*.log(.mh-1)`), not a subshell. A '(' after
+        // a plain word, or after whitespace, still lexes as LParen (subshell) --
+        // so `(cmd)` and `x $(cmd)` are unaffected. Expansion (expand.cpp) does
+        // the actual metadata filtering; here we just keep the token whole.
+        if (!atEnd() && peek() == '(' && w.text.find_first_of("*?[") != std::string::npos) {
+            std::string q(1, advance()); // '('
+            int depth = 1;
+            while (!atEnd() && depth > 0) {
+                char cc = advance();
+                if (cc == '(') depth++;
+                else if (cc == ')') depth--;
+                q += cc;
+            }
+            w.text += q;
+        }
+        toks.push_back(w);
     }
     toks.push_back(Token{TokKind::End, "", line_, col_});
     return toks;

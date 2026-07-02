@@ -5,6 +5,7 @@
 
 struct Node; // forward-declared; ast.h isn't included here to avoid a cycle
 class JobTable; // forward-declared; introduced in Task 17
+class History; // forward-declared; owned by main.cpp, used by the `history` builtin
 
 struct ShellState {
     std::unordered_map<std::string, std::string> vars;
@@ -35,5 +36,7 @@ struct ShellState {
 
     int lastStatus = 0;
     std::string cwd;
-    JobTable* jobs = nullptr; // non-owning; owned by main.cpp
+    JobTable* jobs = nullptr;       // non-owning; owned by main.cpp
+    History* history = nullptr;     // non-owning; owned by main.cpp (for `history`)
+    std::string histPath;           // path to the shared history file
 };

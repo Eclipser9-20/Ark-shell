@@ -1,6 +1,8 @@
 #include "builtins.h"
 #include "complete.h"
 #include "exec.h"
+#include "features.h"
+#include "history.h"
 #include "lexer.h"
 #include "parser.h"
 #include <algorithm>
@@ -36,18 +38,35 @@ const char* arkDefaultConfig() {
 # ─── TOGGLES (all default ON; set to 0 to disable) ─────────────────────────
 # export ARK_GHOST_TEXT=0          # fish-style autosuggestions (dim ghost text)
 # export ARK_SYNTAX_HIGHLIGHT=0    # colored command line as you type
+# export ARK_VALIDATE=0            # red-underline unknown commands as you type
 # export ARK_CHROME=0              # pinned top/bottom status bars
 # export ARK_AUTOCD=0              # type a directory name to cd into it
 # export ARK_NU_MODE=1             # nushell-style: `ls` shows a bordered table
+# export ARK_BANNER=0              # neofetch-style ⚡ startup panel
+# export ARK_SPELLCHECK=0          # "did you mean X?" on an unknown command
+# export ARK_MANPAGE_COMPLETE=0    # Tab-complete flags from a command's man page
+# export ARK_PRIVATE=1             # start in private mode (nothing saved to history)
 
 # ─── COMPLETION: FIND ANYTHING, ANYWHERE ───────────────────────────────────
 # Tab accepts the ghost suggestion if one's showing, else completes the word.
 # A background index of your whole home tree (built at startup) lets Tab find
-# any file/program by name from anywhere. `ark-reindex` rebuilds it.
+# any file/program by name from anywhere. `ark-reindex` rebuilds it. Flag args
+# (-x/--long) tab-complete from the command's man page (ARK_MANPAGE_COMPLETE).
 # export ARK_INDEX=0                        # disable the filesystem index
 # export ARK_INDEX_ROOTS="$HOME:/opt"       # roots to index (default: $HOME)
 # Extra dirs whose entries complete by FULL PATH (lighter than the index):
 # export ARK_SEARCH_DIRS="$HOME/bin:$HOME/projects:$HOME/scripts"
+
+# ─── POWER FEATURES (built in; commands, not toggles) ──────────────────────
+# private [on|off]   Private Mode: pause writing commands to history/disk.
+# uvar NAME VALUE    Universal Variable: persists across ALL windows AND survives
+# uvar NAME          reboot (stored in ~/.config/ark/universal, also exported).
+# uvar               Set in one window, appears in the others live. `uvar -u NAME`.
+# history            Shared across every window/tab live. `history -c` clears it.
+# Autosuggestions are CONTEXT-AWARE: a match from the current directory wins.
+# Metadata globbing:  *(.)=files *(/)=dirs *(@)=symlinks *(x)=exec
+#   *(.L+1000)=files >1000 bytes (Lk/Lm/Lg units)   *(.mh-2)=modified <2h ago
+#   (m units h/d/w; '-'=newer than, '+'=older than)  e.g.  ls -la *.log(.mh-1)
 
 # ─── ALIASES ───────────────────────────────────────────────────────────────
 # alias la='ls -A'
@@ -71,7 +90,8 @@ const char* arkDefaultConfig() {
 #  REDIRECT   > >> < 2>  | (pipe)  & (background)  << EOF  <<'EOF'  <<- EOF
 #  BUILTINS   cd(cd -/auto_cd) pwd echo(-n -e) export unset type read
 #             alias unalias pushd popd dirs source(.) return local break continue
-#             jobs fg bg exit ark-settings
+#             jobs fg bg exit ark-settings ark-reindex
+#             private  uvar  history(-c)
 #  EDITING    Ctrl-A/E Ctrl-K/U Ctrl-W Ctrl-Y  Alt-←/→  Ctrl-R  Tab  →/Ctrl-F  ↑/↓
 )CFG";
 }
@@ -576,6 +596,76 @@ static int b_bg(const std::vector<std::string>& argv, ShellState& state) {
     return 0;
 }
 
+// ── Private Mode (Feature) ──────────────────────────────────────────────────
+// `private` / `private on` -> stop writing history to disk; `private off` ->
+// resume; bare `private` toggles. Reports the new state.
+static int b_private(const std::vector<std::string>& argv, ShellState&) {
+    bool now;
+    if (argv.size() >= 2) {
+        std::string a = argv[1];
+        now = (a == "on" || a == "1" || a == "true");
+        if (!(now || a == "off" || a == "0" || a == "false")) {
+            std::cerr << "private: usage: private [on|off]\n";
+            return 1;
+        }
+    } else {
+        now = !arkPrivateMode(); // bare toggle
+    }
+    arkSetPrivateMode(now);
+    std::cout << "private mode " << (now ? "ON — commands are not saved to history"
+                                         : "OFF — commands are saved again") << "\n";
+    return 0;
+}
+
+// ── Universal Variables (Feature) ───────────────────────────────────────────
+// `uvar` (list all) · `uvar NAME` (show one) · `uvar NAME VALUE` (set,
+// persisted across windows + reboots) · `uvar -u NAME` (erase).
+static int b_uvar(const std::vector<std::string>& argv, ShellState& state) {
+    if (argv.size() == 1) {
+        auto all = uvar::all();
+        std::vector<std::string> keys;
+        for (auto& kv : all) keys.push_back(kv.first);
+        std::sort(keys.begin(), keys.end());
+        for (auto& k : keys) std::cout << k << "=" << all[k] << "\n";
+        return 0;
+    }
+    if (argv[1] == "-u") {
+        if (argv.size() < 3) { std::cerr << "uvar: -u needs a name\n"; return 1; }
+        uvar::unset(argv[2]);
+        state.vars.erase(argv[2]);
+        return 0;
+    }
+    if (argv.size() == 2) {
+        auto all = uvar::all();
+        auto it = all.find(argv[1]);
+        if (it == all.end()) return 1;
+        std::cout << it->second << "\n";
+        return 0;
+    }
+    // uvar NAME VALUE [VALUE...] -> join extra args with spaces
+    std::string value = argv[2];
+    for (size_t i = 3; i < argv.size(); i++) value += " " + argv[i];
+    uvar::set(argv[1], value);
+    state.vars[argv[1]] = value;
+    return 0;
+}
+
+// ── Command History (Feature: shared history + private mode) ─────────────────
+// `history` (list, numbered) · `history -c` (clear memory + the shared file).
+static int b_history(const std::vector<std::string>& argv, ShellState& state) {
+    if (!state.history) return 1;
+    if (argv.size() >= 2 && argv[1] == "-c") {
+        state.history->clear(state.histPath);
+        return 0;
+    }
+    const auto& lines = state.history->lines();
+    int width = 1, n = (int)lines.size();
+    while (n >= 10) { n /= 10; width++; }
+    for (size_t i = 0; i < lines.size(); i++)
+        std::printf("%*zu  %s\n", width, i + 1, lines[i].c_str());
+    return 0;
+}
+
 const std::unordered_map<std::string, BuiltinFn>& builtinRegistry() {
     static const std::unordered_map<std::string, BuiltinFn> reg = {
         {"cd", b_cd}, {"exit", b_exit}, {"pwd", b_pwd}, {"echo", b_echo},
@@ -588,6 +678,7 @@ const std::unordered_map<std::string, BuiltinFn>& builtinRegistry() {
         {"return", b_return}, {"local", b_local},
         {"break", b_break}, {"continue", b_continue},
         {"ls", b_ls},
+        {"private", b_private}, {"uvar", b_uvar}, {"history", b_history},
     };
     return reg;
 }

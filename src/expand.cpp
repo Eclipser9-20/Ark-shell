@@ -3,6 +3,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <dirent.h>
 #include <fnmatch.h>
 #include <glob.h>
@@ -577,22 +578,101 @@ static std::vector<std::string> recursiveGlob(const std::string& pattern) {
     return out;
 }
 
-// Expands filesystem glob characters (* ?) via POSIX glob(3), with zsh-style
-// recursive `**` handled separately. A pattern with no glob chars is returned
-// as-is; a pattern that matches nothing is left literal (bash's default
-// behavior without nullglob), not silently dropped.
-static std::vector<std::string> globExpand(const std::string& pattern) {
-    if (pattern.find_first_of("*?") == std::string::npos) return {pattern};
-    if (pattern.find("**") != std::string::npos) return recursiveGlob(pattern);
-    glob_t gl;
-    int rc = ::glob(pattern.c_str(), 0, nullptr, &gl);
-    std::vector<std::string> out;
-    if (rc == 0) {
-        for (size_t i = 0; i < gl.gl_pathc; i++) out.push_back(gl.gl_pathv[i]);
-    } else {
-        out.push_back(pattern);
+// ── Advanced Metadata Globbing (zsh-style glob qualifiers) ──────────────────
+// A trailing `(...)` on a glob filters matches by metadata, so you can find
+// files by TYPE, SIZE, or AGE directly in a command:
+//   *(.)        regular files only        *(/)        directories only
+//   *(@)        symlinks                  *(x)        executable (also * )
+//   *(.L+1000)  regular files > 1000 bytes (Lk/Lm/Lg = KiB/MiB/GiB units)
+//   *(.mh-2)    modified < 2 HOURS ago    *(.md+7)    modified > 7 DAYS ago
+//                                         (m units: h hour, d day, w week)
+// Qualifiers chain: `*.log(.mh-1)` = regular .log files touched in the last
+// hour. A '-' age means "more recent than", '+' means "older than".
+static bool applyOneQualifier(const std::string& path, const char*& q) {
+    struct stat st;
+    char c = *q++;
+    switch (c) {
+        case '.': return lstat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode);
+        case '/': return lstat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
+        case '@': return lstat(path.c_str(), &st) == 0 && S_ISLNK(st.st_mode);
+        case 'x': case '*': return access(path.c_str(), X_OK) == 0;
+        case 'r': return access(path.c_str(), R_OK) == 0;
+        case 'w': return access(path.c_str(), W_OK) == 0;
+        case 'L': { // size: L[kmg][+-]N
+            long long unit = 1;
+            if (*q == 'k') { unit = 1024; q++; }
+            else if (*q == 'm') { unit = 1024LL * 1024; q++; }
+            else if (*q == 'g') { unit = 1024LL * 1024 * 1024; q++; }
+            char sign = '+';
+            if (*q == '+' || *q == '-') sign = *q++;
+            long long n = 0; bool any = false;
+            while (std::isdigit((unsigned char)*q)) { n = n * 10 + (*q++ - '0'); any = true; }
+            if (!any || stat(path.c_str(), &st) != 0) return false;
+            long long bytes = (long long)st.st_size, threshold = n * unit;
+            return sign == '+' ? bytes > threshold : bytes < threshold;
+        }
+        case 'm': { // mtime age: m[hdw][+-]N
+            long long unit = 60; // default minutes if no unit char
+            if (*q == 'h') { unit = 3600; q++; }
+            else if (*q == 'd') { unit = 86400; q++; }
+            else if (*q == 'w') { unit = 604800; q++; }
+            else if (*q == 'M') { unit = 60; q++; }
+            char sign = '-';
+            if (*q == '+' || *q == '-') sign = *q++;
+            long long n = 0; bool any = false;
+            while (std::isdigit((unsigned char)*q)) { n = n * 10 + (*q++ - '0'); any = true; }
+            if (!any || stat(path.c_str(), &st) != 0) return false;
+            long long age = (long long)time(nullptr) - (long long)st.st_mtime;
+            long long threshold = n * unit;
+            return sign == '-' ? age < threshold : age > threshold; // -=recent, +=old
+        }
+        default: return true; // unknown qualifier char: ignore (permissive)
     }
-    globfree(&gl);
+}
+static std::vector<std::string> applyGlobQualifiers(const std::vector<std::string>& in,
+                                                    const std::string& qual) {
+    std::vector<std::string> out;
+    for (const auto& path : in) {
+        const char* q = qual.c_str();
+        bool ok = true;
+        while (*q && ok) ok = applyOneQualifier(path, q);
+        if (ok) out.push_back(path);
+    }
+    return out;
+}
+
+// Expands filesystem glob characters (* ?) via POSIX glob(3), with zsh-style
+// recursive `**` and trailing metadata qualifiers handled separately. A
+// pattern with no glob chars (and no qualifier) is returned as-is; a pattern
+// that matches nothing is left literal (bash's default without nullglob).
+static std::vector<std::string> globExpand(const std::string& pattern) {
+    // Peel a trailing metadata qualifier `(...)` if it's really one (its first
+    // char is a known qualifier), so a literal path like `foo(1)` is untouched.
+    std::string base = pattern, qual;
+    if (base.size() >= 3 && base.back() == ')') {
+        size_t open = base.rfind('(');
+        if (open != std::string::npos && open + 1 < base.size() - 1) {
+            std::string inside = base.substr(open + 1, base.size() - open - 2);
+            if (!inside.empty() && std::strchr("./@x*rwLm", inside[0])) {
+                qual = inside;
+                base = base.substr(0, open);
+            }
+        }
+    }
+    if (base.find_first_of("*?") == std::string::npos && qual.empty()) return {pattern};
+
+    std::vector<std::string> out;
+    if (base.find("**") != std::string::npos) {
+        out = recursiveGlob(base);
+        if (out.size() == 1 && out[0] == base) out.clear(); // recursiveGlob's "no match" literal
+    } else {
+        glob_t gl;
+        if (::glob(base.c_str(), 0, nullptr, &gl) == 0)
+            for (size_t i = 0; i < gl.gl_pathc; i++) out.push_back(gl.gl_pathv[i]);
+        globfree(&gl);
+    }
+    if (!qual.empty()) out = applyGlobQualifiers(out, qual);
+    if (out.empty()) out.push_back(pattern); // no match -> literal
     return out;
 }
 

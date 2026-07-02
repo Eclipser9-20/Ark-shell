@@ -36,5 +36,10 @@ void installIdleTicker();
 // arriving. Checking a signal-set flag once per character instead means the
 // tick still lands within about one keystroke of its 1-second deadline no
 // matter how fast input is arriving.
+// isValidCommand, if set, powers real-time command validation in the syntax
+// highlighter: a command-position word for which it returns false is painted
+// red (a likely typo). It should resolve builtins / aliases / functions /
+// $PATH / slash-paths -- readLine treats it as opaque. Empty = no validation.
 std::optional<std::string> readLine(const std::string& prompt, History& history,
-                                     const std::function<void()>& onIdleTick = {});
+                                     const std::function<void()>& onIdleTick = {},
+                                     const std::function<bool(const std::string&)>& isValidCommand = {});

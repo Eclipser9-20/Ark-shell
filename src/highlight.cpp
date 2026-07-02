@@ -136,13 +136,26 @@ const char* colorFor(SpanKind kind) {
 }
 } // namespace
 
-std::string highlightLine(const std::string& raw) {
+// TokyoNight red -- an invalid (unknown) command in command position.
+static const char* BAD_COMMAND = "\x1b[38;2;247;118;142m";
+
+std::string highlightLineValidated(const std::string& raw,
+                                   const std::function<bool(const std::string&)>& isValidCommand) {
     auto spans = classify(raw);
     std::string out;
     out.reserve(raw.size() + 32);
     for (const auto& sp : spans) {
         std::string text = raw.substr(sp.start, sp.end - sp.start);
         const char* color = colorFor(sp.kind);
+        // A command that doesn't resolve turns red -- but only once the word
+        // looks "finished": we can't know if a half-typed name is valid yet,
+        // and reddening every prefix keystroke is noise. Heuristic: validate a
+        // Command span only when something follows it on the line (a space or
+        // operator), i.e. it isn't the token still under the cursor.
+        if (sp.kind == SpanKind::Command && isValidCommand && sp.end < raw.size() &&
+            !isValidCommand(text)) {
+            color = BAD_COMMAND;
+        }
         if (color) {
             out += color;
             out += text;
@@ -152,4 +165,8 @@ std::string highlightLine(const std::string& raw) {
         }
     }
     return out;
+}
+
+std::string highlightLine(const std::string& raw) {
+    return highlightLineValidated(raw, {});
 }

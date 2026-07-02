@@ -1,4 +1,5 @@
 #pragma once
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -21,3 +22,11 @@ std::vector<Span> classify(const std::string& raw);
 // Wraps each span from classify() in its TokyoNight ANSI color and
 // concatenates -- the original bytes are never altered, only wrapped.
 std::string highlightLine(const std::string& raw);
+
+// Validating variant (Real-Time Syntax Highlighting): a Command span whose
+// text is NOT a runnable command per `isValidCommand` is painted RED instead
+// of blue, so a typo is visible before Enter. `isValidCommand` should report
+// whether a name resolves to a builtin / alias / function / $PATH executable.
+// Passing an empty function disables validation (identical to highlightLine).
+std::string highlightLineValidated(const std::string& raw,
+                                   const std::function<bool(const std::string&)>& isValidCommand);
