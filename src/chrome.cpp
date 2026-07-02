@@ -1,5 +1,6 @@
 #include "chrome.h"
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
