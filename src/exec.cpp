@@ -136,6 +136,22 @@ static std::string buildCmdline(Node* node) {
 }
 
 static int runPipelineStage(Node* cmd, ShellState& state, int inFd, int outFd, pid_t& pidOut) {
+    // A subshell stage of a pipeline (`(a; b) | c` or `c | (a; b)`): fork,
+    // wire the pipe fds, and run the subshell body in the child.
+    if (cmd->kind == NodeKind::Subshell) {
+        std::cout.flush();
+        fflush(stdout);
+        pid_t pid = fork();
+        if (pid == 0) {
+            if (inFd != -1) { dup2(inFd, STDIN_FILENO); close(inFd); }
+            if (outFd != -1) { dup2(outFd, STDOUT_FILENO); close(outFd); }
+            int rc = execNode(cmd->children[0].get(), state);
+            std::cout.flush();
+            _exit(rc & 0xff);
+        }
+        pidOut = pid;
+        return 0;
+    }
     auto argv = expandWords(cmd->words, state);
     if (argv.empty()) { pidOut = -1; return 0; }
 
@@ -674,6 +690,24 @@ static int runList(Node* list, ShellState& state) {
     return status;
 }
 
+// `( list )` -- runs the body in a forked child so its variable/cd/exit
+// changes are isolated from the parent shell. The child gets its own copy of
+// ShellState via fork(); we just wait for its status.
+static int runSubshell(Node* node, ShellState& state) {
+    std::cout.flush();
+    fflush(stdout);
+    BlockSigchld guard;
+    pid_t pid = fork();
+    if (pid == 0) {
+        int rc = execNode(node->children[0].get(), state);
+        std::cout.flush();
+        _exit(rc & 0xff);
+    }
+    int status = 0;
+    waitpidRetry(pid, &status, 0);
+    return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+}
+
 static int execNodeDispatch(Node* node, ShellState& state) {
     switch (node->kind) {
         case NodeKind::List:
@@ -682,6 +716,8 @@ static int execNodeDispatch(Node* node, ShellState& state) {
             return runCommand(node, state);
         case NodeKind::Pipeline:
             return runPipeline(node, state);
+        case NodeKind::Subshell:
+            return runSubshell(node, state);
         case NodeKind::If:
             return runIf(node, state);
         case NodeKind::While:
@@ -703,7 +739,8 @@ static int execNodeDispatch(Node* node, ShellState& state) {
 // handled centrally here so every node kind gets it uniformly instead of
 // duplicating background logic in runCommand AND runPipeline separately.
 int execNode(Node* node, ShellState& state) {
-    if (node->background && (node->kind == NodeKind::Command || node->kind == NodeKind::Pipeline)) {
+    if (node->background && (node->kind == NodeKind::Command || node->kind == NodeKind::Pipeline ||
+                             node->kind == NodeKind::Subshell)) {
         std::cout.flush(); // flush BEFORE forking -- see captureCommandOutput()
         fflush(stdout);     // for why (stale buffered output would otherwise
                             // get duplicated by the child's own flush)
@@ -727,7 +764,9 @@ int execNode(Node* node, ShellState& state) {
         return 0; // background jobs report success immediately; real status
                   // comes later via `wait`/`jobs`
     }
-    return execNodeDispatch(node, state);
+    int status = execNodeDispatch(node, state);
+    if (node->negate) status = (status == 0) ? 1 : 0; // leading `!`
+    return status;
 }
 
 std::string captureCommandOutput(const std::string& cmd, ShellState& state) {

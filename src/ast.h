@@ -4,7 +4,7 @@
 #include <utility>
 #include <vector>
 
-enum class NodeKind { Command, Pipeline, If, While, For, Case, FunctionDef, List };
+enum class NodeKind { Command, Pipeline, If, While, For, Case, FunctionDef, List, Subshell };
 enum class JoinOp { None, And, Or, Seq };
 
 struct Redirect {
@@ -20,9 +20,10 @@ struct Node {
     std::vector<std::string> words;
     std::vector<Redirect> redirects;
 
-    // Pipeline / List / If (cond,then,else) / While (cond,body)
+    // Pipeline / List / If (cond,then,else) / While (cond,body) / Subshell(body)
     std::vector<std::unique_ptr<Node>> children;
     bool background = false;
+    bool negate = false; // leading `!` -- invert the exit status
     JoinOp joinOp = JoinOp::None;
 
     // For

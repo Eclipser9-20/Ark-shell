@@ -61,6 +61,7 @@ private:
     }
 
     std::unique_ptr<Node> parseCommand();
+    std::unique_ptr<Node> parsePipelineElement();
     std::unique_ptr<Node> parsePipeline();
     std::unique_ptr<Node> parseStatement();
     std::unique_ptr<Node> parseStatementList(std::initializer_list<TokKind> stopTokens);

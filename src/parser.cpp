@@ -42,15 +42,31 @@ std::unique_ptr<Node> Parser::parseCommand() {
     return node;
 }
 
+// One stage of a pipeline: either a `( subshell )` or a simple command. This
+// is what lets a subshell appear at any pipeline position -- `(a;b) | c`,
+// `c | (a;b)` -- with the pipe correctly consumed (a bare parseCommand can't
+// parse a subshell, so those pipes used to be left dangling).
+std::unique_ptr<Node> Parser::parsePipelineElement() {
+    if (check(TokKind::LParen)) {
+        advance(); // '('
+        auto sub = std::make_unique<Node>();
+        sub->kind = NodeKind::Subshell;
+        sub->children.push_back(parseStatementList({TokKind::RParen}));
+        expect(TokKind::RParen, ")");
+        return sub;
+    }
+    return parseCommand();
+}
+
 std::unique_ptr<Node> Parser::parsePipeline() {
-    auto first = parseCommand();
-    if (!check(TokKind::Pipe)) return first; // single command, no pipeline wrapper needed
+    auto first = parsePipelineElement();
+    if (!check(TokKind::Pipe)) return first; // single element, no pipeline wrapper needed
     auto pipe = std::make_unique<Node>();
     pipe->kind = NodeKind::Pipeline;
     pipe->children.push_back(std::move(first));
     while (check(TokKind::Pipe)) {
         advance();
-        pipe->children.push_back(parseCommand());
+        pipe->children.push_back(parsePipelineElement());
     }
     return pipe;
 }
@@ -175,11 +191,19 @@ std::unique_ptr<Node> Parser::parseFunctionDef() {
 }
 
 std::unique_ptr<Node> Parser::parseStatement() {
-    if (check(TokKind::If)) return parseIf();
-    if (check(TokKind::While)) return parseWhile();
-    if (check(TokKind::For)) return parseFor();
-    if (check(TokKind::Case)) return parseCase();
+    // Leading `!` negates the statement's exit status (bash's pipeline `!`).
+    bool negate = false;
+    if (check(TokKind::Word) && peek().text == "!") { advance(); negate = true; }
+    auto applyNegate = [&](std::unique_ptr<Node> n) { if (negate) n->negate = !n->negate; return n; };
+
+    if (check(TokKind::If)) return applyNegate(parseIf());
+    if (check(TokKind::While)) return applyNegate(parseWhile());
+    if (check(TokKind::For)) return applyNegate(parseFor());
+    if (check(TokKind::Case)) return applyNegate(parseCase());
     if (check(TokKind::Function)) return parseFunctionDef();
+    // Note: a `( subshell )` is parsed as a pipeline element (see
+    // parsePipelineElement), so it flows through parsePipeline below and gets
+    // the same &/&&/||/; and negate handling as any other statement.
     // POSIX function definition: `name () { ... }` with NO `function` keyword.
     // Detected by lookahead for the `Word ( )` prefix at statement start --
     // without this, `name` parsed as a command and the following `(` `)` `{`
@@ -199,6 +223,7 @@ std::unique_ptr<Node> Parser::parseStatement() {
         return fn;
     }
     auto stmt = parsePipeline();
+    if (negate) stmt->negate = !stmt->negate;
     if (check(TokKind::Amp)) { advance(); stmt->background = true; }
     if (check(TokKind::And)) { advance(); stmt->joinOp = JoinOp::And; }
     else if (check(TokKind::Or)) { advance(); stmt->joinOp = JoinOp::Or; }

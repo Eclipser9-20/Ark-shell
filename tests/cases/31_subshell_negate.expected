@@ -1,0 +1,5 @@
+sub:inner
+main:outer
+2
+negation-works
+status=1
