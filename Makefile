@@ -29,8 +29,17 @@ clean:
 PREFIX ?= /usr/local
 install: $(BIN)
 	@mkdir -p $(PREFIX)/bin
-	@cp $(BIN) $(PREFIX)/bin/ark && chmod u+rwx,go+rx $(PREFIX)/bin/ark
-	@echo "installed ark -> $(PREFIX)/bin/ark"
+	@# Apple Silicon: overwriting a Mach-O IN PLACE (same inode) leaves the
+	@# kernel's cached code-signature (cdhash) stale for that path, and AMFI
+	@# SIGKILLs the new binary on launch -- which shows up as Ghostty's 39ms
+	@# "failed to launch the requested command". `rm` first so the copy lands
+	@# on a FRESH inode, then re-sign ad-hoc so the on-disk signature matches
+	@# the freshly-written bytes. (A plain in-place `cp` regressed this once.)
+	@rm -f $(PREFIX)/bin/ark
+	@cp $(BIN) $(PREFIX)/bin/ark
+	@chmod u+rwx,go+rx $(PREFIX)/bin/ark
+	@codesign --force --sign - $(PREFIX)/bin/ark 2>/dev/null || true
+	@echo "installed ark -> $(PREFIX)/bin/ark (signed)"
 
 test: $(BIN)
 	bash tests/run_tests.sh
