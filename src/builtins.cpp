@@ -49,11 +49,23 @@ const char* arkDefaultConfig() {
 # export ARK_BANNER_SUBTITLE="heaven"  # the tagline shown under the logo
 # export ARK_SPELLCHECK=0          # "did you mean X?" on an unknown command
 # export ARK_AUTOCORRECT=1         # auto-fix a typo'd command and run it (gti->git)
-# export ARK_BREW_SUGGEST=0        # "brew install X" for an uninstalled command
+# export ARK_BREW_SUGGEST=0        # disable brew's reverse lookup (rg->ripgrep)
 # export ARK_MANPAGE_COMPLETE=0    # Tab-complete flags from a command's man page
 # export ARK_PRIVATE=1             # start in private mode (nothing saved to history)
 # export ARK_CTRLC=append          # Ctrl-C shows ^C after the command (default: own line)
 # export ARK_FRESHLINE=0           # don't auto-add a newline when output lacks one
+
+# ─── COMMAND-NOT-FOUND: OFFER TO INSTALL IT ────────────────────────────────
+# When you run a command ark can't find (and it isn't a close typo of a real
+# one), ark offers to install it with your package manager — press y (no Enter)
+# and it runs the install, handing the terminal over so sudo/brew can prompt.
+#   unset  → autodetect: brew/port (macOS), apt/dnf/pacman/zypper/apk (Linux),
+#            winget/scoop (Windows). System managers get a `sudo` prefix.
+#   ""     → turn the whole feature off.
+#   path   → force a specific manager; syntax is inferred from its name.
+# export ARK_PACKAGE_MANAGER=""              # disable install prompts entirely
+# export ARK_PACKAGE_MANAGER=/opt/homebrew/bin/brew   # force a specific one
+# export ARK_PACKAGE_MANAGER=pacman          # or just a name found on $PATH
 
 # ─── COMPLETION: FIND ANYTHING, ANYWHERE ───────────────────────────────────
 # Tab accepts the ghost suggestion if one's showing, else completes the word.

@@ -2,6 +2,7 @@
 #include "builtins.h"
 #include "expand.h"
 #include "arkfeatures.h"
+#include "pkgmgr.h"
 #include "jobs.h"
 #include "lexer.h"
 #include "parser.h"
@@ -29,9 +30,12 @@ extern char** environ;
 // (spelling / brew-install suggestions); any OTHER failure -- a permission
 // problem, an exec-format error, a broken symlink target -- reports the REAL
 // reason (strerror) instead of the misleading "command not found". Spelling is
-// tried first; brew only when nothing close exists (so `gti` -> `git`, not
-// `brew install gti`). A suggestion identical to what was typed is never shown.
-static void reportCommandNotFound(const std::string& name, int err) {
+// tried first; the package-manager install offer only when nothing close
+// exists (so `gti` -> `git`, not "install gti"). A suggestion identical to what
+// was typed is never shown. `allowPrompt` is true only for a plain foreground
+// command -- a failed pipeline stage still gets a passive hint but never an
+// interactive [y/N] prompt (you don't stop a pipeline to answer a question).
+static void reportCommandNotFound(const std::string& name, int err, bool allowPrompt) {
     if (err != ENOENT) { // the file exists but couldn't be executed
         std::cerr << name << ": " << std::strerror(err) << "\n";
         return;
@@ -45,9 +49,7 @@ static void reportCommandNotFound(const std::string& name, int err) {
             return;
         }
     }
-    std::string formula = brewFormulaFor(name);
-    if (!formula.empty())
-        std::cerr << "ark: '" << name << "' isn't installed — get it with:  brew install " << formula << "\n";
+    offerInstall(name, allowPrompt); // "install with brew/apt/…? [y/N]" (or a passive hint)
 }
 
 // Autocorrect (ARK_AUTOCORRECT=1): if the command word is an unrunnable typo
@@ -277,7 +279,7 @@ static int runPipelineStage(Node* cmd, ShellState& state, int inFd, int outFd, p
     posix_spawn_file_actions_destroy(&actions);
     closeHeredocFds();
     if (rc != 0) {
-        reportCommandNotFound(argv[0], rc);
+        reportCommandNotFound(argv[0], rc, /*allowPrompt=*/false); // pipeline stage
         pidOut = -1;
         return 127;
     }
@@ -609,7 +611,7 @@ static int runCommand(Node* cmd, ShellState& state) {
     posix_spawn_file_actions_destroy(&actions);
     for (int fd : heredocFds) close(fd); // parent-side here-doc temp fds
     if (rc != 0) {
-        reportCommandNotFound(argv[0], rc);
+        reportCommandNotFound(argv[0], rc, /*allowPrompt=*/true); // plain foreground command
         return 127;
     }
 
