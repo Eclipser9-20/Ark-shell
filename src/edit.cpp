@@ -10,10 +10,19 @@
 #include <csignal>
 #include <cstring>
 #include <iostream>
+#include <sys/ioctl.h>
 #include <sys/select.h>
 #include <sys/time.h>
 #include <termios.h>
 #include <unistd.h>
+
+// Current terminal width in columns (fallback 80 if unknown). Read fresh each
+// redraw so a resize is handled without restarting the line.
+static int terminalCols() {
+    struct winsize ws;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0) return ws.ws_col;
+    return 80;
+}
 
 RawMode::RawMode() {
     tcgetattr(STDIN_FILENO, &orig);
@@ -202,24 +211,77 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
         return "";
     };
 
+    // Display width of a string: skip ANSI escape sequences (0 columns) and
+    // count UTF-8 code points (1 column each; wide CJK/emoji are an accepted
+    // approximation). Used to reason about line WRAPPING for the redraw.
+    auto dispWidth = [](const std::string& s) -> int {
+        int w = 0;
+        for (size_t i = 0; i < s.size();) {
+            if (s[i] == '\x1b') { // ESC [ ... <final @-~>  (or a short 2-byte escape)
+                i++;
+                if (i < s.size() && s[i] == '[') { i++; while (i < s.size() && !(s[i] >= '@' && s[i] <= '~')) i++; if (i < s.size()) i++; }
+                else if (i < s.size()) i++;
+                continue;
+            }
+            if (((unsigned char)s[i] & 0xC0) != 0x80) w++; // count non-continuation bytes
+            i++;
+        }
+        return w;
+    };
+    int plen = dispWidth(prompt);       // prompt is fixed for this readLine call
+    int lastRows = 1;                    // rows the previous refresh occupied (incl. ghost)
+    size_t lastPos = 0;                  // cursor byte-pos at the previous refresh
+
+    // Multi-line-aware refresh (linenoise-style). The old naive "\r\x1b[K" only
+    // cleared ONE row, so a line + ghost that WRAPPED past the terminal width
+    // smeared on every keystroke. Now we track how many rows the last render
+    // used and where the cursor was, clear exactly those rows, reprint, and
+    // reposition -- correct for arbitrarily long / wrapped input.
     auto redraw = [&]() {
-        const char* hl = getenv("ARK_SYNTAX_HIGHLIGHT"); // config toggle (default on)
+        int cols = terminalCols();
+        const char* hl = getenv("ARK_SYNTAX_HIGHLIGHT");
         bool highlight = !(hl && std::string(hl) == "0");
-        // Command validation (red unknown commands) is a separate toggle:
-        // ARK_VALIDATE=0 keeps highlighting but stops the red-on-typo pass.
         const char* vv = getenv("ARK_VALIDATE");
         bool validate = isValidCommand && !(vv && std::string(vv) == "0");
         std::string rendered = !highlight ? buf
                              : validate   ? highlightLineValidated(buf, isValidCommand)
                                           : highlightLine(buf);
-        std::cout << "\r\x1b[K" << prompt << rendered;
-        // Only offer a suggestion when the cursor is at the end of the line
-        // (fish behavior) -- otherwise ghost text mid-edit is confusing.
+        // Ghost only at end of line; capped so it can't push the line onto extra
+        // wrapped rows (a huge history match with trailing spaces used to balloon
+        // the redraw). It fills at most to the end of the current visual row.
         std::string sug = (cursor == buf.size()) ? currentSuggestion() : "";
-        if (!sug.empty()) std::cout << "\x1b[38;2;86;95;137m" << sug << "\x1b[0m"; // TokyoNight comment gray
-        size_t back = (buf.size() - cursor) + sug.size();
-        if (back > 0) std::cout << "\x1b[" << back << "D";
-        std::cout << std::flush;
+        int bw = dispWidth(buf);
+        if (!sug.empty()) {
+            int room = cols - ((plen + bw) % cols) - 1; // cols left on the cursor's row
+            if (room < 1) sug.clear();
+            else if ((int)sug.size() > room) sug = sug.substr(0, room);
+        }
+        int glen = dispWidth(sug);
+        int total = plen + bw + glen;                    // full display width incl ghost
+        int rows = cols > 0 ? (total + cols) / cols : 1; if (rows < 1) rows = 1;
+        int curCol = plen + dispWidth(buf.substr(0, cursor)); // cursor's display column (absolute)
+
+        std::string out;
+        // 1. Go to the last row of the OLD render, then clear each row upward.
+        int oldCursorRow = cols > 0 ? (plen + (int)lastPos) / cols + 1 : 1; // approx (byte≈col for ascii)
+        if (lastRows - oldCursorRow > 0) out += "\x1b[" + std::to_string(lastRows - oldCursorRow) + "B";
+        for (int j = 0; j < lastRows - 1; j++) out += "\r\x1b[K\x1b[1A";
+        out += "\r\x1b[K";
+        // 2. Reprint prompt + buffer + ghost.
+        out += prompt;
+        out += rendered;
+        if (!sug.empty()) out += std::string("\x1b[38;2;86;95;137m") + sug + "\x1b[0m";
+        // 3. Reposition the cursor (which is now at the end) back to its spot.
+        int endRow = cols > 0 ? total / cols : 0;
+        int curRow = cols > 0 ? curCol / cols : 0;
+        if (endRow - curRow > 0) out += "\x1b[" + std::to_string(endRow - curRow) + "A";
+        int col = cols > 0 ? curCol % cols : curCol;
+        out += "\r";
+        if (col > 0) out += "\x1b[" + std::to_string(col) + "C";
+
+        std::cout << out << std::flush;
+        lastRows = rows;
+        lastPos = cursor;
     };
 
     // Finalize the visible line before returning/cancelling: move the cursor
