@@ -590,7 +590,14 @@ static bool queryCursorPos(int& outRow, int& outCol) {
     fflush(stdout);
 
     std::string resp;
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+    // 40ms cap (was 200): a terminal answers DSR in well under 5ms, so a real
+    // response always arrives; but if the terminal is momentarily busy or the
+    // reply is lost, we wait 40ms not 200 -- this runs after EVERY command, so a
+    // 200ms stall there was a per-command "the shell feels slow." Overridable
+    // via ARK_DSR_MS for slow remotes.
+    long dsrMs = 40;
+    if (const char* m = getenv("ARK_DSR_MS")) { long v = atol(m); if (v > 0) dsrMs = v; }
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(dsrMs);
     for (;;) {
         auto remaining = deadline - std::chrono::steady_clock::now();
         if (remaining <= std::chrono::milliseconds(0)) return false;
@@ -721,26 +728,25 @@ void reassertChrome(const std::string& cwd, const std::string& gitBranch,
         // cursor, which is correct for ordinary commands; only verify and
         // correct if that turns out to be genuinely invalid (`clear`-family
         // commands home the cursor to (1,1) via their own \x1b[H).
+        // The one terminal round-trip in the per-command path. It only powers
+        // two corrections: (a) pulling the cursor off the pinned bottom bar
+        // (rare -- the row-1..N-1 scroll region already keeps normal output out
+        // of row N), and (b) the fresh-line when a command's output lacks a
+        // trailing newline. Both are skipped when ARK_FRESHLINE=0, which also
+        // skips the query entirely -- so a slow terminal can't make every
+        // command pay a DSR stall.
+        if (const char* f = getenv("ARK_FRESHLINE"); f && std::string(f) == "0") return;
         int rows, cols, row = -1, col = -1;
         bool got = getTerminalSize(rows, cols) && queryCursorPos(row, col);
         if (got && row >= rows) {
-            // Cursor ended up ON the pinned bottom bar -- pull it up one row so
-            // the next prompt isn't drawn over the stats. (Row 1 is fine now --
-            // it's normal scrollable content, not a pinned bar -- so `clear`
-            // homing to (1,1) no longer needs correcting.)
-            printf("\x1b[%d;1H", rows - 1);
+            printf("\x1b[%d;1H", rows - 1); // cursor on the bottom bar -> pull up one row
             fflush(stdout);
         } else if (got && col > 1) {
-            // Fresh-line (zsh PROMPT_SP behavior): the command's output did NOT
-            // end at column 1 -- either it lacked a trailing newline (echo -n)
-            // or a terminal-echoed "^C" left the cursor mid-line. Emit ONE
-            // newline so the next prompt starts clean instead of printing on
-            // top of that leftover text. When output DID end at column 1 we add
-            // nothing, so a normal command never gains a spurious blank line.
-            if (const char* f = getenv("ARK_FRESHLINE"); !(f && std::string(f) == "0")) {
-                printf("\r\n");
-                fflush(stdout);
-            }
+            // Command output didn't end at column 1 (echo -n, a ^C mid-line) ->
+            // one newline so the next prompt starts clean; nothing when it ended
+            // cleanly, so a normal command never gains a spurious blank line.
+            printf("\r\n");
+            fflush(stdout);
         }
     }
 }
