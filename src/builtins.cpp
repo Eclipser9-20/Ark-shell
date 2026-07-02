@@ -382,7 +382,8 @@ static int b_source(const std::vector<std::string>& argv, ShellState& state) {
 // creating files this session). Reports the entry count once it settles.
 static int b_ark_reindex(const std::vector<std::string>&, ShellState&) {
     rebuildFileIndex();
-    std::cout << "ark: reindexing filesystem in the background...\n";
+    rebuildCommandCache(); // pick up newly-installed commands in completion too
+    std::cout << "ark: reindexing filesystem + commands in the background...\n";
     return 0;
 }
 

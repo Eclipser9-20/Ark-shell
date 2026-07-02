@@ -182,7 +182,14 @@ const std::vector<std::string>& allCommandNames() {
                         while ((e = readdir(d)) != nullptr) {
                             std::string name = e->d_name;
                             if (name == "." || name == "..") continue;
-                            if (seen.insert(name).second) names.push_back(name);
+                            if (seen.count(name)) continue;
+                            // Must be actually RUNNABLE: access(X_OK) follows the
+                            // symlink and returns false for a dangling one -- so a
+                            // dead Homebrew symlink (fc-scan -> ../Cellar/gone) is
+                            // skipped instead of being suggested as a real command.
+                            if (access((dir + "/" + name).c_str(), X_OK) != 0) continue;
+                            seen.insert(name);
+                            names.push_back(name);
                         }
                         closedir(d);
                     }
@@ -208,9 +215,11 @@ bool commandExists(const std::string& name) {
 
 std::string suggestCommand(const std::string& typo) {
     if (typo.empty()) return "";
-    // Allowed edit distance scales with length: 1 for very short names, up to
-    // 3 for longer ones -- keeps "sl"->"ls" while avoiding absurd matches.
-    int budget = typo.size() <= 3 ? 1 : (typo.size() <= 6 ? 2 : 3);
+    // Allowed edit distance: 1 for very short names, 2 otherwise. Capped at 2 on
+    // purpose -- distance 3 lets nonsense through (arp-scan -> fc-scan share only
+    // the "-scan" tail), which reads as the shell inventing commands. Real typos
+    // are almost always 1-2 edits; sl->ls, gti->git, gerp->grep all stay.
+    int budget = typo.size() <= 3 ? 1 : 2;
     std::string best;
     int bestDist = budget + 1;
     for (const auto& name : allCommandNames()) {
