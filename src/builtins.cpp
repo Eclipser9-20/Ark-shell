@@ -1,4 +1,5 @@
 #include "builtins.h"
+#include "complete.h"
 #include "exec.h"
 #include "lexer.h"
 #include "parser.h"
@@ -39,9 +40,13 @@ const char* arkDefaultConfig() {
 # export ARK_AUTOCD=0              # type a directory name to cd into it
 # export ARK_NU_MODE=1             # nushell-style: `ls` shows a bordered table
 
-# ─── CROSS-DIRECTORY COMPLETION ────────────────────────────────────────────
-# Dirs searched for files/programs from ANYWHERE (Tab + ghost text). A program
-# in ~/bin then completes to its full path even when you're in ~/projects.
+# ─── COMPLETION: FIND ANYTHING, ANYWHERE ───────────────────────────────────
+# Tab accepts the ghost suggestion if one's showing, else completes the word.
+# A background index of your whole home tree (built at startup) lets Tab find
+# any file/program by name from anywhere. `ark-reindex` rebuilds it.
+# export ARK_INDEX=0                        # disable the filesystem index
+# export ARK_INDEX_ROOTS="$HOME:/opt"       # roots to index (default: $HOME)
+# Extra dirs whose entries complete by FULL PATH (lighter than the index):
 # export ARK_SEARCH_DIRS="$HOME/bin:$HOME/projects:$HOME/scripts"
 
 # ─── ALIASES ───────────────────────────────────────────────────────────────
@@ -346,6 +351,14 @@ static int b_source(const std::vector<std::string>& argv, ShellState& state) {
     }
 }
 
+// `ark-reindex`: rebuild the whole-filesystem completion index (e.g. after
+// creating files this session). Reports the entry count once it settles.
+static int b_ark_reindex(const std::vector<std::string>&, ShellState&) {
+    rebuildFileIndex();
+    std::cout << "ark: reindexing filesystem in the background...\n";
+    return 0;
+}
+
 static int b_ark_settings(const std::vector<std::string>&, ShellState&) {
     const char* home = getenv("HOME");
     std::string dir = std::string(home ? home : "") + "/.config/ark";
@@ -570,7 +583,7 @@ const std::unordered_map<std::string, BuiltinFn>& builtinRegistry() {
         {"jobs", b_jobs}, {"fg", b_fg}, {"bg", b_bg},
         {"alias", b_alias}, {"unalias", b_unalias},
         {"pushd", b_pushd}, {"popd", b_popd}, {"dirs", b_dirs},
-        {"ark-settings", b_ark_settings},
+        {"ark-settings", b_ark_settings}, {"ark-reindex", b_ark_reindex},
         {"source", b_source}, {".", b_source},
         {"return", b_return}, {"local", b_local},
         {"break", b_break}, {"continue", b_continue},

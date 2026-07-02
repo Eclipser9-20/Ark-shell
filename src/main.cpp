@@ -1,5 +1,6 @@
 #include "builtins.h"
 #include "chrome.h"
+#include "complete.h"
 #include "edit.h"
 #include "exec.h"
 #include "expand.h"
@@ -364,6 +365,11 @@ int main(int argc, char** argv) {
     // before the first prompt -- so its aliases/exports/functions are live for
     // the very first command typed.
     sourceConfig(histDir + "/ark.config", state, astRoots);
+
+    // Kick off the background filesystem index (after config, so the config's
+    // ARK_INDEX / ARK_INDEX_ROOTS are honored) unless disabled. It walks the
+    // tree on a worker thread so it never blocks the prompt.
+    if (!(getenv("ARK_INDEX") && std::string(getenv("ARK_INDEX")) == "0")) startFileIndex();
 
     std::string pending;
     bool continuing = false;

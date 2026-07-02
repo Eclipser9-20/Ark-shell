@@ -1,9 +1,13 @@
 #include "complete.h"
 #include "builtins.h"
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
+#include <cstring>
 #include <dirent.h>
+#include <mutex>
 #include <sys/stat.h>
+#include <thread>
 #include <unistd.h>
 #include <unordered_set>
 
@@ -116,6 +120,111 @@ std::vector<std::string> completeInSearchDirs(const std::string& prefix, bool ex
         pos = colon + 1;
     }
     return results;
+}
+
+// ── Background filesystem index ("knows EVERYTHING") ────────────────────────
+// A worker thread walks the configured roots (default $HOME) once at startup
+// and builds a flat list of every path, so completion can find a file or
+// program ANYWHERE by name -- not just in cwd / $PATH / ARK_SEARCH_DIRS. Big
+// junk trees are skipped so the index stays useful and the walk stays fast.
+namespace {
+std::mutex g_indexMu;
+std::vector<std::string> g_index;              // full paths, guarded by g_indexMu
+std::atomic<bool> g_indexReady{false};
+std::atomic<bool> g_indexStarted{false};
+
+bool skipIndexDir(const std::string& name) {
+    static const std::unordered_set<std::string> skip = {
+        ".git", "node_modules", ".Trash", ".cache", ".npm", ".cargo", ".rustup",
+        "DerivedData", "__pycache__", ".venv", "venv", ".tox", ".mypy_cache",
+        "Caches", "CachedData", ".gradle", ".m2", "Pods", "vendor", ".terraform",
+    };
+    return name[0] == '.' ? (name != "." && name != ".." && skip.count(name) > 0) : skip.count(name) > 0;
+}
+
+void walkIndex(const std::string& dir, std::vector<std::string>& out, size_t cap, int depth) {
+    if (out.size() >= cap || depth > 14) return;
+    DIR* d = opendir(dir.c_str());
+    if (!d) return;
+    struct dirent* e;
+    while ((e = readdir(d)) != nullptr && out.size() < cap) {
+        std::string name = e->d_name;
+        if (name == "." || name == "..") continue;
+        std::string full = dir + "/" + name;
+        out.push_back(full);
+        bool isDir = e->d_type == DT_DIR;
+        if (e->d_type == DT_UNKNOWN) { struct stat st; if (stat(full.c_str(), &st) == 0) isDir = S_ISDIR(st.st_mode); }
+        if (isDir && !skipIndexDir(name)) walkIndex(full, out, cap, depth + 1);
+    }
+    closedir(d);
+}
+
+std::vector<std::string> indexRoots() {
+    std::vector<std::string> roots;
+    const char* r = getenv("ARK_INDEX_ROOTS"); // colon-separated override
+    if (r && *r) {
+        std::string s = r; size_t pos = 0;
+        while (pos <= s.size()) {
+            size_t colon = s.find(':', pos);
+            std::string one = colon == std::string::npos ? s.substr(pos) : s.substr(pos, colon - pos);
+            if (!one.empty()) roots.push_back(expandHome(one));
+            if (colon == std::string::npos) break;
+            pos = colon + 1;
+        }
+    } else {
+        const char* h = getenv("HOME");
+        if (h) roots.push_back(h);
+    }
+    return roots;
+}
+} // namespace
+
+static void spawnIndexWorker() {
+    std::thread([]{
+        std::vector<std::string> idx;
+        const size_t cap = 400000; // hard ceiling so a giant tree can't run away
+        for (const auto& root : indexRoots()) walkIndex(root, idx, cap, 0);
+        {
+            std::lock_guard<std::mutex> lk(g_indexMu);
+            g_index = std::move(idx);
+        }
+        g_indexReady.store(true, std::memory_order_release);
+    }).detach();
+}
+
+void startFileIndex() {
+    if (g_indexStarted.exchange(true)) return; // once per process
+    spawnIndexWorker();
+}
+
+void rebuildFileIndex() {
+    // Force a fresh walk (e.g. after creating files this session). Safe to
+    // call while a query is in flight -- the worker swaps g_index under the
+    // mutex; readers just see the old contents until it's replaced.
+    g_indexReady.store(false, std::memory_order_release);
+    g_indexStarted.store(true, std::memory_order_release);
+    spawnIndexWorker();
+}
+
+bool fileIndexReady() { return g_indexReady.load(std::memory_order_acquire); }
+
+size_t fileIndexSize() { std::lock_guard<std::mutex> lk(g_indexMu); return g_index.size(); }
+
+std::vector<std::string> completeFromIndex(const std::string& prefix, bool execOnly) {
+    std::vector<std::string> out;
+    // Require 3+ chars (keeps per-keystroke cost and result count sane) and a
+    // built index. Matches by BASENAME prefix, returns home-abbreviated paths.
+    if (prefix.size() < 3 || !g_indexReady.load(std::memory_order_acquire)) return out;
+    std::lock_guard<std::mutex> lk(g_indexMu);
+    for (const auto& p : g_index) {
+        size_t slash = p.find_last_of('/');
+        const char* base = slash == std::string::npos ? p.c_str() : p.c_str() + slash + 1;
+        if (std::strncmp(base, prefix.c_str(), prefix.size()) != 0) continue;
+        if (execOnly && access(p.c_str(), X_OK) != 0) continue;
+        out.push_back(abbreviateHome(p));
+        if (out.size() >= 200) break; // cap
+    }
+    return out;
 }
 
 bool isDirectory(const std::string& path) {

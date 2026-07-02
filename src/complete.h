@@ -44,3 +44,14 @@ bool isDirectory(const std::string& path);
 // what lets a program in ~/bin complete from any working directory. Merged
 // into completeCommand()/completePath() results; also usable directly.
 std::vector<std::string> completeInSearchDirs(const std::string& prefix, bool execOnly);
+
+// Background filesystem index. startFileIndex() launches a one-time worker
+// thread that walks the index roots (default $HOME, or $ARK_INDEX_ROOTS)
+// building a flat path list. completeFromIndex() matches `prefix` against
+// every indexed BASENAME (once the index is ready; needs 3+ chars), returning
+// home-abbreviated full paths -- so Tab can find a file/program ANYWHERE.
+void startFileIndex();
+void rebuildFileIndex();   // force a fresh walk (ark-reindex)
+bool fileIndexReady();
+size_t fileIndexSize();
+std::vector<std::string> completeFromIndex(const std::string& prefix, bool execOnly);

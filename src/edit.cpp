@@ -322,9 +322,22 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
             return buf;
         }
         if (c == 9) { // Tab
+            // If a ghost autosuggestion is showing (cursor at end of line),
+            // Tab ACCEPTS it -- so you never need to reach for Right-arrow.
+            // Only when there's no suggestion does Tab fall through to normal
+            // completion of the word under the cursor.
+            if (cursor == buf.size()) {
+                std::string s = currentSuggestion();
+                if (!s.empty()) { buf += s; cursor = buf.size(); redraw(); continue; }
+            }
             auto [wordStart, word] = wordUnderCursor(buf, cursor);
             bool cmdPos = isCommandPosition(buf, wordStart);
             auto candidates = cmdPos ? completeCommand(word) : completePath(word);
+            // Also pull from the whole-filesystem index (if built) so Tab
+            // finds a file/program anywhere, not just cwd/$PATH. Deduped.
+            for (auto& hit : completeFromIndex(word, cmdPos)) candidates.push_back(hit);
+            std::sort(candidates.begin(), candidates.end());
+            candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
             if (candidates.empty()) { continue; }
 
             std::string prefix = longestCommonPrefix(candidates);
