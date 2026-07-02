@@ -28,8 +28,8 @@ clean:
 # Re-run after `make` to update the installed copy.
 PREFIX ?= /usr/local
 install: $(BIN)
-	install -d $(PREFIX)/bin
-	install -m 755 $(BIN) $(PREFIX)/bin/ark
+	@mkdir -p $(PREFIX)/bin
+	@cp $(BIN) $(PREFIX)/bin/ark && chmod u+rwx,go+rx $(PREFIX)/bin/ark
 	@echo "installed ark -> $(PREFIX)/bin/ark"
 
 test: $(BIN)

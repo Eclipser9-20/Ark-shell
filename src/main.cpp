@@ -319,18 +319,14 @@ int main(int argc, char** argv) {
                         CursorPolicy::VerifyAndCorrect);
     };
 
-    // The handler only flips an atomic flag -- printf/getHwStats/file I/O
-    // are not async-signal-safe, and calling them directly from a signal
-    // handler risks deadlock if SIGWINCH arrives mid-printf elsewhere (same
-    // class of bug as the SIGCHLD handler earlier this session). The main
-    // loop polls the flag once per iteration and does the real repaint.
-    static std::atomic<bool> g_resized{false};
-    struct sigaction winch;
-    std::memset(&winch, 0, sizeof(winch));
-    winch.sa_handler = [](int) { g_resized.store(true, std::memory_order_relaxed); };
-    sigemptyset(&winch.sa_mask);
-    winch.sa_flags = SA_RESTART;
-    sigaction(SIGWINCH, &winch, nullptr);
+    // SIGWINCH (terminal resize) is handled inside installIdleTicker() now --
+    // it sets the same flag readLine()'s idle tick uses and is installed
+    // WITHOUT SA_RESTART, so a resize interrupts the blocking read() and gets
+    // repainted on the very next loop iteration (no 1s lag). reassertChrome()
+    // itself detects the geometry change and does the full-clear repaint, so
+    // no separate resize flag is needed at this level; a resize that lands
+    // mid-command is picked up by doReassertChromeAfterCommand() at the next
+    // command boundary.
 
     // installIdleTicker() arms a 1-second repeating SIGALRM so the pinned
     // bar keeps ticking live even during a fast typing burst or a terminal
@@ -366,6 +362,12 @@ int main(int argc, char** argv) {
     // the very first command typed.
     sourceConfig(histDir + "/ark.config", state, astRoots);
 
+    // Neofetch-style startup panel (⚡ + system info), printed once after the
+    // config is loaded (so ARK_BANNER=0 can suppress it) and before the first
+    // prompt. The startup chrome paint already left the cursor at row 2, so
+    // this fills downward from just under the top bar.
+    printStartupBanner();
+
     // Kick off the background filesystem index (after config, so the config's
     // ARK_INDEX / ARK_INDEX_ROOTS are honored) unless disabled. It walks the
     // tree on a worker thread so it never blocks the prompt.
@@ -376,7 +378,6 @@ int main(int argc, char** argv) {
 
     for (;;) {
         jobTable.drainSignalQueue();
-        if (g_resized.exchange(false, std::memory_order_relaxed)) doReassertChrome();
         std::string prompt = continuing ? continuationPrompt() : buildPrompt(state, home);
         auto got = readLine(prompt, history, doReassertChrome);
         if (!got) break; // Ctrl-D / EOF

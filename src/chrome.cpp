@@ -2,6 +2,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <fstream>
 #include <mach/host_info.h>
 #include <mach/mach.h>
@@ -256,6 +257,123 @@ void paintChrome(const std::string& cwd, const std::string& gitBranch,
     fflush(stdout);
 }
 
+// ── Startup banner ("the zsh thing" + the ⚡ logo) ───────────────────────────
+// A one-shot neofetch-style system panel printed once, right before the first
+// prompt: an ASCII lightning bolt on the left (ark's mark) and everything we
+// can cheaply learn about the machine on the right. All facts come from
+// sysctl (no subprocess -- same latency discipline as getHwStats), so it adds
+// no fork cost to startup. ARK_BANNER=0 turns it off from the config.
+namespace {
+std::string sysctlStr(const char* name) {
+    size_t len = 0;
+    if (sysctlbyname(name, nullptr, &len, nullptr, 0) != 0 || len == 0) return "";
+    std::string buf(len, '\0');
+    if (sysctlbyname(name, buf.data(), &len, nullptr, 0) != 0) return "";
+    while (!buf.empty() && buf.back() == '\0') buf.pop_back();
+    return buf;
+}
+long sysctlInt(const char* name) {
+    int64_t v = 0;
+    size_t len = sizeof(v);
+    if (sysctlbyname(name, &v, &len, nullptr, 0) != 0) return -1;
+    return (long)v;
+}
+std::string formatUptime() {
+    struct timeval bt {};
+    size_t len = sizeof(bt);
+    if (sysctlbyname("kern.boottime", &bt, &len, nullptr, 0) != 0 || bt.tv_sec == 0) return "";
+    long up = (long)(time(nullptr) - bt.tv_sec);
+    if (up < 0) up = 0;
+    int d = up / 86400, h = (up % 86400) / 3600, m = (up % 3600) / 60;
+    char buf[48];
+    if (d > 0) snprintf(buf, sizeof(buf), "%dd %dh %dm", d, h, m);
+    else if (h > 0) snprintf(buf, sizeof(buf), "%dh %dm", h, m);
+    else snprintf(buf, sizeof(buf), "%dm", m);
+    return buf;
+}
+} // namespace
+
+void printStartupBanner() {
+    if (const char* b = getenv("ARK_BANNER"); b && std::string(b) == "0") return;
+
+    char host[256] = {0};
+    gethostname(host, sizeof(host) - 1);
+    const char* user = getenv("USER");
+    std::string userHost = std::string(user ? user : "user") + "@" + host;
+
+    std::string osVer = sysctlStr("kern.osproductversion"); // e.g. "26.3.1"
+    std::string kernel = sysctlStr("kern.osrelease");        // Darwin, e.g. "27.0.0"
+    std::string model = sysctlStr("hw.model");               // e.g. "Mac16,10"
+    std::string cpu = sysctlStr("machdep.cpu.brand_string"); // "Apple M5" (may be empty on some ARM)
+    if (cpu.empty()) cpu = sysctlStr("hw.targettype");        // fallback identifier
+    long cores = sysctlInt("hw.logicalcpu");
+
+    HwStats hw = getHwStats();
+    std::string up = formatUptime();
+
+    char cpuLine[128];
+    if (cores > 0) snprintf(cpuLine, sizeof(cpuLine), "%s (%ld)", cpu.c_str(), cores);
+    else snprintf(cpuLine, sizeof(cpuLine), "%s", cpu.c_str());
+    char memLine[96];
+    snprintf(memLine, sizeof(memLine), "%.1f / %.1f GiB", hw.memUsedGB, hw.memTotalGB);
+
+    // Left column: an 8-line ASCII lightning bolt. Right column: the info.
+    // The bolt glows blue (ark's established accent, same hue as the chrome
+    // bolt icon); the middle "jog" line is brightened so the zig-zag reads.
+    const char* B = FG_BLUE;
+    const char* G = FG_GREEN;
+    const char* I = FG_INFO;
+    const char* D = "\x1b[38;2;86;95;137m"; // TokyoNight comment gray (labels/rules)
+    const char* R = RESET;
+
+    std::string info[] = {
+        userHost,
+        "",
+        "OS      macOS " + osVer,
+        "Kernel  Darwin " + kernel,
+        "Shell   ark 1.0.0",
+        "Host    " + model,
+        "CPU     " + std::string(cpuLine),
+        "Mem     " + std::string(memLine) + (up.empty() ? "" : "   up " + up),
+    };
+    const char* bolt[8] = {
+        "     ",
+        "    ▟█▛ ",
+        "   ▟█▛  ",
+        "  ▟███▙ ",
+        "  ▀▜██▛ ",
+        "    ▟█▛ ",
+        "   ▟█▛  ",
+        "  ▟▛    ",
+    };
+
+    printf("\r\n");
+    for (int i = 0; i < 8; i++) {
+        // Bolt segment (blue; row 3, the jog, gets the plain bolt too).
+        printf("%s%s%s ", B, bolt[i], R);
+        if (i == 0) {
+            // Title row: user@host in green, then a small "⚡ ark" tag.
+            printf("%s%s%s  %s%s ark — heaven%s", G, info[i].c_str(), R, B, ICON_CPU, R);
+        } else if (info[i].empty()) {
+            printf("%s─────────────────────────%s", D, R);
+        } else {
+            // Split "LABEL   value": label chunk (first 8 cols) dim, value normal.
+            std::string s = info[i];
+            size_t sp = s.find("  ");
+            if (sp != std::string::npos) {
+                std::string lbl = s.substr(0, sp);
+                std::string val = s.substr(s.find_first_not_of(' ', sp));
+                printf("%s%-7s%s %s%s%s", D, lbl.c_str(), R, I, val.c_str(), R);
+            } else {
+                printf("%s%s%s", I, s.c_str(), R);
+            }
+        }
+        printf("\r\n");
+    }
+    printf("\r\n");
+    fflush(stdout);
+}
+
 // Queries the terminal's actual cursor row via DSR (\x1b[6n), reading the
 // \x1b[<row>;<col>R response synchronously from stdin (only safe to call
 // while stdin is already in raw mode -- see CursorPolicy::VerifyAndCorrect's
@@ -312,6 +430,15 @@ static int queryCursorRow() {
     return std::atoi(rowStr.c_str());
 }
 
+// Set once by reassertChrome() when it does a resize-driven full repaint;
+// consumed (and cleared) by chromeConsumeResizeRepaint(). See the header.
+static bool g_didResizeRepaint = false;
+bool chromeConsumeResizeRepaint() {
+    bool v = g_didResizeRepaint;
+    g_didResizeRepaint = false;
+    return v;
+}
+
 void reassertChrome(const std::string& cwd, const std::string& gitBranch,
                      double sessionSeconds, const HwStats& hw, CursorPolicy policy) {
     // Config toggle: ARK_CHROME=0 disables the pinned top/bottom bars. When
@@ -322,6 +449,42 @@ void reassertChrome(const std::string& cwd, const std::string& gitBranch,
         fflush(stdout);
         return;
     }
+
+    // Resize handling. A terminal resize REFLOWS the screen -- the terminal
+    // moves the previously-visible content (including our pinned top/bottom
+    // bars) to new rows, and WHERE they land depends on scrollback state we
+    // can't observe: grow-with-scrollback shifts everything down and reveals
+    // history at the top (stranding an old bar mid-screen), grow-without
+    // pins content to the top and adds blank rows at the bottom (stranding a
+    // DIFFERENT row). No fixed-row erase can chase a ghost the terminal
+    // itself relocated -- which is exactly why the earlier single-row cleanup
+    // fixed one resize direction but not the other. So on ANY geometry change
+    // we do the standard SIGWINCH discipline every full-screen TUI uses:
+    // clear the visible screen and repaint from scratch. \x1b[2J erases only
+    // the display, never the scrollback, so scroll-up history is preserved;
+    // the caller (readLine, via chromeConsumeResizeRepaint()) reprints its
+    // prompt line afterward since the clear wiped it.
+    int rows, cols;
+    bool haveSize = getTerminalSize(rows, cols) && rows > 2;
+    static int lastRows = 0, lastCols = 0;
+    bool resized = haveSize && lastRows != 0 && (rows != lastRows || cols != lastCols);
+    if (haveSize) { lastRows = rows; lastCols = cols; }
+
+    if (resized) {
+        printf("\x1b[?2026h"); // begin synchronized update (no flicker)
+        printf("\x1b[r");      // drop the scroll region so 2J clears everything
+        printf("\x1b[2J");     // erase the whole visible screen -- ghosts and all
+        setScrollRegion();     // re-establish the top/bottom margins
+        paintChrome(cwd, gitBranch, sessionSeconds, hw);
+        printf("\x1b[2;1H");   // fresh cursor home inside the scroll region
+        printf("\x1b[?2026l"); // end synchronized update
+        fflush(stdout);
+        g_didResizeRepaint = true;
+        return;                // skip DECSC/DECRC and VerifyAndCorrect -- there is
+                               // no meaningful prior cursor position to restore
+                               // after a full clear
+    }
+
     // Real bug found live: DECSTBM (sent by setScrollRegion()) has a
     // documented side effect -- it moves the cursor to absolute row 1, col 1
     // (since origin mode/DECOM is off by default). paintChrome() used to

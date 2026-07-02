@@ -81,3 +81,17 @@ enum class CursorPolicy {
 void reassertChrome(const std::string& cwd, const std::string& gitBranch,
                      double sessionSeconds, const HwStats& hw,
                      CursorPolicy policy = CursorPolicy::Preserve);
+
+// One-shot neofetch-style startup panel: an ASCII ⚡ bolt (ark's mark) beside
+// system facts gathered purely from sysctl (OS/kernel/host/CPU/mem/uptime) --
+// no subprocess. Printed once, just before the first prompt. ARK_BANNER=0
+// (from ark.config) suppresses it.
+void printStartupBanner();
+
+// True (once) if the most recent reassertChrome() detected a terminal resize
+// and did a full screen-clear repaint -- which wipes the visible screen,
+// including whatever prompt/line the caller had drawn. readLine() polls this
+// right after its idle tick and reprints its prompt+buffer when it fires, so
+// a resize mid-typing doesn't leave the input line blank until the next
+// keystroke. Reading it clears it (consume-once).
+bool chromeConsumeResizeRepaint();

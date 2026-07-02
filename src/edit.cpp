@@ -1,4 +1,5 @@
 #include "edit.h"
+#include "chrome.h"
 #include "complete.h"
 #include "highlight.h"
 #include <atomic>
@@ -43,6 +44,20 @@ void installIdleTicker() {
     // waiting for the next keystroke.
     sa.sa_flags = 0;
     sigaction(SIGALRM, &sa, nullptr);
+
+    // Route SIGWINCH (terminal resize) through the SAME flag as the tick, and
+    // WITHOUT SA_RESTART, so a resize interrupts readLine()'s blocking read()
+    // immediately -- the loop then calls onIdleTick() -> reassertChrome(),
+    // which detects the geometry change and does its full-clear repaint on the
+    // very next iteration instead of waiting up to a full second for the 1Hz
+    // ticker to come around. That 1s lag was the "takes a second before it
+    // refreshes into the clean version" artifact.
+    struct sigaction sw;
+    std::memset(&sw, 0, sizeof(sw));
+    sw.sa_handler = [](int) { g_tick.store(true, std::memory_order_relaxed); };
+    sigemptyset(&sw.sa_mask);
+    sw.sa_flags = 0;
+    sigaction(SIGWINCH, &sw, nullptr);
 
     struct itimerval timer;
     timer.it_value.tv_sec = 1;
@@ -189,6 +204,11 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
         // keystroke of the SIGALRM that set it.
         if (onIdleTick && g_tick.exchange(false, std::memory_order_relaxed)) {
             onIdleTick();
+            // If that tick's chrome repaint was a resize-driven full screen
+            // clear, our prompt+buffer got wiped along with everything else --
+            // reprint it (chrome left the cursor at row 2, col 1, ready for it)
+            // so the input line doesn't vanish until the next keystroke.
+            if (chromeConsumeResizeRepaint()) redraw();
         }
 
         char c;
