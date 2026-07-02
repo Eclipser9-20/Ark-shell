@@ -2,34 +2,51 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <fstream>
+#include <sstream>
 #include <vector>
+#include <sys/ioctl.h>
+#include <sys/select.h>
+#include <sys/stat.h>
+#include <sys/utsname.h> // uname() -- POSIX, used by the banner on every platform
+#include <unistd.h>
+
+// Platform layer: everything else in this file is POSIX, but hardware-stats
+// and system-info gathering are inherently OS-specific. macOS uses Mach +
+// sysctl; Linux reads /proc + sysinfo. Both compile from this one file.
+#if defined(__APPLE__)
 #include <mach/host_info.h>
 #include <mach/mach.h>
 #include <mach/mach_host.h>
 #include <mach/vm_statistics.h>
-#include <sys/ioctl.h>
-#include <sys/select.h>
-#include <sys/stat.h>
 #include <sys/sysctl.h>
-#include <unistd.h>
+#elif defined(__linux__)
+#include <sys/sysinfo.h>
+#endif
 
-// Host-wide CPU utilization since the last call, from the delta between two
-// host_statistics(HOST_CPU_LOAD_INFO) samples. Ticks are cumulative counters
-// since boot, not an instantaneous rate, so this needs two points in time --
-// hence the function-static previous sample. No prior sample yet (first call
-// in the process) reports 0 rather than a bogus/huge percentage.
+// Read a whole (small, /proc-style) file into a string. "" on failure.
+[[maybe_unused]] static std::string readWholeFile(const char* path) {
+    std::ifstream in(path);
+    if (!in) return "";
+    std::stringstream ss;
+    ss << in.rdbuf();
+    return ss.str();
+}
+
+// Host-wide CPU utilization since the last call, as a delta between two
+// cumulative-since-boot samples (so it needs two points in time -- hence the
+// function-static previous sample; the first call reports 0). macOS reads Mach
+// tick counters; Linux reads /proc/stat's aggregate "cpu" line.
 static double sampleCpuPercent() {
+#if defined(__APPLE__)
     static host_cpu_load_info_data_t prev{};
     static bool havePrev = false;
-
     host_cpu_load_info_data_t cur;
     mach_msg_type_number_t count = HOST_CPU_LOAD_INFO_COUNT;
-    kern_return_t kr = host_statistics(mach_host_self(), HOST_CPU_LOAD_INFO,
-                                        (host_info_t)&cur, &count);
-    if (kr != KERN_SUCCESS) return 0.0;
-
+    if (host_statistics(mach_host_self(), HOST_CPU_LOAD_INFO, (host_info_t)&cur, &count) != KERN_SUCCESS)
+        return 0.0;
     double pct = 0.0;
     if (havePrev) {
         uint64_t userD = cur.cpu_ticks[CPU_STATE_USER] - prev.cpu_ticks[CPU_STATE_USER];
@@ -42,33 +59,65 @@ static double sampleCpuPercent() {
     prev = cur;
     havePrev = true;
     return pct;
+#elif defined(__linux__)
+    // /proc/stat: "cpu  user nice system idle iowait irq softirq steal ...".
+    static uint64_t prevIdle = 0, prevTotal = 0;
+    static bool havePrev = false;
+    std::string stat = readWholeFile("/proc/stat");
+    if (stat.compare(0, 4, "cpu ") != 0 && stat.compare(0, 3, "cpu") != 0) return 0.0;
+    std::istringstream is(stat.substr(0, stat.find('\n')));
+    std::string label; is >> label;
+    uint64_t v[8] = {0}, total = 0;
+    int nread = 0;
+    for (int i = 0; i < 8 && (is >> v[i]); i++) nread = i + 1;
+    for (int i = 0; i < nread; i++) total += v[i];
+    uint64_t idle = (nread > 3) ? v[3] + (nread > 4 ? v[4] : 0) : 0; // idle + iowait
+    double pct = 0.0;
+    if (havePrev && total > prevTotal) {
+        uint64_t dTotal = total - prevTotal, dIdle = idle - prevIdle;
+        pct = 100.0 * (double)(dTotal - dIdle) / (double)dTotal;
+    }
+    prevIdle = idle; prevTotal = total; havePrev = true;
+    return pct;
+#else
+    return 0.0;
+#endif
 }
 
 HwStats getHwStats() {
     HwStats hw;
 
     double loadavg[3] = {0.0, 0.0, 0.0};
-    if (getloadavg(loadavg, 3) != -1) {
-        hw.load1 = loadavg[0];
-    }
+    if (getloadavg(loadavg, 3) != -1) hw.load1 = loadavg[0]; // POSIX on both
 
     hw.cpuPercent = sampleCpuPercent();
 
+#if defined(__APPLE__)
     uint64_t memsize = 0;
     size_t len = sizeof(memsize);
-    if (sysctlbyname("hw.memsize", &memsize, &len, nullptr, 0) == 0) {
+    if (sysctlbyname("hw.memsize", &memsize, &len, nullptr, 0) == 0)
         hw.memTotalGB = (double)memsize / (1024.0 * 1024.0 * 1024.0);
-    }
 
     vm_statistics64_data_t vmstat;
     mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
-    kern_return_t kr = host_statistics64(mach_host_self(), HOST_VM_INFO64,
-                                          (host_info64_t)&vmstat, &count);
-    if (kr == KERN_SUCCESS) {
+    if (host_statistics64(mach_host_self(), HOST_VM_INFO64, (host_info64_t)&vmstat, &count) == KERN_SUCCESS) {
         uint64_t usedPages = vmstat.active_count + vmstat.wire_count + vmstat.compressor_page_count;
         double pageSize = (double)getpagesize();
         hw.memUsedGB = (usedPages * pageSize) / (1024.0 * 1024.0 * 1024.0);
     }
+#elif defined(__linux__)
+    // /proc/meminfo gives MemTotal + MemAvailable (kB); used = total - avail,
+    // which matches what `free -h` reports as "used+buffers/cache pressure".
+    std::string mi = readWholeFile("/proc/meminfo");
+    auto kb = [&](const char* key) -> double {
+        size_t p = mi.find(key);
+        if (p == std::string::npos) return 0;
+        return strtod(mi.c_str() + p + strlen(key), nullptr); // value is in kB
+    };
+    double totalKb = kb("MemTotal:"), availKb = kb("MemAvailable:");
+    hw.memTotalGB = totalKb / (1024.0 * 1024.0);
+    hw.memUsedGB = (totalKb - availKb) / (1024.0 * 1024.0);
+#endif
 
     return hw;
 }
@@ -265,6 +314,7 @@ void paintChrome(const std::string& cwd, const std::string& gitBranch,
 // sysctl (no subprocess -- same latency discipline as getHwStats), so it adds
 // no fork cost to startup. ARK_BANNER=0 turns it off from the config.
 namespace {
+#if defined(__APPLE__)
 std::string sysctlStr(const char* name) {
     size_t len = 0;
     if (sysctlbyname(name, nullptr, &len, nullptr, 0) != 0 || len == 0) return "";
@@ -273,18 +323,86 @@ std::string sysctlStr(const char* name) {
     while (!buf.empty() && buf.back() == '\0') buf.pop_back();
     return buf;
 }
-long sysctlInt(const char* name) {
-    int64_t v = 0;
-    size_t len = sizeof(v);
-    if (sysctlbyname(name, &v, &len, nullptr, 0) != 0) return -1;
-    return (long)v;
+#endif
+
+// Trim trailing whitespace/newlines (for /sys and /proc one-liners).
+[[maybe_unused]] std::string rtrim(std::string s) {
+    while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' ' || s.back() == '\t'))
+        s.pop_back();
+    return s;
 }
+#if defined(__linux__)
+// Pull a value out of an /etc/os-release style KEY="value" / KEY=value line.
+std::string osReleaseField(const std::string& text, const char* key) {
+    size_t p = text.find(key);
+    if (p == std::string::npos) return "";
+    p += strlen(key);
+    std::string v;
+    for (; p < text.size() && text[p] != '\n'; p++) { if (text[p] == '"') continue; v += text[p]; }
+    return v;
+}
+#endif
+
+// ── Banner system-info (per-platform; each returns display text, "" unknown) ─
+std::string biOsName() {           // "macOS 26.3.1" / "Ubuntu 22.04.3 LTS"
+#if defined(__APPLE__)
+    return "macOS " + sysctlStr("kern.osproductversion");
+#elif defined(__linux__)
+    std::string os = readWholeFile("/etc/os-release");
+    std::string pretty = osReleaseField(os, "PRETTY_NAME=");
+    if (!pretty.empty()) return pretty;
+    std::string n = osReleaseField(os, "NAME="), v = osReleaseField(os, "VERSION_ID=");
+    return n.empty() ? "Linux" : n + (v.empty() ? "" : " " + v);
+#else
+    return "";
+#endif
+}
+std::string biKernel() {           // "Darwin 27.0.0" / "Linux 6.5.0" (uname is POSIX)
+    struct utsname u;
+    if (uname(&u) == 0) return std::string(u.sysname) + " " + u.release;
+    return "";
+}
+std::string biModel() {
+#if defined(__APPLE__)
+    return sysctlStr("hw.model");
+#elif defined(__linux__)
+    std::string m = rtrim(readWholeFile("/sys/devices/virtual/dmi/id/product_name"));
+    if (!m.empty()) return m;
+    struct utsname u; return uname(&u) == 0 ? u.machine : "";
+#else
+    return "";
+#endif
+}
+std::string biCpu() {
+#if defined(__APPLE__)
+    std::string c = sysctlStr("machdep.cpu.brand_string");
+    return c.empty() ? sysctlStr("hw.targettype") : c;
+#elif defined(__linux__)
+    std::string ci = readWholeFile("/proc/cpuinfo");
+    size_t p = ci.find("model name");
+    if (p == std::string::npos) p = ci.find("Model");           // ARM boards
+    if (p == std::string::npos) return "";
+    size_t colon = ci.find(':', p), nl = ci.find('\n', p);
+    if (colon == std::string::npos || nl == std::string::npos || colon > nl) return "";
+    return rtrim(ci.substr(colon + 1, nl - colon - 1)).erase(0, ci[colon + 1] == ' ' ? 1 : 0);
+#else
+    return "";
+#endif
+}
+long biCores() { return sysconf(_SC_NPROCESSORS_ONLN); } // POSIX on both
+
 std::string formatUptime() {
+    long up = -1;
+#if defined(__APPLE__)
     struct timeval bt {};
     size_t len = sizeof(bt);
-    if (sysctlbyname("kern.boottime", &bt, &len, nullptr, 0) != 0 || bt.tv_sec == 0) return "";
-    long up = (long)(time(nullptr) - bt.tv_sec);
-    if (up < 0) up = 0;
+    if (sysctlbyname("kern.boottime", &bt, &len, nullptr, 0) == 0 && bt.tv_sec != 0)
+        up = (long)(time(nullptr) - bt.tv_sec);
+#elif defined(__linux__)
+    std::string u = readWholeFile("/proc/uptime");     // "<seconds>.<frac> <idle>"
+    if (!u.empty()) up = (long)strtod(u.c_str(), nullptr);
+#endif
+    if (up < 0) return "";
     int d = up / 86400, h = (up % 86400) / 3600, m = (up % 3600) / 60;
     char buf[48];
     if (d > 0) snprintf(buf, sizeof(buf), "%dd %dh %dm", d, h, m);
@@ -327,12 +445,11 @@ void printStartupBanner() {
     const char* user = getenv("USER");
     std::string userHost = std::string(user ? user : "user") + "@" + host;
 
-    std::string osVer = sysctlStr("kern.osproductversion");
-    std::string kernel = sysctlStr("kern.osrelease");
-    std::string model = sysctlStr("hw.model");
-    std::string cpu = sysctlStr("machdep.cpu.brand_string");
-    if (cpu.empty()) cpu = sysctlStr("hw.targettype");
-    long cores = sysctlInt("hw.logicalcpu");
+    std::string osName = biOsName();   // full "macOS 26.3.1" / "Ubuntu 22.04"
+    std::string kernel = biKernel();    // "Darwin 27.0.0" / "Linux 6.5.0"
+    std::string model = biModel();
+    std::string cpu = biCpu();
+    long cores = biCores();
     HwStats hw = getHwStats();
     std::string up = formatUptime();
 
@@ -387,8 +504,8 @@ void printStartupBanner() {
     struct Field { const char* key; std::string label; std::string value; };
     std::vector<Field> all = {
         {"user",   "",       userHost},
-        {"os",     "OS",     "macOS " + osVer},
-        {"kernel", "Kernel", "Darwin " + kernel},
+        {"os",     "OS",     osName},
+        {"kernel", "Kernel", kernel},
         {"shell",  "Shell",  "ark 1.0.0"},
         {"host",   "Host",   model},
         {"cpu",    "CPU",    cpuLine},
