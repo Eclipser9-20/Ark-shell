@@ -47,8 +47,17 @@ fi
 # Run it, then ALWAYS remove it. The cleanup is a trap on EXIT + the hang-up /
 # interrupt / terminate signals, so the shipped binary is deleted even if the
 # connection drops or the session is killed -- not just on a clean `exit`.
-# ARK_REMOTE marks an auto-shipped session (ark can skip writing config there).
+# ARK_REMOTE marks an auto-shipped session: ark honors it by staying fully
+# ephemeral -- it writes NO config and NO history on the remote, so once the
+# binary below is removed the host is exactly as it was before you connected.
 # -tt FORCES a pty even if assh's own stdin isn't a terminal, so ark always runs
 # interactively on the remote. \$HOME / \$r are escaped so they evaluate on the
 # REMOTE; $remote (the filename) is filled in locally.
 ssh -tt "$host" "r=\"\$HOME/$remote\"; trap 'rm -f \"\$r\"' EXIT HUP INT TERM; chmod +x \"\$r\"; ARK_REMOTE=1 \"\$r\""
+status=$?
+
+# The remote trap already removed the shipped binary; this local line just
+# confirms it (and a belt-and-suspenders remote rm in case the trap was skipped).
+ssh "$host" "rm -f \"\$HOME/$remote\"" 2>/dev/null
+echo "assh: session ended — ark removed from $host" >&2
+exit $status
