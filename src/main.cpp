@@ -99,7 +99,7 @@ static void sourceConfig(const std::string& path, ShellState& state,
     }
 }
 
-// Real bug found live ("I think we got a memory leak"): the interactive
+// Real bug found in testing (an unbounded-growth memory leak): the interactive
 // loop's astRoots vector kept EVERY executed top-level statement's AST
 // alive for the entire session -- needed for FunctionDef nodes, since
 // `state.functions[name]` stores a raw `Node*` into the body that must stay
@@ -165,8 +165,8 @@ static int execSource(const std::string& source, ShellState& state) {
 // Guarantee the standard command directories are on $PATH. A login shell can
 // be handed a bare/minimal PATH (or none), which makes Homebrew and other
 // /usr/local/bin tools "disappear". Prepend the usual dirs that aren't already
-// present, in order, so `brew`-installed and hand-installed commands (ark,
-// pistin, pullio, timeout...) always resolve -- without duplicating entries a
+// present, in order, so `brew`-installed and hand-installed commands always
+// resolve -- without duplicating entries a
 // richer inherited PATH already has. Runs for every mode (interactive, login,
 // -c, script), before any command executes; the user's config can still add more.
 static void ensureStandardPath() {

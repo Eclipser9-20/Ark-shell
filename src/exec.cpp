@@ -587,8 +587,8 @@ static int runCommand(Node* cmd, ShellState& state) {
     // for multi-stage pipelines, but this path (a single plain command) never
     // had it. Without this, standard job control (Ctrl-Z/SIGTSTP suspend,
     // signals reaching the right process group) simply doesn't work for a
-    // bare foreground command like `./pistin` -- real bug found live
-    // ("I can't exit pistin... give ark everything bash has"). posix_spawn's
+    // bare foreground command like `./someprog` -- a bug found in testing.
+    // posix_spawn's
     // attr-based POSIX_SPAWN_SETPGROUP sets the child's pgid atomically as
     // part of the spawn itself (pgroup=0 means "use the child's own pid"),
     // so there's no fork+exec-style race window to close here.
