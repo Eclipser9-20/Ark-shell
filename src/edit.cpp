@@ -221,6 +221,17 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
         std::cout << std::flush;
     };
 
+    // Finalize the visible line before returning/cancelling: move the cursor
+    // past the real input and erase to end-of-line, so any dim ghost-text
+    // suggestion sitting to the right of the cursor is wiped instead of being
+    // left frozen on the submitted line (real bug: the ghost stayed on screen
+    // after Enter). Then emit the newline.
+    auto endLine = [&]() {
+        if (cursor < buf.size()) std::cout << "\x1b[" << (buf.size() - cursor) << "C";
+        std::cout << "\x1b[K\n" << std::flush;
+        cursor = buf.size();
+    };
+
     for (;;) {
         // Checked once per full keystroke/action (not just on a select()
         // timeout) so a continuous typing burst or a terminal paste -- where
@@ -250,9 +261,9 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
         if (n < 0 && errno == EINTR) continue;
         if (n <= 0) return std::nullopt; // EOF/error
 
-        if (c == '\r' || c == '\n') { std::cout << "\n"; return buf; }
-        if (c == 3) { std::cout << "\n"; return std::string(); } // Ctrl-C: cancel line
-        if (c == 4 && buf.empty()) { std::cout << "\n"; return std::nullopt; } // Ctrl-D on empty line: EOF
+        if (c == '\r' || c == '\n') { endLine(); return buf; }
+        if (c == 3) { endLine(); return std::string(); } // Ctrl-C: cancel line
+        if (c == 4 && buf.empty()) { endLine(); return std::nullopt; } // Ctrl-D on empty line: EOF
         if (c == 127 || c == 8) { // Backspace
             if (cursor > 0) { buf.erase(cursor - 1, 1); cursor--; redraw(); }
             continue;
@@ -363,7 +374,7 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
             // A real Enter-accept executes immediately, matching bash's
             // reverse-i-search -- Enter doesn't just populate the prompt,
             // it runs the matched command right away.
-            std::cout << "\n";
+            endLine();
             return buf;
         }
         if (c == 9) { // Tab
