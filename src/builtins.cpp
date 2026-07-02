@@ -46,6 +46,9 @@ const char* arkDefaultConfig() {
 # export ARK_CHROME_TOP=inline     # top bar: pinned (default; fixed top-left, NO
 #                                  #   scrollback) | inline (scrolls with output,
 #                                  #   keeps scrollback) | off (hide the top bar)
+# export ARK_DEFAULT_TERMINAL=1    # "look like plain bash": strip all chrome, the
+#                                  #   banner, ghost text + highlighting; classic
+#                                  #   user@host:cwd$ prompt. (master off-switch)
 # export ARK_AUTOCD=0              # type a directory name to cd into it
 # export ARK_SPELLCHECK=0          # "did you mean X?" on an unknown command
 # export ARK_BREW_SUGGEST=0        # brew reverse lookup for installs (rg->ripgrep)
