@@ -78,10 +78,14 @@ static void sourceConfig(const std::string& path, ShellState& state,
                           std::vector<std::unique_ptr<Node>>& astRoots) {
     std::ifstream f(path);
     if (!f.is_open()) {
-        // First run: drop the commented "everything ark can do" template so
-        // there's a config to discover and edit (matching ark-settings).
-        std::ofstream out(path);
-        if (out.is_open()) out << arkDefaultConfig();
+        // In an auto-shipped assh session (ARK_REMOTE set) leave NO trace on the
+        // remote: don't create the config file at all. Otherwise, first run:
+        // drop the commented "everything ark can do" template so there's a
+        // config to discover and edit (matching ark-settings).
+        if (!getenv("ARK_REMOTE")) {
+            std::ofstream out(path);
+            if (out.is_open()) out << arkDefaultConfig();
+        }
         return; // nothing active in the fresh template -- skip sourcing
     }
     std::string source((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
@@ -408,8 +412,12 @@ int main(int argc, char** argv) {
                                 // line editor doesn't understand \x1b[200~/
                                 // \x1b[201~ markers, and a parent shell may
                                 // have left the terminal mode enabled
-        mkdirRecursive(histDir);
-        history.load(histPath);
+        // An assh session (ARK_REMOTE) stays fully ephemeral: don't create
+        // ~/.config/ark or read/write a history file on the remote host.
+        if (!getenv("ARK_REMOTE")) {
+            mkdirRecursive(histDir);
+            history.load(histPath);
+        }
         doReassertChromeStartup(); // initial paint before the REPL loop starts
     }
 
@@ -428,8 +436,11 @@ int main(int argc, char** argv) {
     // re-synced at each prompt below so another window's `uvar` shows up live.
     uvar::loadInto(state.vars);
     // Private mode can be primed from the environment/config (ARK_PRIVATE=1).
+    // An assh session (ARK_REMOTE) is always private -- nothing the guest types
+    // on the remote should be written to disk there.
     if (const char* p = getenv("ARK_PRIVATE"); p && std::string(p) == "1")
         arkSetPrivateMode(true);
+    if (getenv("ARK_REMOTE")) arkSetPrivateMode(true);
 
     // Neofetch-style startup panel (⚡ + system info), printed once after the
     // config is loaded (so ARK_BANNER=0 can suppress it) and before the first
