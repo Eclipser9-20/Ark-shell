@@ -487,7 +487,8 @@ static int runCommand(Node* cmd, ShellState& state) {
     // args is still a command. Requires the word to look path-like (contain
     // '/', or be '.'/'..') OR be an existing directory entry, so a stray typo
     // that happens to match a dir name in $PATH-ish spots isn't surprising.
-    if (it == reg.end() && argv.size() == 1 && cmd->redirects.empty()) {
+    bool autoCdOff = getenv("ARK_AUTOCD") && std::string(getenv("ARK_AUTOCD")) == "0"; // config toggle
+    if (!autoCdOff && it == reg.end() && argv.size() == 1 && cmd->redirects.empty()) {
         struct stat st;
         if (stat(argv[0].c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
             return reg.at("cd")({"cd", argv[0]}, state);

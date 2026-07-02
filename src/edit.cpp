@@ -143,6 +143,7 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
     // buffer is empty or nothing in history extends it.
     auto currentSuggestion = [&]() -> std::string {
         if (buf.empty()) return "";
+        if (const char* g = getenv("ARK_GHOST_TEXT"); g && std::string(g) == "0") return ""; // config toggle
         const auto& lines = history.lines();
         for (int i = (int)lines.size() - 1; i >= 0; i--) {
             if (lines[i].size() > buf.size() && lines[i].compare(0, buf.size(), buf) == 0)
@@ -168,7 +169,9 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
     };
 
     auto redraw = [&]() {
-        std::cout << "\r\x1b[K" << prompt << highlightLine(buf);
+        const char* hl = getenv("ARK_SYNTAX_HIGHLIGHT"); // config toggle (default on)
+        bool highlight = !(hl && std::string(hl) == "0");
+        std::cout << "\r\x1b[K" << prompt << (highlight ? highlightLine(buf) : buf);
         // Only offer a suggestion when the cursor is at the end of the line
         // (fish behavior) -- otherwise ghost text mid-edit is confusing.
         std::string sug = (cursor == buf.size()) ? currentSuggestion() : "";

@@ -314,6 +314,14 @@ static int queryCursorRow() {
 
 void reassertChrome(const std::string& cwd, const std::string& gitBranch,
                      double sessionSeconds, const HwStats& hw, CursorPolicy policy) {
+    // Config toggle: ARK_CHROME=0 disables the pinned top/bottom bars. When
+    // off, reset the scroll region to the full screen (\x1b[r) so the whole
+    // terminal scrolls normally, and paint nothing. Cheap to check each call.
+    if (const char* c = getenv("ARK_CHROME"); c && std::string(c) == "0") {
+        printf("\x1b[r");
+        fflush(stdout);
+        return;
+    }
     // Real bug found live: DECSTBM (sent by setScrollRegion()) has a
     // documented side effect -- it moves the cursor to absolute row 1, col 1
     // (since origin mode/DECOM is off by default). paintChrome() used to

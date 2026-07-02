@@ -15,6 +15,57 @@
 #include <termios.h>
 #include <unistd.h>
 
+const char* arkDefaultConfig() {
+    return R"CFG(# ark.config -- sourced at startup (interactive sessions).
+# Aliases, exports, and functions here persist across sessions.
+# Edit any time with `ark-settings`.
+
+# ─── YOUR SETTINGS ─────────────────────────────────────────────────────────
+# alias ll='ls -la'
+# export EDITOR=pistin
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  EVERYTHING ARK CAN DO  —  uncomment / edit to taste
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ─── TOGGLES (all default ON; set to 0 to disable) ─────────────────────────
+# export ARK_GHOST_TEXT=0          # fish-style autosuggestions (dim ghost text)
+# export ARK_SYNTAX_HIGHLIGHT=0    # colored command line as you type
+# export ARK_CHROME=0              # pinned top/bottom status bars
+# export ARK_AUTOCD=0              # type a directory name to cd into it
+
+# ─── CROSS-DIRECTORY COMPLETION ────────────────────────────────────────────
+# Dirs searched for files/programs from ANYWHERE (Tab + ghost text). A program
+# in ~/bin then completes to its full path even when you're in ~/projects.
+# export ARK_SEARCH_DIRS="$HOME/bin:$HOME/projects:$HOME/scripts"
+
+# ─── ALIASES ───────────────────────────────────────────────────────────────
+# alias la='ls -A'
+# alias gs='git status'
+# alias ..='cd ..'
+# alias ...='cd ../..'
+
+# ─── FUNCTIONS ─────────────────────────────────────────────────────────────
+# mkcd() { mkdir -p "$1" && cd "$1"; }
+# greet() { echo "hi, ${1:-world}"; }
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  REFERENCE  —  the ark language (always-on; a cheat sheet, nothing to enable)
+# ═══════════════════════════════════════════════════════════════════════════
+#  EXPANSION  $VAR ${VAR:-def} ${VAR:+alt} ${#VAR} ${VAR#pfx} ${VAR%sfx}
+#             ${VAR/a/b} ${VAR//a/b} ${VAR:off:len}  $(cmd) `cmd`
+#             $(( 2+3*4 ))  {a,b,c} {1..9}  * ? [abc] **/  ~  $? $$ $# $@ $0
+#  CONTROL    if/elif/else/fi  for..do..done  while..do..done  case..esac
+#             break continue return  cmd && cmd || cmd ; cmd  ! cmd  ( subshell )
+#  FUNCTIONS  name() { .. }   function name { .. }   local VAR=val
+#  REDIRECT   > >> < 2>  | (pipe)  & (background)  << EOF  <<'EOF'  <<- EOF
+#  BUILTINS   cd(cd -/auto_cd) pwd echo(-n -e) export unset type read
+#             alias unalias pushd popd dirs source(.) return local break continue
+#             jobs fg bg exit ark-settings
+#  EDITING    Ctrl-A/E Ctrl-K/U Ctrl-W Ctrl-Y  Alt-←/→  Ctrl-R  Tab  →/Ctrl-F  ↑/↓
+)CFG";
+}
+
 static int b_cd(const std::vector<std::string>& argv, ShellState& state) {
     std::string target = argv.size() > 1 ? argv[1] : (getenv("HOME") ? getenv("HOME") : "/");
     // `cd -` returns to the previous directory (OLDPWD) and echoes it, like
@@ -192,15 +243,7 @@ static int b_ark_settings(const std::vector<std::string>&, ShellState&) {
     struct stat st;
     if (stat(cfg.c_str(), &st) != 0) {
         std::ofstream f(cfg);
-        f << "# ark.config -- sourced at startup (interactive sessions).\n"
-             "# Aliases, exports, and functions here persist across sessions.\n"
-             "#\n"
-             "# Cross-directory completion: list dirs to search from anywhere\n"
-             "# (a program in ~/bin then completes even from ~/projects):\n"
-             "# export ARK_SEARCH_DIRS=\"$HOME/bin:$HOME/projects\"\n"
-             "#\n"
-             "# alias ll='ls -la'\n"
-             "# export EDITOR=pistin\n";
+        f << arkDefaultConfig();
     }
 
     std::string editor;

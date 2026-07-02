@@ -1,3 +1,4 @@
+#include "builtins.h"
 #include "chrome.h"
 #include "edit.h"
 #include "exec.h"
@@ -74,7 +75,13 @@ static void mkdirRecursive(const std::string& path) {
 static void sourceConfig(const std::string& path, ShellState& state,
                           std::vector<std::unique_ptr<Node>>& astRoots) {
     std::ifstream f(path);
-    if (!f.is_open()) return;
+    if (!f.is_open()) {
+        // First run: drop the commented "everything ark can do" template so
+        // there's a config to discover and edit (matching ark-settings).
+        std::ofstream out(path);
+        if (out.is_open()) out << arkDefaultConfig();
+        return; // nothing active in the fresh template -- skip sourcing
+    }
     std::string source((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     if (source.empty()) return;
     try {
