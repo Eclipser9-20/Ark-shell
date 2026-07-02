@@ -1,5 +1,6 @@
 #include "chrome.h"
 #include "input.h"
+#include "version.h"
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -153,15 +154,18 @@ static bool getTerminalSize(int& rows, int& cols) {
     return true;
 }
 
-// Top-bar mode (ARK_CHROME_TOP): "pinned" fixes the cwd+branch bar at row 1
-// (top-left, always visible) at the cost of native scrollback -- a scroll
-// region that doesn't start at row 1 can't feed the terminal's scrollback
-// buffer. "off" hides the top bar entirely. Anything else (the default) is
-// "inline": the bar is printed as a per-prompt header that scrolls with output,
-// so scrollback keeps working (main.cpp prints it; see topBar()).
+// Top-bar mode (ARK_CHROME_TOP):
+//   "pinned" (DEFAULT) fixes the cwd+branch bar at row 1 (top-left, always
+//     visible). Trades away native scrollback -- a scroll region that doesn't
+//     start at row 1 can't feed the terminal's scrollback buffer.
+//   "inline" prints the bar as a per-prompt header that scrolls with output, so
+//     scrollback keeps working (main.cpp prints it; see topBar()).
+//   "off" hides the top bar entirely (scrollback works; bottom bar only).
 static bool chromeTopPinned() {
     const char* t = getenv("ARK_CHROME_TOP");
-    return t && std::string(t) == "pinned";
+    if (!t) return true;                              // default: pinned
+    std::string s = t;
+    return s != "inline" && s != "off";              // anything unrecognized -> pinned
 }
 // The first scrollable row = the top margin of the scroll region. It's row 2
 // only when a pinned top bar occupies row 1; otherwise row 1 is normal content.
@@ -516,10 +520,10 @@ void printStartupBanner() {
     const char* D = "\x1b[38;2;86;95;137m";       // comment gray (labels / subtitle)
     const char* R = RESET;
 
-    // ── Logo (ARK_BANNER_LOGO = ark | bolt | none, default "ark") ────────────
-    // "ark" is a smooth rounded wordmark drawn with quadrant blocks (the same
-    // family the pinned-bar pills use), giving the soft LazyVim-dashboard feel.
-    std::string logo = getenv("ARK_BANNER_LOGO") ? getenv("ARK_BANNER_LOGO") : "ark";
+    // ── Logo (ARK_BANNER_LOGO = bolt | ark | none, default "bolt") ───────────
+    // The default is a clean lightning bolt (ark's mark). "ark" is the block
+    // wordmark (kept as an option), "none" shows no art.
+    std::string logo = getenv("ARK_BANNER_LOGO") ? getenv("ARK_BANNER_LOGO") : "bolt";
     std::vector<std::string> art;
     if (logo == "ark") {
         // Block letters with ROUNDED corners (╭╮╰╯) -- legible and soft, the
@@ -559,14 +563,16 @@ void printStartupBanner() {
         {"ssh",    "SSH",    inSshSession() ? "remote session from " + sshClientIp() : ""},
         {"os",     "OS",     osName},
         {"kernel", "Kernel", kernel},
-        {"shell",  "Shell",  "ark 1.0.0"},
+        {"shell",  "Shell",  "ark " ARK_VERSION},
         {"host",   "Host",   model},
         {"cpu",    "CPU",    cpuLine},
         {"mem",    "Mem",    memLine},
         {"uptime", "Uptime", up},
     };
+    // Default omits "user" -- the bottom bar already shows user@host, so it'd be
+    // redundant here. (ARK_BANNER_INFO can still ask for it explicitly.)
     std::string want = getenv("ARK_BANNER_INFO") ? getenv("ARK_BANNER_INFO")
-                                                 : "user,ssh,os,kernel,shell,host,cpu,mem,uptime";
+                                                 : "ssh,os,kernel,shell,host,cpu,mem,uptime";
     auto wants = [&](const char* key) {
         if (want == "all") return true;
         std::string k = key;
