@@ -41,6 +41,24 @@ static void reportCommandNotFound(const std::string& name) {
         std::cerr << "ark: '" << name << "' isn't installed — get it with:  brew install " << formula << "\n";
 }
 
+// Autocorrect (ARK_AUTOCORRECT=1): if the command word is an unrunnable typo
+// with a HIGH-confidence fix (edit distance 1), silently rewrite it to the
+// correction and run THAT -- `gti status` becomes `git status`. Default off:
+// running a different command than typed must be near-certain, so this is a
+// deliberate opt-in beyond the always-on "did you mean?" suggestion. Only the
+// command (argv[0]) is corrected, never arguments; slash-paths are left alone.
+static void maybeAutocorrect(std::vector<std::string>& argv) {
+    const char* on = getenv("ARK_AUTOCORRECT");
+    if (!on || std::string(on) != "1" || argv.empty()) return;
+    const std::string cmd = argv[0];
+    if (cmd.empty() || cmd.find('/') != std::string::npos) return; // explicit path: leave it
+    if (commandExists(cmd)) return;                                // already runnable
+    std::string guess = suggestCommand(cmd);
+    if (guess.empty() || levenshtein(cmd, guess) > 1) return;      // not confident enough
+    std::cerr << "ark: correcting '" << cmd << "' → '" << guess << "'\n";
+    argv[0] = guess;
+}
+
 // Real bug found live: neither Ctrl-C nor Ctrl-Z worked on ANY foreground
 // child (a plain external command, a shell script). Root cause: ark ignores
 // SIGINT/SIGTSTP/SIGTTIN/SIGTTOU for ITSELF (see main.cpp) so it can't be
@@ -541,6 +559,8 @@ static int runCommand(Node* cmd, ShellState& state) {
         waitpidRetry(pid, &status, 0);
         return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
     }
+
+    maybeAutocorrect(argv); // ARK_AUTOCORRECT=1: fix a typo'd command before spawning
 
     std::vector<char*> cargv;
     for (auto& a : argv) cargv.push_back(const_cast<char*>(a.c_str()));
