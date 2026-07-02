@@ -36,7 +36,21 @@ constexpr const char* RED = "\x1b[38;2;247;118;142m";
 constexpr const char* COMMENT = "\x1b[38;2;86;95;137m";
 } // namespace tn
 
-static std::string buildPrompt(const ShellState& state, const std::string&) {
+static std::string buildPrompt(const ShellState& state, const std::string& home) {
+    // Default-terminal mode (ARK_DEFAULT_TERMINAL=1): a plain, classic bash-style
+    // prompt -- user@host:cwd$ -- with $HOME shown as ~ and no color. Paired with
+    // the chrome/banner/visual toggles forced off in main(), ark looks like a
+    // stock shell.
+    if (const char* v = getenv("ARK_DEFAULT_TERMINAL"); v && std::string(v) == "1") {
+        const char* user = getenv("USER");
+        char host[256] = {0};
+        gethostname(host, sizeof(host) - 1);
+        std::string cwd = state.cwd;
+        if (!home.empty() && cwd.compare(0, home.size(), home) == 0)
+            cwd = "~" + cwd.substr(home.size());
+        return std::string(user ? user : "user") + "@" + host + ":" + cwd +
+               (geteuid() == 0 ? "# " : "$ ");
+    }
     // cwd now lives in the pinned top bar (chrome.h's paintChrome), so the
     // per-command prompt simplifies to just the time and the status arrow.
     time_t now = time(nullptr);
@@ -260,6 +274,19 @@ int main(int argc, char** argv) {
     state.jobs = &jobTable;
     ensureStandardPath();      // brew / /usr/local/bin tools resolve even under a bare login PATH
     importEnvironment(state);  // $PATH/$HOME/$USER/... visible to ark's own expansion
+
+    // Default-terminal mode: make ark look like a stock bash shell -- strip the
+    // pinned bars, the startup banner, and the fish-style visual extras, leaving
+    // just a plain user@host:cwd$ prompt (see buildPrompt). Off by default; a
+    // master switch that forces the relevant toggles off (individual ARK_* vars
+    // can still be re-enabled after it in ark.config if you want a hybrid).
+    if (const char* v = getenv("ARK_DEFAULT_TERMINAL"); v && std::string(v) == "1") {
+        setenv("ARK_CHROME", "0", 1);
+        setenv("ARK_BANNER", "0", 1);
+        setenv("ARK_GHOST_TEXT", "0", 1);
+        setenv("ARK_SYNTAX_HIGHLIGHT", "0", 1);
+        setenv("ARK_VALIDATE", "0", 1);
+    }
 
     // $(...) runs through ark's OWN lexer/parser/exec (captureCommandOutput
     // forks and recurses, never shelling out to /bin/sh) -- ark is meant to
