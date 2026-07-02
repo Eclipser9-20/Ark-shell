@@ -1,0 +1,5 @@
+export N=three
+while /bin/test "$N" = three ; do
+  echo tick
+  export N=done
+done

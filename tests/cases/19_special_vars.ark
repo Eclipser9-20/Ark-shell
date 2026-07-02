@@ -1,0 +1,8 @@
+false
+echo $?
+true
+echo $?
+greet() {
+  echo "count=$# first=$1 all=$@"
+}
+greet a b c

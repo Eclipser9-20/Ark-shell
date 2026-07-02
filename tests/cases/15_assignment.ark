@@ -1,0 +1,12 @@
+x=hello
+echo $x
+y="two words"
+echo $y
+z=$x-$y
+echo $z
+w=$(echo subst)
+echo $w
+count=0
+count=1
+echo $count
+echo done=here

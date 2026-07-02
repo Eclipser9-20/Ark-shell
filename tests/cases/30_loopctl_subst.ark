@@ -1,0 +1,9 @@
+for i in 1 2 3 4 5; do
+  if [ $i = 4 ]; then break; fi
+  if [ $i = 2 ]; then continue; fi
+  echo "i=$i"
+done
+echo count=`echo one two three | wc -w | tr -d ' '`
+echo nested=$(( $((3+2)) * 10 ))
+break
+echo survived-stray-break

@@ -1,0 +1,6 @@
+alias greet='echo hello'
+greet
+greet there
+alias greet='echo hi'
+greet
+unalias greet

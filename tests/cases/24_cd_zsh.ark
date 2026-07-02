@@ -1,0 +1,10 @@
+rm -rf /tmp/ark_cd
+mkdir -p /tmp/ark_cd/sub
+cd /tmp/ark_cd
+sub
+pwd
+cd /tmp/ark_cd
+cd sub
+cd -
+pwd
+rm -rf /tmp/ark_cd

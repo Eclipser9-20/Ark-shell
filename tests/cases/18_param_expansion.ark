@@ -1,0 +1,13 @@
+f=archive.tar.gz
+echo ${f%.gz}
+echo ${f%%.*}
+p=/usr/local/bin
+echo ${p##*/}
+echo ${p%/*}
+s=a-b-c
+echo ${s/-/_}
+echo ${s//-/_}
+echo ${s:2:3}
+echo ${#s}
+echo ${missing:-default}
+echo ${p:+SET}

@@ -1,0 +1,7 @@
+build/
+ark
+.DS_Store
+*.swp
+backups/
+docs/superpowers/
+.config/

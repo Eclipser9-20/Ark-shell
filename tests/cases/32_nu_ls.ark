@@ -1,0 +1,5 @@
+export ARK_NU_MODE=1
+mkdir -p /tmp/ark_nu
+echo hi > /tmp/ark_nu/f.txt
+ls /tmp/ark_nu
+rm -rf /tmp/ark_nu

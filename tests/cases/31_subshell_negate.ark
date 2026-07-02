@@ -1,0 +1,6 @@
+x=outer
+(x=inner; echo "sub:$x")
+echo "main:$x"
+(echo a; echo b) | wc -l | tr -d ' '
+! false && echo negation-works
+! true; echo "status=$?"

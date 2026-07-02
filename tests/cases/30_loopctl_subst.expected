@@ -1,0 +1,6 @@
+i=1
+i=3
+count=3
+nested=50
+break: only meaningful in a `for' or `while' loop
+survived-stray-break
