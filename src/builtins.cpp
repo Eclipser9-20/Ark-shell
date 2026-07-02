@@ -44,6 +44,7 @@ const char* arkDefaultConfig() {
 # export ARK_NU_MODE=1             # nushell-style: `ls` shows a bordered table
 # export ARK_BANNER=0              # neofetch-style ⚡ startup panel
 # export ARK_SPELLCHECK=0          # "did you mean X?" on an unknown command
+# export ARK_BREW_SUGGEST=0        # "brew install X" for an uninstalled command
 # export ARK_MANPAGE_COMPLETE=0    # Tab-complete flags from a command's man page
 # export ARK_PRIVATE=1             # start in private mode (nothing saved to history)
 

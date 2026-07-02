@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <dirent.h>
 #include <fstream>
 #include <mutex>
@@ -225,6 +226,96 @@ std::vector<std::string> parseManFlags(const std::string& cmd) {
     return flags;
 }
 } // namespace
+
+// ── Homebrew command-not-found ──────────────────────────────────────────────
+namespace {
+std::string brewPath() {
+    // The two canonical brew locations (Apple Silicon, then Intel/manual).
+    for (const char* p : {"/opt/homebrew/bin/brew", "/usr/local/bin/brew"})
+        if (access(p, X_OK) == 0) return p;
+    return "";
+}
+std::string runCapture(const std::string& shellCmd) {
+    FILE* p = popen(shellCmd.c_str(), "r");
+    if (!p) return "";
+    std::string out;
+    std::array<char, 4096> buf{};
+    size_t n;
+    while ((n = fread(buf.data(), 1, buf.size(), p)) > 0) out.append(buf.data(), n);
+    pclose(p);
+    return out;
+}
+std::string firstToken(const std::string& s) {
+    size_t a = s.find_first_not_of(" \t\r\n");
+    if (a == std::string::npos) return "";
+    size_t b = s.find_first_of(" \t\r\n", a);
+    return s.substr(a, b == std::string::npos ? std::string::npos : b - a);
+}
+// The full set of Homebrew formula names. `brew formulae` takes several SECONDS
+// (Ruby startup + listing), so the result is cached to disk
+// (~/.config/ark/brew_formulae.cache) and reused across sessions -- only the
+// very first unknown-command lookup on a machine (or after the 7-day refresh
+// window) pays the cost; everything after is an instant file read.
+const std::unordered_set<std::string>& brewFormulaeSet(const std::string& brew) {
+    static std::unordered_set<std::string> set;
+    static bool loaded = false;
+    if (loaded) return set;
+    loaded = true;
+
+    std::string cachePath = configDir() + "/brew_formulae.cache";
+    struct stat st;
+    bool fresh = stat(cachePath.c_str(), &st) == 0 &&
+                 (long long)(time(nullptr) - st.st_mtime) < 7 * 86400 && st.st_size > 0;
+    std::string out;
+    if (fresh) {
+        std::ifstream in(cachePath);
+        out.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    } else {
+        out = runCapture("'" + brew + "' formulae 2>/dev/null");
+        if (!out.empty()) { // atomic write so a concurrent reader never sees a half file
+            std::string tmp = cachePath + ".tmp";
+            { std::ofstream o(tmp); o << out; }
+            rename(tmp.c_str(), cachePath.c_str());
+        }
+    }
+    std::string line;
+    for (char c : out) {
+        if (c == '\n') { if (!line.empty()) set.insert(line); line.clear(); }
+        else line += c;
+    }
+    if (!line.empty()) set.insert(line);
+    return set;
+}
+std::mutex g_brewMu;
+std::unordered_map<std::string, std::string> g_brewCache;
+} // namespace
+
+std::string brewFormulaFor(const std::string& cmd) {
+    if (cmd.empty()) return "";
+    if (const char* off = getenv("ARK_BREW_SUGGEST"); off && std::string(off) == "0") return "";
+    // Only safe command-name characters ever reach the shell below.
+    for (char c : cmd)
+        if (!(std::isalnum((unsigned char)c) || c == '-' || c == '_' || c == '.' || c == '+'))
+            return "";
+    {
+        std::lock_guard<std::mutex> lk(g_brewMu);
+        auto it = g_brewCache.find(cmd);
+        if (it != g_brewCache.end()) return it->second;
+    }
+    std::string brew = brewPath();
+    std::string result;
+    if (!brew.empty()) {
+        // 1) Authoritative reverse lookup (handles cmd != formula) when the
+        //    homebrew/command-not-found tap is installed.
+        std::string wf = firstToken(runCapture("'" + brew + "' which-formula " + cmd + " 2>/dev/null"));
+        if (!wf.empty()) result = wf;
+        // 2) Fallback: a formula literally named `cmd`.
+        else if (brewFormulaeSet(brew).count(cmd)) result = cmd;
+    }
+    std::lock_guard<std::mutex> lk(g_brewMu);
+    g_brewCache[cmd] = result;
+    return result;
+}
 
 std::vector<std::string> manPageFlags(const std::string& cmd, const std::string& prefix) {
     std::vector<std::string> all;

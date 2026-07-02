@@ -24,14 +24,21 @@
 
 extern char** environ;
 
-// "command not found" plus a spelling suggestion (Intelligent Spelling
-// Correction). Suppressed by ARK_SPELLCHECK=0.
+// "command not found", then EITHER a spelling suggestion (it's a typo of a
+// command you HAVE) or a Homebrew install suggestion (it's a real tool you
+// DON'T have) -- the apt-get command-not-found experience, brew edition.
+// Spelling is tried first; brew is only consulted when nothing close exists,
+// so a typo like `gti` suggests `git` rather than `brew install gti`.
 static void reportCommandNotFound(const std::string& name) {
     std::cerr << name << ": command not found\n";
-    const char* off = getenv("ARK_SPELLCHECK");
-    if (off && std::string(off) == "0") return;
-    std::string guess = suggestCommand(name);
-    if (!guess.empty()) std::cerr << "ark: did you mean '" << guess << "'?\n";
+    const char* spellOff = getenv("ARK_SPELLCHECK");
+    if (!(spellOff && std::string(spellOff) == "0")) {
+        std::string guess = suggestCommand(name);
+        if (!guess.empty()) { std::cerr << "ark: did you mean '" << guess << "'?\n"; return; }
+    }
+    std::string formula = brewFormulaFor(name);
+    if (!formula.empty())
+        std::cerr << "ark: '" << name << "' isn't installed — get it with:  brew install " << formula << "\n";
 }
 
 // Real bug found live: neither Ctrl-C nor Ctrl-Z worked on ANY foreground

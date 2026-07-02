@@ -46,6 +46,15 @@ std::string suggestCommand(const std::string& typo);
 // functions (the caller layers those in) or slash-paths (caller uses access()).
 bool commandExists(const std::string& name);
 
+// ── Homebrew "command-not-found" (the apt-get suggestion, for brew) ─────────
+// The Homebrew formula that PROVIDES command `cmd`, so an unknown command can
+// suggest `brew install <formula>` (Ubuntu's command-not-found, brew edition).
+// Uses `brew which-formula` when the homebrew/command-not-found tap is present
+// (handles cmd != formula, e.g. rg -> ripgrep), else falls back to matching
+// `cmd` against the full formula-name list. Returns "" if brew is absent or
+// nothing provides it. Cached per command. ARK_BREW_SUGGEST=0 short-circuits it.
+std::string brewFormulaFor(const std::string& cmd);
+
 // ── Dynamic Man-Page Completions ────────────────────────────────────────────
 // Option flags (-x / --long) parsed out of `man <cmd>`, cached per command so
 // the subprocess runs at most once per command per session. `prefix` filters
