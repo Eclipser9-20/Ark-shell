@@ -122,6 +122,11 @@ static bool containsFunctionDef(Node* node) {
     return containsFunctionDef(node->funcBody.get());
 }
 
+// Lexes, parses, and executes a whole source string (a `-c` command, a script
+// file, or piped stdin) in `state`. Returns the exit status; a syntax error is
+// a clean nonzero exit (no continuation prompt outside interactive mode).
+static int execSource(const std::string& source, ShellState& state);
+
 static void printParseError(const std::string& source, const ParseError& e) {
     // gcc/`bash -n`-style diagnostic: message + offending source line + a
     // caret pointing at the column. `source` may be a whole multi-line
@@ -140,7 +145,22 @@ static void printParseError(const std::string& source, const ParseError& e) {
     std::cerr << std::string(e.col > 0 ? e.col - 1 : 0, ' ') << "^\n";
 }
 
-int main() {
+static int execSource(const std::string& source, ShellState& state) {
+    try {
+        Lexer lex(source);
+        Parser parser(lex.tokenize());
+        auto ast = parser.parse();
+        return execNode(ast.get(), state);
+    } catch (const ParseError& e) {
+        printParseError(source, e);
+        return 1;
+    } catch (const std::exception& e) {
+        std::cerr << "ark: internal error: " << e.what() << "\n";
+        return 1;
+    }
+}
+
+int main(int argc, char** argv) {
     ShellState state;
     JobTable jobTable;
     state.jobs = &jobTable;
@@ -182,6 +202,35 @@ int main() {
 
     char buf[PATH_MAX];
     if (::getcwd(buf, sizeof(buf))) state.cwd = buf;
+
+    // ── Command-line invocation modes (essential for use as a login shell,
+    //    where `$SHELL -c "cmd"` and `$SHELL script` are used constantly) ──
+    //   ark -c "commands" [name arg...]   run the string, remaining args -> $0,$1..
+    //   ark [-] script [arg...]           run the file, args -> $1..
+    // A leading '-' in argv[0] (login shell) or a lone "-l"/"--login" flag is
+    // accepted and ignored -- ark's config sourcing already covers login setup.
+    int ai = 1;
+    if (ai < argc && (std::string(argv[ai]) == "-l" || std::string(argv[ai]) == "--login")) ai++;
+
+    if (ai < argc && std::string(argv[ai]) == "-c") {
+        if (ai + 1 >= argc) { std::cerr << "ark: -c: option requires an argument\n"; return 2; }
+        std::string cmd = argv[ai + 1];
+        // Per POSIX, args after the command string are $0, $1, $2...
+        std::vector<std::string> params;
+        for (int k = ai + 2; k < argc; k++) params.push_back(argv[k]);
+        if (!params.empty()) state.argStack.push_back(std::vector<std::string>(params.begin() + 1, params.end()));
+        return execSource(cmd, state);
+    }
+    if (ai < argc && argv[ai][0] != '-') {
+        // Script file: `ark script.sh [args...]`.
+        std::ifstream sf(argv[ai]);
+        if (!sf.is_open()) { std::cerr << "ark: " << argv[ai] << ": cannot open\n"; return 127; }
+        std::string src((std::istreambuf_iterator<char>(sf)), std::istreambuf_iterator<char>());
+        std::vector<std::string> params;
+        for (int k = ai + 1; k < argc; k++) params.push_back(argv[k]); // $1..
+        state.argStack.push_back(params);
+        return execSource(src, state);
+    }
 
     if (!isatty(STDIN_FILENO)) {
         // Non-interactive (piped script): read the whole input as one
