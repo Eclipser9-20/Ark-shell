@@ -29,7 +29,7 @@ const char* arkDefaultConfig() {
 
 # ─── YOUR SETTINGS ─────────────────────────────────────────────────────────
 # alias ll='ls -la'
-# export EDITOR=pistin
+# export EDITOR=nvim        # your editor for `ark-settings`
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  EVERYTHING ARK CAN DO  —  uncomment / edit to taste
@@ -296,11 +296,10 @@ static int b_dirs(const std::vector<std::string>&, ShellState& state) {
     return 0;
 }
 
-// Opens ~/.config/ark/ark.config in an editor. Prefers Pistin (Gideon's
-// terminal IDE), then $EDITOR, then vi -- so the config is edited in the
-// intended tool but still works on a bare box. Creates the file (with a
-// commented template) if it doesn't exist yet, so the editor always opens
-// something. Runs the editor as a normal foreground child.
+// Opens ~/.config/ark/ark.config in the user's editor ($VISUAL / $EDITOR,
+// else nano/vi). Creates the file (with a commented template) if it doesn't
+// exist yet, so the editor always opens something. Runs the editor as a
+// normal foreground child.
 // `source FILE` / `. FILE`: run FILE's commands in the CURRENT shell (so its
 // assignments, aliases, functions, and cd's affect this session), unlike
 // executing it as a subprocess. The parsed AST is retained in a session-
@@ -394,13 +393,14 @@ static int b_ark_settings(const std::vector<std::string>&, ShellState&) {
         f << arkDefaultConfig();
     }
 
+    // Honor the user's editor choice: $VISUAL, then $EDITOR, then a common
+    // fallback that exists on a bare box. (Set `export EDITOR=...` in ark.config
+    // to always open the config in your editor of choice.)
     std::string editor;
-    if (access("/usr/local/bin/pistin", X_OK) == 0) editor = "/usr/local/bin/pistin";
-    else {
-        std::string p = std::string(home ? home : "") + "/Pistin/pistin";
-        if (access(p.c_str(), X_OK) == 0) editor = p;
-    }
-    if (editor.empty()) { const char* e = getenv("EDITOR"); editor = (e && *e) ? e : "vi"; }
+    if (const char* v = getenv("VISUAL"); v && *v) editor = v;
+    else if (const char* e = getenv("EDITOR"); e && *e) editor = e;
+    else if (access("/usr/bin/nano", X_OK) == 0 || access("/opt/homebrew/bin/nano", X_OK) == 0) editor = "nano";
+    else editor = "vi";
 
     BlockSigchld guard;
     pid_t pid = fork();

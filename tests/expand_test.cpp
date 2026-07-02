@@ -67,7 +67,7 @@ static void test_command_substitution() {
 
 static void test_single_quotes_suppress_dollar_expansion_and_split() {
     ShellState st;
-    st.vars["HOME"] = "/Users/gideoncox";
+    st.vars["HOME"] = "/Users/arktest";
     // \x02-wrapped (single-quoted) content must stay fully literal: no $
     // expansion, no IFS splitting -- even though it contains both a $var
     // and internal whitespace.
@@ -78,21 +78,21 @@ static void test_single_quotes_suppress_dollar_expansion_and_split() {
 
 static void test_tilde_expands_to_home() {
     ShellState st;
-    setenv("HOME", "/Users/gideoncox", 1);
+    setenv("HOME", "/Users/arktest", 1);
     auto words = expandWords({"cd", "~"}, st);
-    assert(words[1] == "/Users/gideoncox");
+    assert(words[1] == "/Users/arktest");
 }
 
 static void test_tilde_slash_expands_to_home_subpath() {
     ShellState st;
-    setenv("HOME", "/Users/gideoncox", 1);
-    auto words = expandWords({"cd", "~/pullio"}, st);
-    assert(words[1] == "/Users/gideoncox/pullio");
+    setenv("HOME", "/Users/arktest", 1);
+    auto words = expandWords({"cd", "~/projects"}, st);
+    assert(words[1] == "/Users/arktest/projects");
 }
 
 static void test_tilde_mid_word_not_expanded() {
     ShellState st;
-    setenv("HOME", "/Users/gideoncox", 1);
+    setenv("HOME", "/Users/arktest", 1);
     // ~ only expands at the start of a word (bash semantics) -- "foo~bar"
     // is a literal filename, not a home-dir reference.
     auto words = expandWords({"echo", "foo~bar"}, st);
@@ -101,7 +101,7 @@ static void test_tilde_mid_word_not_expanded() {
 
 static void test_tilde_not_expanded_when_quoted() {
     ShellState st;
-    setenv("HOME", "/Users/gideoncox", 1);
+    setenv("HOME", "/Users/arktest", 1);
     auto dq = expandWords({"echo", "\x01" "~" "\x01"}, st);
     assert(dq[1] == "~");
     auto sq = expandWords({"echo", "\x02" "~" "\x02"}, st);

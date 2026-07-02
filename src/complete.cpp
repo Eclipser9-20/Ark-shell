@@ -71,7 +71,7 @@ static std::string expandHome(const std::string& path) {
 }
 
 // Reverse of expandHome: rewrite an absolute path under $HOME back to ~/...
-// so completions display as "~/bin/foo" rather than "/Users/you/bin/foo".
+// so completions display as "~/bin/foo" rather than "$HOME/bin/foo".
 static std::string abbreviateHome(const std::string& path) {
     const char* home = getenv("HOME");
     if (home) {

@@ -192,8 +192,14 @@ static void ensureStandardPath() {
                           "/usr/bin", "/bin", "/usr/sbin", "/sbin"})
         dirs.push_back(d);
     std::string prefix;
-    for (const auto& d : dirs)
-        if (!has(d)) prefix += (prefix.empty() ? "" : ":") + d;
+    for (const auto& d : dirs) {
+        // Only add a directory that ACTUALLY EXISTS -- no point polluting PATH
+        // with (say) /opt/homebrew on an Intel Mac, and it keeps tools that
+        // walk PATH from stat-ing dead entries.
+        struct stat st;
+        if (!has(d) && stat(d.c_str(), &st) == 0 && S_ISDIR(st.st_mode))
+            prefix += (prefix.empty() ? "" : ":") + d;
+    }
     if (!prefix.empty()) path = path.empty() ? prefix : prefix + ":" + path;
     setenv("PATH", path.c_str(), 1);
 }
