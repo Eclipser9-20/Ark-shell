@@ -52,6 +52,8 @@ const char* arkDefaultConfig() {
 # export ARK_BREW_SUGGEST=0        # "brew install X" for an uninstalled command
 # export ARK_MANPAGE_COMPLETE=0    # Tab-complete flags from a command's man page
 # export ARK_PRIVATE=1             # start in private mode (nothing saved to history)
+# export ARK_CTRLC=append          # Ctrl-C shows ^C after the command (default: own line)
+# export ARK_FRESHLINE=0           # don't auto-add a newline when output lacks one
 
 # ─── COMPLETION: FIND ANYTHING, ANYWHERE ───────────────────────────────────
 # Tab accepts the ghost suggestion if one's showing, else completes the word.
