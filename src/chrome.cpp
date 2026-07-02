@@ -202,6 +202,7 @@ constexpr const char* ICON_BRANCH = "\xef\x84\xa6"; // nf-fa-code_fork, git-bran
 constexpr const char* ICON_CLOCK = "\xef\x80\x97";  // nf-fa-clock_o (U+F017)
 constexpr const char* ICON_USER = "\xef\x80\x87";   // nf-fa-user (U+F007)
 constexpr const char* ICON_CPU = "\xef\x83\xa7";    // nf-fa-bolt (U+F0E7)
+constexpr const char* ICON_SSH = "\xef\x88\xb3";    // nf-fa-server (U+F233) -- remote/SSH session
 // Rounded powerline dividers (as opposed to the hard-triangle E0B0/E0B2 used
 // in the first pass) -- these render as a solid semicircle bump, giving each
 // chip a pill/capsule shape instead of a sharp-cornered block.
@@ -236,6 +237,23 @@ Chip makePill(const char* accentFg, const std::string& text, int visibleWidth) {
 }
 
 } // namespace
+
+// True when ark is running inside an SSH session: sshd exports SSH_CONNECTION /
+// SSH_TTY / SSH_CLIENT into the login environment. When ark is the shell you
+// land in over SSH, everything it shows (user@host, cwd, CPU/mem, clock) is
+// ALREADY the remote machine's -- it reads the box it runs on. This just lets
+// the chrome flag the session as remote so it's obvious at a glance. The SSH
+// client's IP (for the banner) is the first field of SSH_CONNECTION.
+static bool inSshSession() {
+    return getenv("SSH_CONNECTION") || getenv("SSH_TTY") || getenv("SSH_CLIENT");
+}
+static std::string sshClientIp() {
+    const char* c = getenv("SSH_CONNECTION"); // "<clientip> <cport> <serverip> <sport>"
+    if (!c) return "";
+    std::string s = c;
+    size_t sp = s.find(' ');
+    return sp == std::string::npos ? s : s.substr(0, sp);
+}
 
 void paintChrome(const std::string& cwd, const std::string& gitBranch,
                   double sessionSeconds, const HwStats& hw) {
@@ -278,9 +296,14 @@ void paintChrome(const std::string& cwd, const std::string& gitBranch,
     std::string userHost = std::string(user ? user : "user") + "@" + host;
     std::string sessionStr = formatSession(sessionSeconds);
 
-    std::string leftText = std::string(ICON_USER) + " " + userHost + "  " + ICON_CLOCK + " " + sessionStr;
+    // In an SSH session, swap the user icon for a "server" glyph and glow the
+    // chip green -- an at-a-glance "you're on a remote box" signal. user@host
+    // is already the REMOTE's (ark reads the machine it runs on).
+    bool ssh = inSshSession();
+    std::string leftText = std::string(ssh ? ICON_SSH : ICON_USER) + " " + userHost +
+                           "  " + ICON_CLOCK + " " + sessionStr;
     int leftVisible = 1 + 1 + (int)userHost.size() + 2 + 1 + 1 + (int)sessionStr.size();
-    Chip leftPill = makePill(FG_INFO, leftText, leftVisible);
+    Chip leftPill = makePill(ssh ? FG_GREEN : FG_INFO, leftText, leftVisible);
 
     char hwbuf[64];
     snprintf(hwbuf, sizeof(hwbuf), "%3.0f%%  mem %.1f/%.1fG", hw.cpuPercent, hw.memUsedGB, hw.memTotalGB);
@@ -505,6 +528,8 @@ void printStartupBanner() {
     struct Field { const char* key; std::string label; std::string value; };
     std::vector<Field> all = {
         {"user",   "",       userHost},
+        // Only non-empty in an SSH session, so it appears exactly when remote.
+        {"ssh",    "SSH",    inSshSession() ? "remote session from " + sshClientIp() : ""},
         {"os",     "OS",     osName},
         {"kernel", "Kernel", kernel},
         {"shell",  "Shell",  "ark 1.0.0"},
@@ -514,7 +539,7 @@ void printStartupBanner() {
         {"uptime", "Uptime", up},
     };
     std::string want = getenv("ARK_BANNER_INFO") ? getenv("ARK_BANNER_INFO")
-                                                 : "user,os,kernel,shell,host,cpu,mem,uptime";
+                                                 : "user,ssh,os,kernel,shell,host,cpu,mem,uptime";
     auto wants = [&](const char* key) {
         if (want == "all") return true;
         std::string k = key;
