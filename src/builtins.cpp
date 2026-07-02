@@ -1,7 +1,7 @@
 #include "builtins.h"
 #include "complete.h"
 #include "exec.h"
-#include "features.h"
+#include "arkfeatures.h"
 #include "history.h"
 #include "lexer.h"
 #include "parser.h"

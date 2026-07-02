@@ -1,7 +1,7 @@
 #include "exec.h"
 #include "builtins.h"
 #include "expand.h"
-#include "features.h"
+#include "arkfeatures.h"
 #include "jobs.h"
 #include "lexer.h"
 #include "parser.h"

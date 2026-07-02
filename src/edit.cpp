@@ -1,7 +1,7 @@
 #include "edit.h"
 #include "chrome.h"
 #include "complete.h"
-#include "features.h"
+#include "arkfeatures.h"
 #include "highlight.h"
 #include <algorithm>
 #include <atomic>

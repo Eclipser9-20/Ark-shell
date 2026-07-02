@@ -4,7 +4,7 @@
 #include "edit.h"
 #include "exec.h"
 #include "expand.h"
-#include "features.h"
+#include "arkfeatures.h"
 #include "history.h"
 #include "jobs.h"
 #include "lexer.h"
