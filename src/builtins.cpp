@@ -42,7 +42,11 @@ const char* arkDefaultConfig() {
 # export ARK_CHROME=0              # pinned top/bottom status bars
 # export ARK_AUTOCD=0              # type a directory name to cd into it
 # export ARK_NU_MODE=1             # nushell-style: `ls` shows a bordered table
-# export ARK_BANNER=0              # neofetch-style ⚡ startup panel
+# export ARK_BANNER=0              # neofetch-style startup panel (logo + system info)
+# export ARK_BANNER_LOGO=bolt      # startup logo:  ark (rounded wordmark) | bolt | none
+# export ARK_BANNER_ACCENT=purple  # logo color: blue/green/red/purple/pink/cyan/yellow/orange or hex 7aa2f7
+# export ARK_BANNER_INFO=os,cpu,mem  # which lines: user,os,kernel,shell,host,cpu,mem,uptime (or 'all')
+# export ARK_BANNER_SUBTITLE="heaven"  # the tagline shown under the logo
 # export ARK_SPELLCHECK=0          # "did you mean X?" on an unknown command
 # export ARK_AUTOCORRECT=1         # auto-fix a typo'd command and run it (gti->git)
 # export ARK_BREW_SUGGEST=0        # "brew install X" for an uninstalled command

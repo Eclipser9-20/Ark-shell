@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <ctime>
 #include <fstream>
+#include <vector>
 #include <mach/host_info.h>
 #include <mach/mach.h>
 #include <mach/mach_host.h>
@@ -293,6 +294,31 @@ std::string formatUptime() {
 }
 } // namespace
 
+// Resolve the banner accent color (ARK_BANNER_ACCENT): a named color or a raw
+// 6-digit hex ("7aa2f7"). Falls back to ark's signature blue.
+static std::string bannerAccent() {
+    std::string a = getenv("ARK_BANNER_ACCENT") ? getenv("ARK_BANNER_ACCENT") : "";
+    auto esc = [](int r, int g, int b) {
+        char buf[32]; snprintf(buf, sizeof(buf), "\x1b[38;2;%d;%d;%dm", r, g, b); return std::string(buf);
+    };
+    if (a == "blue" || a.empty()) return esc(122, 162, 247);
+    if (a == "green")  return esc(158, 206, 106);
+    if (a == "red")    return esc(247, 118, 142);
+    if (a == "purple") return esc(187, 154, 247);
+    if (a == "pink")   return esc(255, 92, 205);
+    if (a == "cyan")   return esc(125, 207, 255);
+    if (a == "yellow") return esc(224, 175, 104);
+    if (a == "orange") return esc(255, 158, 100);
+    // Raw hex "rrggbb".
+    if (a.size() == 6 && a.find_first_not_of("0123456789abcdefABCDEF") == std::string::npos) {
+        int r = (int)strtol(a.substr(0, 2).c_str(), nullptr, 16);
+        int g = (int)strtol(a.substr(2, 2).c_str(), nullptr, 16);
+        int b = (int)strtol(a.substr(4, 2).c_str(), nullptr, 16);
+        return esc(r, g, b);
+    }
+    return esc(122, 162, 247);
+}
+
 void printStartupBanner() {
     if (const char* b = getenv("ARK_BANNER"); b && std::string(b) == "0") return;
 
@@ -301,13 +327,12 @@ void printStartupBanner() {
     const char* user = getenv("USER");
     std::string userHost = std::string(user ? user : "user") + "@" + host;
 
-    std::string osVer = sysctlStr("kern.osproductversion"); // e.g. "26.3.1"
-    std::string kernel = sysctlStr("kern.osrelease");        // Darwin, e.g. "27.0.0"
-    std::string model = sysctlStr("hw.model");               // e.g. "Mac16,10"
-    std::string cpu = sysctlStr("machdep.cpu.brand_string"); // "Apple M5" (may be empty on some ARM)
-    if (cpu.empty()) cpu = sysctlStr("hw.targettype");        // fallback identifier
+    std::string osVer = sysctlStr("kern.osproductversion");
+    std::string kernel = sysctlStr("kern.osrelease");
+    std::string model = sysctlStr("hw.model");
+    std::string cpu = sysctlStr("machdep.cpu.brand_string");
+    if (cpu.empty()) cpu = sysctlStr("hw.targettype");
     long cores = sysctlInt("hw.logicalcpu");
-
     HwStats hw = getHwStats();
     std::string up = formatUptime();
 
@@ -317,58 +342,81 @@ void printStartupBanner() {
     char memLine[96];
     snprintf(memLine, sizeof(memLine), "%.1f / %.1f GiB", hw.memUsedGB, hw.memTotalGB);
 
-    // Left column: an 8-line ASCII lightning bolt. Right column: the info.
-    // The bolt glows blue (ark's established accent, same hue as the chrome
-    // bolt icon); the middle "jog" line is brightened so the zig-zag reads.
-    const char* B = FG_BLUE;
+    std::string A = bannerAccent();               // logo accent (configurable)
     const char* G = FG_GREEN;
     const char* I = FG_INFO;
-    const char* D = "\x1b[38;2;86;95;137m"; // TokyoNight comment gray (labels/rules)
+    const char* D = "\x1b[38;2;86;95;137m";       // comment gray (labels / subtitle)
     const char* R = RESET;
 
-    std::string info[] = {
-        userHost,
-        "",
-        "OS      macOS " + osVer,
-        "Kernel  Darwin " + kernel,
-        "Shell   ark 1.0.0",
-        "Host    " + model,
-        "CPU     " + std::string(cpuLine),
-        "Mem     " + std::string(memLine) + (up.empty() ? "" : "   up " + up),
-    };
-    const char* bolt[8] = {
-        "     ",
-        "    ▟█▛ ",
-        "   ▟█▛  ",
-        "  ▟███▙ ",
-        "  ▀▜██▛ ",
-        "    ▟█▛ ",
-        "   ▟█▛  ",
-        "  ▟▛    ",
-    };
+    // ── Logo (ARK_BANNER_LOGO = ark | bolt | none, default "ark") ────────────
+    // "ark" is a smooth rounded wordmark drawn with quadrant blocks (the same
+    // family the pinned-bar pills use), giving the soft LazyVim-dashboard feel.
+    std::string logo = getenv("ARK_BANNER_LOGO") ? getenv("ARK_BANNER_LOGO") : "ark";
+    std::vector<std::string> art;
+    if (logo == "ark") {
+        // Block letters with ROUNDED corners (╭╮╰╯) -- legible and soft, the
+        // LazyVim-dashboard look.
+        art = {
+            " █████╮ ██████╮ ██╮  ██╮",
+            "██╭──██╮██╭──██╮██║ ██╭╯",
+            "███████║██████╭╯█████╭╯ ",
+            "██╭──██║██╭──██╮██╭─██╮ ",
+            "██║  ██║██║  ██║██║  ██╮",
+            "╰─╯  ╰─╯╰─╯  ╰─╯╰─╯  ╰─╯",
+        };
+    } else if (logo == "bolt") {
+        art = {
+            "    ▟█▛ ", "   ▟█▛  ", "  ▟███▙ ", "  ▀▜██▛ ",
+            "    ▟█▛ ", "   ▟█▛  ", "  ▟▛    ",
+        };
+    } // "none" -> no art
+
+    // Subtitle (ARK_BANNER_SUBTITLE overrides the default tagline).
+    std::string subtitle = getenv("ARK_BANNER_SUBTITLE") ? getenv("ARK_BANNER_SUBTITLE")
+                                                         : "the best of all worlds";
 
     printf("\r\n");
-    for (int i = 0; i < 8; i++) {
-        // Bolt segment (blue; row 3, the jog, gets the plain bolt too).
-        printf("%s%s%s ", B, bolt[i], R);
-        if (i == 0) {
-            // Title row: user@host in green, then a small "⚡ ark" tag.
-            printf("%s%s%s  %s%s ark — heaven%s", G, info[i].c_str(), R, B, ICON_CPU, R);
-        } else if (info[i].empty()) {
-            printf("%s─────────────────────────%s", D, R);
-        } else {
-            // Split "LABEL   value": label chunk (first 8 cols) dim, value normal.
-            std::string s = info[i];
-            size_t sp = s.find("  ");
-            if (sp != std::string::npos) {
-                std::string lbl = s.substr(0, sp);
-                std::string val = s.substr(s.find_first_not_of(' ', sp));
-                printf("%s%-7s%s %s%s%s", D, lbl.c_str(), R, I, val.c_str(), R);
-            } else {
-                printf("%s%s%s", I, s.c_str(), R);
-            }
+    for (const auto& line : art) printf("  %s%s%s\r\n", A.c_str(), line.c_str(), R);
+    if (!art.empty()) {
+        // The ⚡ + subtitle sit just under the wordmark.
+        printf("  %s%s%s %s%s%s\r\n\r\n", A.c_str(), ICON_CPU, R, D, subtitle.c_str(), R);
+    }
+
+    // ── Info fields (ARK_BANNER_INFO = comma list; default = all, in order) ──
+    // Field keys: user, os, kernel, shell, host, cpu, mem, uptime.
+    struct Field { const char* key; std::string label; std::string value; };
+    std::vector<Field> all = {
+        {"user",   "",       userHost},
+        {"os",     "OS",     "macOS " + osVer},
+        {"kernel", "Kernel", "Darwin " + kernel},
+        {"shell",  "Shell",  "ark 1.0.0"},
+        {"host",   "Host",   model},
+        {"cpu",    "CPU",    cpuLine},
+        {"mem",    "Mem",    memLine},
+        {"uptime", "Uptime", up},
+    };
+    std::string want = getenv("ARK_BANNER_INFO") ? getenv("ARK_BANNER_INFO")
+                                                 : "user,os,kernel,shell,host,cpu,mem,uptime";
+    auto wants = [&](const char* key) {
+        if (want == "all") return true;
+        std::string k = key;
+        size_t pos = 0;
+        while (pos <= want.size()) {
+            size_t comma = want.find(',', pos);
+            std::string seg = comma == std::string::npos ? want.substr(pos) : want.substr(pos, comma - pos);
+            // trim spaces
+            size_t a = seg.find_first_not_of(' '), b = seg.find_last_not_of(' ');
+            if (a != std::string::npos) seg = seg.substr(a, b - a + 1);
+            if (seg == k) return true;
+            if (comma == std::string::npos) break;
+            pos = comma + 1;
         }
-        printf("\r\n");
+        return false;
+    };
+    for (const auto& f : all) {
+        if (!wants(f.key) || f.value.empty()) continue;
+        if (f.label.empty()) printf("  %s%s%s\r\n", G, f.value.c_str(), R);           // user@host
+        else printf("  %s%-7s%s %s%s%s\r\n", D, f.label.c_str(), R, I, f.value.c_str(), R);
     }
     printf("\r\n");
     fflush(stdout);
