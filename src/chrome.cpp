@@ -537,22 +537,28 @@ void printStartupBanner() {
             "╰─╯  ╰─╯╰─╯  ╰─╯╰─╯  ╰─╯",
         };
     } else if (logo == "bolt") {
+        // A bold, upright lightning bolt: top stroke slants down to the flash
+        // bar, then a second stroke offset right slants down to the point. Wide
+        // enough to read as a bolt, not a thin leaning stick.
         art = {
-            "    ▟█▛ ", "   ▟█▛  ", "  ▟███▙ ", "  ▀▜██▛ ",
-            "    ▟█▛ ", "   ▟█▛  ", "  ▟▛    ",
+            "      █████",
+            "     █████",
+            "    █████",
+            "   ██████████",
+            "        █████",
+            "       █████",
+            "      █████",
+            "     ███",
         };
     } // "none" -> no art
 
-    // Subtitle (ARK_BANNER_SUBTITLE overrides the default tagline).
-    std::string subtitle = getenv("ARK_BANNER_SUBTITLE") ? getenv("ARK_BANNER_SUBTITLE")
-                                                         : "the best of all worlds";
+    // No tagline by default; set ARK_BANNER_SUBTITLE to add one under the logo.
+    std::string subtitle = getenv("ARK_BANNER_SUBTITLE") ? getenv("ARK_BANNER_SUBTITLE") : "";
 
     printf("\r\n");
     for (const auto& line : art) printf("  %s%s%s\r\n", A.c_str(), line.c_str(), R);
-    if (!art.empty()) {
-        // The ⚡ + subtitle sit just under the wordmark.
-        printf("  %s%s%s %s%s%s\r\n\r\n", A.c_str(), ICON_CPU, R, D, subtitle.c_str(), R);
-    }
+    if (!subtitle.empty()) printf("  %s%s%s\r\n", D, subtitle.c_str(), R);
+    if (!art.empty() || !subtitle.empty()) printf("\r\n");
 
     // ── Info fields (ARK_BANNER_INFO = comma list; default = all, in order) ──
     // Field keys: user, os, kernel, shell, host, cpu, mem, uptime.
