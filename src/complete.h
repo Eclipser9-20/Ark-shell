@@ -29,10 +29,14 @@ std::string longestCommonPrefix(const std::vector<std::string>& items);
 // directory portion `partial` itself had), not just suffixes.
 std::vector<std::string> completePath(const std::string& partial);
 
-// Command-name completion: builtin names (from builtinRegistry()) plus
-// executables found by scanning each $PATH directory (opendir/readdir +
-// access(path, X_OK) -- no subprocess).
+// Command-name completion: builtin names (from builtinRegistry()) plus $PATH
+// executables. Backed by a cache built once and filtered by prefix, so it's
+// cheap enough to call per-keystroke (ghost text does). No subprocess.
 std::vector<std::string> completeCommand(const std::string& partial);
+
+// Drop the cached command-name list so the next completeCommand() rebuilds it
+// (picks up newly-installed commands) -- wired to the ark-reindex builtin.
+void rebuildCommandCache();
 
 // True if `path` (after expanding a leading '~' via $HOME) is a directory.
 // Used to decide whether a completed path should get a trailing '/' or ' '.

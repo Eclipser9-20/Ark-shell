@@ -37,10 +37,16 @@ std::string findGitBranch(const std::string& cwd);
 // area in between).
 void setScrollRegion();
 
-// Paints the pinned chrome: row 1 = cwd + git branch; last row = user@host
-// + session length (left) and hardware stats (right), padded to fill the
-// terminal width. Uses synchronized output + save/restore cursor (DECSC/
-// DECRC) + absolute positioning only.
+// The top-bar content (rounded [dir][branch] pills) as a STRING. Printed inline
+// as a header above each prompt (main.cpp) rather than pinned to row 1 -- so it
+// scrolls with output into the terminal's scrollback. Pinning row 1 forced the
+// scroll region to start at row 2, which disables scrollback entirely.
+std::string topBar(const std::string& cwd, const std::string& gitBranch);
+
+// Paints the pinned BOTTOM bar only (last row: user@host + session length, and
+// hardware stats), padded to fill the width. The top bar is now an inline
+// header (see topBar()), so this touches just the one pinned row via absolute
+// positioning; the caller (reassertChrome) handles cursor save/restore.
 void paintChrome(const std::string& cwd, const std::string& gitBranch,
                   double sessionSeconds, const HwStats& hw);
 

@@ -470,6 +470,15 @@ int main(int argc, char** argv) {
             history.sync(histPath);
             uvar::loadInto(state.vars);
         }
+        // Top bar (cwd + git branch) is printed inline as a header ABOVE each
+        // fresh prompt, so it scrolls with output into scrollback (it used to be
+        // pinned to row 1, which disabled scrollback). ARK_CHROME=0 hides it,
+        // matching the bars toggle. Not printed on continuation lines.
+        if (!continuing) {
+            const char* c = getenv("ARK_CHROME");
+            if (!(c && std::string(c) == "0"))
+                std::cout << topBar(state.cwd, findGitBranch(state.cwd)) << "\r\n" << std::flush;
+        }
         std::string prompt = continuing ? continuationPrompt() : buildPrompt(state, home);
         auto got = readLine(prompt, history, doReassertChrome, cmdValidator);
         if (!got) break; // Ctrl-D / EOF

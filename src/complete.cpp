@@ -270,12 +270,21 @@ std::vector<std::string> completePath(const std::string& partial) {
     return results;
 }
 
-std::vector<std::string> completeCommand(const std::string& partial) {
-    std::vector<std::string> results;
-    for (const auto& kv : builtinRegistry()) {
-        if (kv.first.rfind(partial, 0) == 0) results.push_back(kv.first);
-    }
-
+// Cached, sorted list of every runnable command name: builtins + each $PATH
+// executable (basename). Built once, then completeCommand() just filters it by
+// prefix -- instead of re-scanning ALL of $PATH (opendir/readdir/access per
+// file) on EVERY keystroke, which the ghost-text autosuggestion does per
+// character and which was the biggest source of typing latency. Rebuilt by
+// ark-reindex (like bash's `hash -r`), so a freshly-installed command shows up
+// after a reindex. Dead symlinks are excluded (access(X_OK) follows + rejects).
+static std::vector<std::string> g_cmdNames;
+static bool g_cmdNamesBuilt = false;
+static const std::vector<std::string>& commandNameCache() {
+    if (g_cmdNamesBuilt) return g_cmdNames;
+    g_cmdNamesBuilt = true;
+    std::unordered_set<std::string> seen;
+    for (const auto& kv : builtinRegistry())
+        if (seen.insert(kv.first).second) g_cmdNames.push_back(kv.first);
     const char* pathEnv = getenv("PATH");
     if (pathEnv) {
         std::string pathStr = pathEnv;
@@ -284,15 +293,15 @@ std::vector<std::string> completeCommand(const std::string& partial) {
             size_t colon = pathStr.find(':', pos);
             std::string dir = (colon == std::string::npos) ? pathStr.substr(pos) : pathStr.substr(pos, colon - pos);
             if (!dir.empty()) {
-                DIR* d = opendir(dir.c_str());
-                if (d) {
+                if (DIR* d = opendir(dir.c_str())) {
                     struct dirent* entry;
                     while ((entry = readdir(d)) != nullptr) {
                         std::string name = entry->d_name;
-                        if (name.rfind(partial, 0) == 0) {
-                            std::string full = dir + "/" + name;
-                            if (access(full.c_str(), X_OK) == 0) results.push_back(name);
-                        }
+                        if (name == "." || name == "..") continue;
+                        if (seen.count(name)) continue;
+                        if (access((dir + "/" + name).c_str(), X_OK) != 0) continue;
+                        seen.insert(name);
+                        g_cmdNames.push_back(name);
                     }
                     closedir(d);
                 }
@@ -301,7 +310,20 @@ std::vector<std::string> completeCommand(const std::string& partial) {
             pos = colon + 1;
         }
     }
+    std::sort(g_cmdNames.begin(), g_cmdNames.end());
+    return g_cmdNames;
+}
+void rebuildCommandCache() { g_cmdNames.clear(); g_cmdNamesBuilt = false; }
 
+std::vector<std::string> completeCommand(const std::string& partial) {
+    std::vector<std::string> results;
+    // Prefix-filter the cached list (binary-searchable since it's sorted, but a
+    // linear scan of a few thousand short strings is already sub-millisecond).
+    for (const auto& name : commandNameCache())
+        if (name.rfind(partial, 0) == 0) results.push_back(name);
+
+    // $ARK_SEARCH_DIRS is small and user-curated -- scanned live (not cached) so
+    // it always reflects reality, and it's cheap.
     auto extra = completeInSearchDirs(partial, /*execOnly=*/true);
     results.insert(results.end(), extra.begin(), extra.end());
 
