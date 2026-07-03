@@ -24,151 +24,110 @@
 #include <unistd.h>
 
 const char* arkDefaultConfig() {
-    return R"CFG(# ark.config -- sourced at startup (interactive sessions), like ~/.zshrc.
+    return R"CFG(
+# ark.config -- sourced at startup (interactive sessions), like ~/.zshrc.
 # Your aliases, exports, and functions here persist across sessions. Everything
-# below the YOUR SETTINGS block is COMMENTED OUT -- uncomment only what you want.
-#   ark-settings   open this file in your editor
-#   ark-reload     re-read this file into the running shell (no restart needed)
+# under the catalogue below is COMMENTED -- uncomment only what you want.
+#   ark-settings   edit this file in your editor
+#   ark-reload     re-read it into the running shell (no restart)
 
-# ─── YOUR SETTINGS ─────────────────────────────────────────────────────────
+# --- YOUR SETTINGS -----------------------------------------------------------
 # alias ll='ls -la'
 # alias gs='git status'
 # export EDITOR=nvim        # your editor for `ark-settings`
 
-# ═══════════════════════════════════════════════════════════════════════════
-#  EVERYTHING ARK CAN DO  —  every knob below is a comment; uncomment to change
-# ═══════════════════════════════════════════════════════════════════════════
+# =============================================================================
+#  EVERYTHING ARK CAN DO  --  every knob below; uncomment to change a default
+# =============================================================================
 
-# ─── FEATURES THAT ARE ON BY DEFAULT (set to 0 to turn OFF) ─────────────────
+# --- FEATURES ON BY DEFAULT (set to 0 to turn OFF) ---------------------------
 # export ARK_GHOST_TEXT=0          # fish-style autosuggestions (dim ghost text)
 # export ARK_SYNTAX_HIGHLIGHT=0    # colored command line as you type
 # export ARK_VALIDATE=0            # red unknown-command highlight as you type
-# export ARK_CHROME=0              # inline top bar + pinned bottom status bar
-# export ARK_CHROME_TOP=inline     # top bar: pinned (default; fixed top-left, NO
-#                                  #   scrollback) | inline (scrolls with output,
-#                                  #   keeps scrollback) | off (hide the top bar)
-# export ARK_DEFAULT_TERMINAL=1    # "look like plain bash": strip all chrome, the
-#                                  #   banner, ghost text + highlighting; classic
-#                                  #   user@host:cwd$ prompt. (master off-switch)
-# export ARK_PLAIN_CHROME=1        # keep the pinned bars but flat/plain (no rounded
-#                                  #   LazyVim pills or colors); bare $ prompt
+# export ARK_CHROME=0              # pinned top + bottom status bars
 # export ARK_AUTOCD=0              # type a directory name to cd into it
 # export ARK_SPELLCHECK=0          # "did you mean X?" on an unknown command
-# export ARK_BREW_SUGGEST=0        # brew reverse lookup for installs (rg->ripgrep)
+# export ARK_BREW_SUGGEST=0        # brew reverse lookup for install hints (rg->ripgrep)
 # export ARK_MANPAGE_COMPLETE=0    # Tab-complete flags from a command's man page
 # export ARK_BANNER=0              # neofetch-style startup panel (logo + sysinfo)
 # export ARK_INDEX=0               # background home-tree index (Tab finds anything)
 # export ARK_FRESHLINE=0           # auto-add a newline when output lacks a final one
+# export ARK_LS_COLOR=0            # colorized `ls` (dirs / symlinks / executables)
+# export ARK_EXIT_CODE=0           # show a failed command's exit code (red X N)
 
-# ─── FEATURES THAT ARE OFF BY DEFAULT (set to 1 to turn ON) ─────────────────
+# --- FEATURES OFF BY DEFAULT (set to 1 to turn ON) ---------------------------
 # export ARK_NU_MODE=1             # nushell-style: `ls` prints a bordered table
 # export ARK_AUTOCORRECT=1         # auto-fix a typo'd command and run it (gti->git)
-# export ARK_LIVE_AUTOCORRECT=1   # fix a typo'd command AS YOU TYPE (space commits
-#                                 #   the fix; one Backspace undoes it)
-# export ARK_AUTO_PATH=1          # run a program found only in the file index (not $PATH)
+# export ARK_LIVE_AUTOCORRECT=1    # fix a typo AS YOU TYPE (space commits; one Backspace undoes)
+# export ARK_AUTO_PATH=1           # run a program found only in the index, not $PATH
 # export ARK_PRIVATE=1             # start in private mode (nothing saved to history)
+# export ARK_OVERLAY=1             # EXPERIMENTAL: PTY compositor (fixed bars + scrollback)
 
-# ─── STARTUP BANNER (only shown when ARK_BANNER is on) ─────────────────────
-# export ARK_BANNER_LOGO=ark       # bolt (default lightning bolt) | ark (wordmark) | none
+# --- LOOK & FEEL -------------------------------------------------------------
+# export ARK_CHROME_TOP=pinned     # top bar: pinned (default; fixed, NO scrollback) |
+#                                  #   inline (scrolls, keeps scrollback) | off
+# export ARK_PLAIN_CHROME=1        # keep the pinned bars but flat/plain (no rounded pills)
+# export ARK_DEFAULT_TERMINAL=1    # look like stock bash: no chrome/banner, user@host:cwd$
+# export ARK_BANNER_LOGO=ark       # bolt (default lightning) | ark (wordmark) | none
 # export ARK_BANNER_ACCENT=purple  # blue/green/red/purple/pink/cyan/yellow/orange or hex 7aa2f7
-# export ARK_BANNER_INFO=os,cpu,mem  # user,os,kernel,shell,host,cpu,mem,uptime (or 'all')
-# export ARK_BANNER_SUBTITLE="heaven"  # tagline shown under the logo
+# export ARK_BANNER_INFO=os,cpu,mem  # ssh,os,kernel,shell,host,cpu,mem,uptime (or 'all')
+# export ARK_BANNER_SUBTITLE="heaven"  # a tagline under the logo
+# export ARK_CTRLC=append          # Ctrl-C shows ^C after the line (default: its own line)
 
-# ─── PROMPT / TERMINAL BEHAVIOR ────────────────────────────────────────────
-# export ARK_EXIT_CODE=0          # don't show the failed exit code in the prompt
-# export ARK_CTRLC=append          # Ctrl-C shows ^C after the line (default: own line)
-# export ARK_DSR_MS=40             # advanced: cursor-query timeout in ms (perf tuning;
-#                                  #   lower = snappier, too low may misplace chrome)
+# --- COMMAND-NOT-FOUND: OFFER TO INSTALL IT ----------------------------------
+# On an unknown command (not a close typo) ark offers to install it -- press y
+# (no Enter). unset = autodetect (brew/port on macOS; apt/dnf/pacman/zypper/apk on
+# Linux; winget/scoop on Windows). "" = off. A path or name forces one.
+# export ARK_PACKAGE_MANAGER=""
+# export ARK_PACKAGE_MANAGER=/opt/homebrew/bin/brew
+# export ARK_PACKAGE_MANAGER=pacman
 
-# ─── COMMAND-NOT-FOUND: OFFER TO INSTALL IT ────────────────────────────────
-# When you run a command ark can't find (and it isn't a close typo of a real
-# one), ark offers to install it with your package manager — press y (no Enter)
-# and it runs the install, handing over the terminal so sudo/brew can prompt.
-#   unset  → autodetect: brew/port (macOS), apt/dnf/pacman/zypper/apk/yum (Linux),
-#            winget/scoop/choco (Windows). System managers get a `sudo` prefix.
-#   ""     → turn the whole feature off.
-#   path   → force a specific manager; install syntax is inferred from its name.
-# export ARK_PACKAGE_MANAGER=""              # disable install prompts entirely
-# export ARK_PACKAGE_MANAGER=/opt/homebrew/bin/brew   # force a specific one
-# export ARK_PACKAGE_MANAGER=pacman          # or just a name found on $PATH
+# --- COMPLETION --------------------------------------------------------------
+# Tab accepts the ghost suggestion if shown, else completes the word. The index
+# (ARK_INDEX) lets Tab find any file/program by name; `ark-reindex` rebuilds it.
+# export ARK_INDEX_ROOTS="$HOME:/opt"                # index roots (default: $HOME)
+# export ARK_SEARCH_DIRS="$HOME/bin:$HOME/scripts"   # extra dirs completed by FULL path
 
-# ─── COMPLETION: FIND ANYTHING, ANYWHERE ───────────────────────────────────
-# Tab accepts the ghost suggestion if one's showing, else completes the word.
-# The background index (ARK_INDEX above) lets Tab find any file/program by name
-# from anywhere; `ark-reindex` rebuilds it after you add files this session.
-# export ARK_INDEX_ROOTS="$HOME:/opt"       # roots to index (default: $HOME)
-# Extra dirs whose entries complete by FULL PATH (lighter than the index):
-# export ARK_SEARCH_DIRS="$HOME/bin:$HOME/projects:$HOME/scripts"
+# --- ADVANCED / PERFORMANCE --------------------------------------------------
+# export ARK_DSR_MS=60             # cursor-position query timeout, ms (lower = snappier)
 
-# ─── POWER FEATURES (built in; commands, not toggles) ──────────────────────
-# private [on|off]   Private Mode: pause writing commands to history/disk.
-# uvar NAME VALUE    Universal Variable: persists across ALL windows AND survives
-# uvar NAME          reboot (stored in ~/.config/ark/universal, also exported).
-# uvar               Set in one window, appears in the others live. `uvar -u NAME`.
-# history            Shared across every window/tab live. `history -c` clears it.
-# Autosuggestions are CONTEXT-AWARE: a match from the current directory wins.
+# --- POWER FEATURES (built-in commands, not toggles) -------------------------
+# private [on|off]   pause writing history/disk this session
+# uvar NAME VALUE    universal var: persists across ALL windows AND survives reboot
+# history / history -c   shared live across windows; -c clears it
+# ark-reload         re-source this file      ark-reindex   rebuild the index
 # Metadata globbing:  *(.)=files *(/)=dirs *(@)=symlinks *(x)=exec
-#   *(.L+1000)=files >1000 bytes (Lk/Lm/Lg units)   *(.mh-2)=modified <2h ago
-#   (m units h/d/w; '-'=newer than, '+'=older than)  e.g.  ls -la *.log(.mh-1)
+#   *(.L+1000)=>1000 bytes (Lk/Lm/Lg)   *(.mh-2)=modified <2h (m units h/d/w; -/+)
+# Line editing:  right-arrow accepts ONE word of the suggestion; Tab/Ctrl-F take all.
 
-# ─── ALIASES ───────────────────────────────────────────────────────────────
+# --- ALIASES / FUNCTIONS (examples) ------------------------------------------
 # alias la='ls -A'
-# alias gd='git diff'
 # alias ..='cd ..'
-# alias ...='cd ../..'
-# alias grep='grep --color=auto'
-
-# ─── ENVIRONMENT ───────────────────────────────────────────────────────────
-# export PAGER=less
-# export PATH="$HOME/bin:$PATH"   # note: re-runs on `ark-reload`; keep it idempotent
-
-# ─── FUNCTIONS ─────────────────────────────────────────────────────────────
-# mkcd() { mkdir -p "$1" && cd "$1"; }        # make a dir and enter it
-# backup() { cp "$1" "$1.bak"; }
+# mkcd() { mkdir -p "$1" && cd "$1"; }
 # greet() { echo "hi, ${1:-world}"; }
 
-# ═══════════════════════════════════════════════════════════════════════════
-#  REFERENCE  —  the ark language (always-on; a cheat sheet, nothing to enable)
-# ═══════════════════════════════════════════════════════════════════════════
-#
+# =============================================================================
+#  REFERENCE  --  the ark language (always on; a cheat sheet, nothing to enable)
+# =============================================================================
 #  EXPANSION
-#    $VAR  ${VAR}  ${VAR:-default}  ${VAR:+alt}  ${#VAR}   (length)
-#    ${VAR#prefix} ${VAR##prefix}   strip prefix (## longest)  → basename: ${p##*/}
-#    ${VAR%suffix} ${VAR%%suffix}   strip suffix (%% longest)  → dirname:  ${p%/*}
-#    ${VAR/a/b}    ${VAR//a/b}      replace first / all
-#    ${VAR:off:len}                 substring (negative off counts from end)
-#    $(cmd)   `cmd`                 command substitution
-#    $(( 2 + 3*4 ))                 arithmetic: + - * / % << >> & | ^ && || < <= == !=
-#    {a,b,c}  {1..9}  {a..z}        brace expansion (+ cartesian: a{b,c}{1,2})
-#    *  ?  [abc]  **/               globs; ** recurses to any depth
-#    ~  ~/path                      home expansion
-#    "$x"  '$x'  a"b c"d            double / single / mixed quoting
-#    $?  $$  $#  $@  $*  $0         special parameters
-#
+#    $VAR  ${VAR}  ${VAR:-default}  ${VAR:+alt}  ${#VAR}
+#    ${VAR#pfx} ${VAR##pfx}  strip prefix (## longest)  -> basename: ${p##*/}
+#    ${VAR%sfx} ${VAR%%sfx}  strip suffix (%% longest)  -> dirname:  ${p%/*}
+#    ${VAR/a/b}  ${VAR//a/b}  replace first / all       ${VAR:off:len}  substring
+#    $(cmd)  `cmd`  cmd sub    $(( 2+3*4 ))  arithmetic (+ - * / % << >> & | ^ && ||)
+#    {a,b,c} {1..9} {a..z}  brace exp    *  ?  [abc]  **/  globs    ~  home
+#    "$x" '$x'  quoting        $? $$ $# $@ $* $0  special params
 #  CONTROL FLOW
-#    if COND; then ..; elif COND; then ..; else ..; fi
-#    for x in LIST; do ..; done          while COND; do ..; done
-#    case WORD in pat) .. ;; *) .. ;; esac
-#    break [N]   continue [N]   return [N]
-#    cmd && cmd   cmd || cmd   cmd ; cmd   ! cmd   ( subshell )
-#
-#  FUNCTIONS   name() { .. }      function name { .. }      local VAR=val
-#
-#  REDIRECTION
-#    > file   >> file   < file   2> file        cmd | cmd | cmd      cmd &
-#    << EOF .. EOF      <<'EOF' (literal)        <<- EOF (strip tabs)
-#
-#  BUILTINS
-#    cd (cd -, auto_cd)  pwd  echo (-n -e)  export  unset  type  read
-#    alias unalias  pushd popd dirs  source (.)  return local break continue
-#    jobs fg bg  exit
-#    ark-settings (edit config)  ark-reload (re-source it)  ark-reindex (rebuild index)
-#    private  uvar  history(-c)
-#
-#  LINE EDITING (at the prompt)
-#    Ctrl-A/E start/end   Ctrl-K/U kill to end/start   Ctrl-W kill word
-#    Ctrl-Y yank   Alt-←/→ word jump   Ctrl-R history search
-#    Tab complete   →/Ctrl-F accept autosuggestion   Up/Down history
+#    if COND; then ..; elif ..; else ..; fi     for x in LIST; do ..; done
+#    while COND; do ..; done    case WORD in pat) .. ;; *) .. ;; esac
+#    break [N]  continue [N]  return [N]   cmd && cmd || cmd ; cmd   ! cmd  ( sub )
+#  FUNCTIONS   name() { ..; }    function name { ..; }    local VAR=val
+#  REDIRECTION  > >> < 2>  |  &   << EOF   <<'EOF' (literal)   <<- EOF (strip tabs)
+#  BUILTINS  cd pwd echo(-n -e) export unset set type read alias unalias
+#            pushd popd dirs source(.) return local break continue jobs fg bg exit
+#            private uvar history  ark-settings ark-reload ark-reindex
+#  LINE EDITING  Ctrl-A/E  Ctrl-K/U kill  Ctrl-W word  Ctrl-Y yank  Alt-</>  Ctrl-R
+#            Tab complete   ->/Ctrl-F accept suggestion   Up/Down history
 )CFG";
 }
 
