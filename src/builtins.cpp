@@ -886,6 +886,79 @@ static int b_history(const std::vector<std::string>& argv, ShellState& state) {
     return 0;
 }
 
+// ── test / [ ──────────────────────────────────────────────────────────────
+// POSIX `test` and `[` as a builtin. Without this, every `[ ... ]` in a loop
+// forks /bin/[ -- a 100k-iteration `while [ ... ]` becomes 100k forks and
+// effectively hangs. Covers string, integer, and file tests plus ! and -a/-o.
+static bool testFileOp(char op, const std::string& path) {
+    struct stat st;
+    switch (op) {
+        case 'e': return ::stat(path.c_str(), &st) == 0;
+        case 'f': return ::stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode);
+        case 'd': return ::stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
+        case 's': return ::stat(path.c_str(), &st) == 0 && st.st_size > 0;
+        case 'r': return ::access(path.c_str(), R_OK) == 0;
+        case 'w': return ::access(path.c_str(), W_OK) == 0;
+        case 'x': return ::access(path.c_str(), X_OK) == 0;
+        case 'L': case 'h': return ::lstat(path.c_str(), &st) == 0 && S_ISLNK(st.st_mode);
+        default: return false;
+    }
+}
+static bool testAsInt(const std::string& s, long& out) {
+    if (s.empty()) return false;
+    char* end = nullptr;
+    long v = std::strtol(s.c_str(), &end, 10);
+    if (end != s.c_str() + s.size()) return false;
+    out = v;
+    return true;
+}
+static bool testBinary(const std::string& l, const std::string& op, const std::string& r) {
+    if (op == "=" || op == "==") return l == r;
+    if (op == "!=") return l != r;
+    if (op == "<") return l < r;
+    if (op == ">") return l > r;
+    long li, ri;
+    if (testAsInt(l, li) && testAsInt(r, ri)) {
+        if (op == "-eq") return li == ri;
+        if (op == "-ne") return li != ri;
+        if (op == "-lt") return li < ri;
+        if (op == "-le") return li <= ri;
+        if (op == "-gt") return li > ri;
+        if (op == "-ge") return li >= ri;
+    }
+    return false;
+}
+static bool testEval(const std::vector<std::string>& a) {
+    size_t n = a.size();
+    if (n == 0) return false;
+    if (n == 1) return !a[0].empty();
+    // -a (and) / -o (or): split at the FIRST -o (lowest precedence), then -a.
+    for (const char* conj : {"-o", "-a"})
+        for (size_t i = 1; i + 1 < n; i++)
+            if (a[i] == conj) {
+                bool lhs = testEval({a.begin(), a.begin() + i});
+                bool rhs = testEval({a.begin() + i + 1, a.end()});
+                return std::string(conj) == "-o" ? (lhs || rhs) : (lhs && rhs);
+            }
+    if (a[0] == "!") return !testEval({a.begin() + 1, a.end()});
+    if (n == 2) { // unary: -z/-n/-e/-f/-d/... arg
+        if (a[0] == "-z") return a[1].empty();
+        if (a[0] == "-n") return !a[1].empty();
+        if (a[0].size() == 2 && a[0][0] == '-') return testFileOp(a[0][1], a[1]);
+        return false;
+    }
+    if (n == 3) return testBinary(a[0], a[1], a[2]);
+    return false; // unsupported longer form
+}
+static int b_test(const std::vector<std::string>& argv, ShellState&) {
+    std::vector<std::string> a(argv.begin() + 1, argv.end());
+    if (!argv.empty() && argv[0] == "[") { // `[` requires a closing `]`
+        if (a.empty() || a.back() != "]") { std::cerr << "[: missing `]'\n"; return 2; }
+        a.pop_back();
+    }
+    return testEval(a) ? 0 : 1;
+}
+
 const std::unordered_map<std::string, BuiltinFn>& builtinRegistry() {
     static const std::unordered_map<std::string, BuiltinFn> reg = {
         {"cd", b_cd}, {"exit", b_exit}, {"pwd", b_pwd}, {"echo", b_echo}, {"set", b_set},
@@ -897,7 +970,7 @@ const std::unordered_map<std::string, BuiltinFn>& builtinRegistry() {
         {"source", b_source}, {".", b_source},
         {"return", b_return}, {"local", b_local},
         {"break", b_break}, {"continue", b_continue},
-        {"ls", b_ls},
+        {"ls", b_ls}, {"test", b_test}, {"[", b_test},
         {"private", b_private}, {"uvar", b_uvar}, {"history", b_history},
     };
     return reg;
