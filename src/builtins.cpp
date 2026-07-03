@@ -50,6 +50,8 @@ const char* arkDefaultConfig() {
 # export ARK_DEFAULT_TERMINAL=1    # "look like plain bash": strip all chrome, the
 #                                  #   banner, ghost text + highlighting; classic
 #                                  #   user@host:cwd$ prompt. (master off-switch)
+# export ARK_PLAIN_CHROME=1        # keep the pinned bars but flat/plain (no rounded
+#                                  #   LazyVim pills or colors); bare $ prompt
 # export ARK_AUTOCD=0              # type a directory name to cd into it
 # export ARK_SPELLCHECK=0          # "did you mean X?" on an unknown command
 # export ARK_BREW_SUGGEST=0        # brew reverse lookup for installs (rg->ripgrep)
