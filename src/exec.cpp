@@ -3,6 +3,7 @@
 #include "expand.h"
 #include "arkfeatures.h"
 #include "pkgmgr.h"
+#include "complete.h"
 #include "jobs.h"
 #include "lexer.h"
 #include "parser.h"
@@ -68,6 +69,24 @@ static void maybeAutocorrect(std::vector<std::string>& argv) {
     if (guess.empty() || levenshtein(cmd, guess) > 1) return;      // not confident enough
     std::cerr << "ark: correcting '" << cmd << "' → '" << guess << "'\n";
     argv[0] = guess;
+}
+
+// Auto-path (ARK_AUTO_PATH=1): if the command word isn't on $PATH but ark's
+// background file index knows exactly one executable by that name, run THAT full
+// path instead of failing. Off by default; only a bare name (no slash) that PATH
+// can't resolve, and only on an unambiguous single match (findIndexedExecutable
+// returns "" otherwise), so ark never silently runs the wrong thing.
+static void maybeAutoPath(std::vector<std::string>& argv) {
+    const char* on = getenv("ARK_AUTO_PATH");
+    if (!on || std::string(on) != "1" || argv.empty()) return;
+    const std::string cmd = argv[0];
+    if (cmd.empty() || cmd.find('/') != std::string::npos) return; // already a path
+    if (commandExists(cmd)) return;                                // PATH resolves it already
+    std::string full = findIndexedExecutable(cmd);
+    if (!full.empty()) {
+        std::cerr << "ark: " << cmd << " → " << full << "\n";
+        argv[0] = full;
+    }
 }
 
 // Real bug found live: neither Ctrl-C nor Ctrl-Z worked on ANY foreground
@@ -634,6 +653,7 @@ static int runCommand(Node* cmd, ShellState& state) {
     }
 
     maybeAutocorrect(argv); // ARK_AUTOCORRECT=1: fix a typo'd command before spawning
+    maybeAutoPath(argv);    // ARK_AUTO_PATH=1: resolve a non-$PATH program via the file index
 
     std::vector<char*> cargv;
     for (auto& a : argv) cargv.push_back(const_cast<char*>(a.c_str()));
