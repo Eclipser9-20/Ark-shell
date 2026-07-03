@@ -29,14 +29,23 @@ private:
     std::vector<Token> toks_;
     size_t pos_ = 0;
 
-    const Token& peek() const { return toks_[pos_]; }
+    // Bounds-safe: past the end, return the trailing End sentinel instead of
+    // reading OOB. The lexer always appends an End token, so toks_ is never
+    // empty and back() is always End. This is the backstop that keeps any
+    // hand-written construct that over-advances (a truncated `for`/`case`/
+    // `function`/redirect) from reading past the vector -- the loops below ALSO
+    // check End so they terminate + throw a clean incomplete error.
+    const Token& peek() const { return pos_ < toks_.size() ? toks_[pos_] : toks_.back(); }
     // Lookahead: kind of the token `off` positions ahead, or End past the end
     // (toks_ always has a trailing End sentinel, so this never reads OOB for
     // small offsets used at statement start).
     TokKind peekKind(size_t off) const {
         return pos_ + off < toks_.size() ? toks_[pos_ + off].kind : TokKind::End;
     }
-    const Token& advance() { return toks_[pos_++]; }
+    const Token& advance() {
+        if (pos_ < toks_.size()) return toks_[pos_++]; // never step past the End sentinel
+        return toks_.back();
+    }
     bool check(TokKind k) const { return peek().kind == k; }
     void expect(TokKind k, const std::string& what) {
         if (!check(k)) {

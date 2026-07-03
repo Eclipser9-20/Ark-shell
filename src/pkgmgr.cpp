@@ -22,8 +22,13 @@ std::string basenameOf(const std::string& p) {
     return s == std::string::npos ? p : p.substr(s + 1);
 }
 
-// True if `path` is an executable regular file.
-bool isExec(const std::string& path) { return access(path.c_str(), X_OK) == 0; }
+// True if `path` is an executable REGULAR file. access(X_OK) alone is also true
+// for a directory with the execute (search) bit, which would let a $PATH dir
+// containing a like-named subdir masquerade as the manager binary -> exec 127.
+bool isExec(const std::string& path) {
+    struct stat st;
+    return access(path.c_str(), X_OK) == 0 && stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode);
+}
 
 // First $PATH directory containing an executable `name`, joined; "" if none.
 // ark never shells out to `which`, so this is the in-process equivalent.

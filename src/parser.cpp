@@ -27,6 +27,9 @@ std::unique_ptr<Node> Parser::parseCommand() {
             k == TokKind::RedirAppend || k == TokKind::RedirErrOut) {
             Redirect::Kind rk = redirKindFor(k);
             advance(); // consume the operator
+            if (!check(TokKind::Word)) // a redirection needs a filename word next
+                throw ParseError(peek().line, peek().col, "expected filename after redirection",
+                                  peek().kind == TokKind::End);
             std::string target = advance().text; // the filename word
             node->redirects.push_back(Redirect{rk, target});
             continue;
@@ -132,7 +135,11 @@ std::unique_ptr<Node> Parser::parseFor() {
     fn->kind = NodeKind::For;
     fn->forVar = advance().text; // variable name
     advance(); // 'in'
-    while (!check(TokKind::Semi) && !check(TokKind::Newline)) {
+    // Stop at a statement end (Semi/Newline/End) OR `do` -- crucially including
+    // End, or a truncated `for x in a b` (no trailing separator, the normal
+    // interactive case) loops forever pushing the End sentinel's empty text.
+    // expect(Do) below then reports the missing `do` as incomplete.
+    while (!atStatementEnd() && !check(TokKind::Do)) {
         fn->forWords.push_back(advance().text);
     }
     while (check(TokKind::Semi) || check(TokKind::Newline)) advance(); // separator(s) before 'do'

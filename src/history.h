@@ -26,6 +26,7 @@ public:
 
 private:
     void ingestFrom(const std::string& path); // shared body of load-tail/sync
+    void capMemory();                          // bound in-memory growth
 
     std::vector<std::string> lines_;
     std::vector<std::string> cwds_;      // parallel to lines_; "" = unknown cwd

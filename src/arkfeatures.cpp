@@ -2,6 +2,7 @@
 #include "builtins.h"
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -40,11 +41,19 @@ static std::string captureCommand(const std::vector<std::string>& argv) {
     close(pipefd[1]);
     std::string out;
     char buf[4096];
-    ssize_t n;
-    while ((n = read(pipefd[0], buf, sizeof(buf))) > 0) out.append(buf, (size_t)n);
+    for (;;) {
+        ssize_t n = read(pipefd[0], buf, sizeof(buf));
+        if (n > 0) { out.append(buf, (size_t)n); continue; }
+        if (n < 0 && errno == EINTR) continue; // ark's 1Hz SIGALRM idle ticker (no
+                                                // SA_RESTART) or SIGCHLD interrupts the
+                                                // read -- retry, don't treat as EOF, or
+                                                // `brew formulae` output gets truncated
+                                                // and cached wrong for 7 days.
+        break; // real EOF (0) or error
+    }
     close(pipefd[0]);
     int status = 0;
-    waitpid(pid, &status, 0);
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {} // don't leak a zombie
     return out;
 }
 

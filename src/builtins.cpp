@@ -197,7 +197,7 @@ static std::string nuRelTime(time_t t, time_t now) {
 static int nuLs(const std::string& dir, time_t now) {
     DIR* d = opendir(dir.c_str());
     if (!d) { std::cerr << "ls: cannot open " << dir << "\n"; return 1; }
-    struct Row { std::string idx, name, type, size, mod; };
+    struct Row { std::string idx, name, type, size, mod, color; };
     std::vector<Row> rows;
     struct dirent* e;
     std::vector<std::string> names;
@@ -220,6 +220,14 @@ static int nuLs(const std::string& dir, time_t now) {
             r.type = S_ISDIR(st.st_mode) ? "dir" : "file";
             r.size = S_ISDIR(st.st_mode) ? "" : nuHumanSize(st.st_size);
             r.mod = nuRelTime(st.st_mtime, now);
+        }
+        // Name color by type (lstat so a symlink is detected, not its target):
+        // symlink cyan, dir blue, executable green, plain file uncolored.
+        struct stat lst;
+        if (lstat(full.c_str(), &lst) == 0) {
+            if (S_ISLNK(lst.st_mode)) r.color = "\x1b[36m";
+            else if (S_ISDIR(lst.st_mode)) r.color = "\x1b[34m";
+            else if (lst.st_mode & S_IXUSR) r.color = "\x1b[32m";
         }
         rows.push_back(std::move(r));
     }
@@ -244,7 +252,13 @@ static int nuLs(const std::string& dir, time_t now) {
     for (auto& r : rows) {
         std::string* c[5] = {&r.idx, &r.name, &r.type, &r.size, &r.mod};
         std::cout << V;
-        for (int k = 0; k < 5; k++) std::cout << " " << pad(*c[k], w[k]) << " " << V;
+        for (int k = 0; k < 5; k++) {
+            if (k == 1 && !r.color.empty()) // color the name text; pad in plain spaces
+                std::cout << " " << r.color << r.name << "\x1b[0m"
+                          << std::string(w[k] - r.name.size(), ' ') << " " << V;
+            else
+                std::cout << " " << pad(*c[k], w[k]) << " " << V;
+        }
         std::cout << "\n";
     }
     std::cout << rule("\xe2\x95\xb0", "\xe2\x94\xb4", "\xe2\x95\xaf") << "\n"; // ╰┴╯
@@ -260,12 +274,22 @@ static int b_ls(const std::vector<std::string>& argv, ShellState& state) {
         if (dir.empty()) dir = ".";
         return nuLs(dir, time(nullptr));
     }
-    // Passthrough to the real ls.
+    // Passthrough to the real ls, COLORIZED by default (dirs/symlinks/exec/etc.,
+    // like `ls --color` or most distros' default alias). ARK_LS_COLOR=0 disables.
+    // BSD/macOS ls colorizes when CLICOLOR is set (and stdout is a tty); GNU ls
+    // takes --color=auto -- so pick the right mechanism per platform. Any explicit
+    // color flag the user passes comes AFTER and wins.
+    bool lsColor = !(getenv("ARK_LS_COLOR") && std::string(getenv("ARK_LS_COLOR")) == "0");
     BlockSigchld guard;
     pid_t pid = fork();
     if (pid == 0) {
         std::vector<char*> av;
         av.push_back(const_cast<char*>("ls"));
+#if defined(__APPLE__)
+        if (lsColor) setenv("CLICOLOR", "1", 1);
+#else
+        if (lsColor) av.push_back(const_cast<char*>("--color=auto"));
+#endif
         for (size_t i = 1; i < argv.size(); i++) av.push_back(const_cast<char*>(argv[i].c_str()));
         av.push_back(nullptr);
         execvp("ls", av.data());
