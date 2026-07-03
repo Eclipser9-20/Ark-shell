@@ -5,3 +5,5 @@ ark
 backups/
 docs/superpowers/
 .config/
+ark-asan
+ark-asan.dSYM/
