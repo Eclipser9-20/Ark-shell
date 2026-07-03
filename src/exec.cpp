@@ -5,6 +5,7 @@
 #include "pkgmgr.h"
 #include "complete.h"
 #include "overlay.h"
+#include "chrome.h"
 #include "jobs.h"
 #include "lexer.h"
 #include "parser.h"
@@ -388,6 +389,13 @@ static int runPipeline(Node* pipeline, ShellState& state) {
     std::vector<pid_t> pids(n, -1);
     int prevReadFd = -1;
 
+    // Same full-screen handoff as runCommand(): if a foreground pipeline ends in
+    // a pager/TUI (`git log | less`, `dmesg | less`), it too must escape ark's
+    // pinned-bar scroll region. Done once, before any stage is spawned, so no
+    // stage ever draws inside the constrained band.
+    if (!pipeline->background && tcgetpgrp(STDIN_FILENO) == getpgrp())
+        releaseScrollRegionForChild();
+
     for (size_t i = 0; i < n; i++) {
         int pipeFds[2] = {-1, -1};
         bool hasNext = i + 1 < n;
@@ -704,6 +712,13 @@ static int runCommand(Node* cmd, ShellState& state) {
     sigset_t defaultSigs = foregroundDefaultSignals();
     posix_spawnattr_setsigdefault(&attr, &defaultSigs);
     posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGDEF);
+
+    // Hand the child the full screen (drop ark's pinned-bar scroll region) so a
+    // pager/editor/TUI -- man, less, vim, top, claude -- isn't trapped in the
+    // 2..N-1 band and renders correctly. Only when WE currently own the terminal
+    // (a `cmd &` background wrapper must not touch the real foreground's screen).
+    // reassertChrome() at the next command boundary re-establishes the region.
+    if (tcgetpgrp(STDIN_FILENO) == getpgrp()) releaseScrollRegionForChild();
 
     // Same SIGCHLD race as above, guarded the same way.
     BlockSigchld guard;

@@ -199,6 +199,20 @@ void setScrollRegion() {
     fflush(stdout);
 }
 
+void releaseScrollRegionForChild() {
+    // When chrome painted no bars there's no region to drop -- and emitting the
+    // reset anyway is pointless churn.
+    if (const char* c = getenv("ARK_CHROME"); c && std::string(c) == "0") return;
+    // \0337  save cursor (DECSC)         -- octal \033 == ESC, kept as \0NN so
+    // \033[r reset scroll region (full)     the trailing 7/8 aren't swallowed
+    //        -- \033[r ALSO homes the cursor to (1,1) on Ghostty/xterm, which
+    //        is why it must be bracketed
+    // \0338  restore cursor (DECRC) so the child (and any plain-command output
+    //        that follows) resumes exactly where the prompt left off
+    printf("\0337\033[r\0338");
+    fflush(stdout);
+}
+
 static std::string formatSession(double seconds) {
     int total = (int)seconds;
     int h = total / 3600, m = (total % 3600) / 60, s = total % 60;

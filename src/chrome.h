@@ -37,6 +37,21 @@ std::string findGitBranch(const std::string& cwd);
 // area in between).
 void setScrollRegion();
 
+// Hands the WHOLE screen to a foreground child by dropping the DECSTBM scroll
+// region ark keeps for its pinned bars. Without this, a full-screen program --
+// a pager (less, and therefore `man`/`git log`), an editor (vim/nano), or a
+// TUI (top/htop/claude) -- inherits ark's constrained 2..N-1 band: it enters
+// the alternate screen but is never told it only has N-2 rows, so its cursor
+// math fights the region and the page renders blank or garbled (the exact
+// "man shows nothing" bug). The reset is bracketed with DECSC/DECRC (\x1b7 /
+// \x1b8) because \x1b[r itself homes the cursor to (1,1) on some terminals
+// (Ghostty included) -- saving and restoring keeps the visible cursor put, so
+// this is invisible for a NON-full-screen command (plain `ls`) too. No-op when
+// chrome painted no region (ARK_CHROME=0). reassertChrome() re-establishes the
+// region after the child exits, so this only lends the full screen for the
+// duration of the child.
+void releaseScrollRegionForChild();
+
 // The top-bar content (rounded [dir][branch] pills) as a STRING. Printed inline
 // as a header above each prompt (main.cpp) rather than pinned to row 1 -- so it
 // scrolls with output into the terminal's scrollback. Pinning row 1 forced the
