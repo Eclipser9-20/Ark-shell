@@ -185,6 +185,47 @@ static void applyRedirectsInChild(const std::vector<Redirect>& redirects, ShellS
     }
 }
 
+// Dispatch a node applying background/negate but NOT its own (compound)
+// redirects -- used where redirects were already applied by the caller
+// (a pipeline stage's forked child).
+static int execNodeNoRedir(Node* node, ShellState& state);
+
+// Which fd does a redirect target in the current process? (mirrors the
+// target choices in applyRedirectsInChild.)
+static int redirectTargetFd(const Redirect& r) {
+    switch (r.kind) {
+        case Redirect::Kind::In: return r.fd >= 0 ? r.fd : STDIN_FILENO;
+        case Redirect::Kind::Out:
+        case Redirect::Kind::Append: return r.fd >= 0 ? r.fd : STDOUT_FILENO;
+        case Redirect::Kind::ErrOut: return STDERR_FILENO;
+        case Redirect::Kind::DupFd: return r.fd;
+        case Redirect::Kind::HereDoc: return STDIN_FILENO;
+    }
+    return STDOUT_FILENO;
+}
+
+// Apply redirects to the CURRENT process, first saving the affected fds so they
+// can be restored afterward. Used for compound commands (`for..done > f`), which
+// run in-shell -- their variable changes must persist, so we can't just fork.
+static std::vector<std::pair<int, int>> applyRedirectsSaving(const std::vector<Redirect>& redirects, ShellState& state) {
+    std::vector<std::pair<int, int>> saved; // (targetFd, savedCopyFd)
+    for (const auto& r : redirects) {
+        int target = redirectTargetFd(r);
+        int copy = fcntl(target, F_DUPFD_CLOEXEC, 10); // -1 if target wasn't open
+        saved.emplace_back(target, copy);
+    }
+    applyRedirectsInChild(redirects, state); // does the actual opens + dup2s
+    return saved;
+}
+
+static void restoreRedirects(std::vector<std::pair<int, int>>& saved) {
+    // Restore in reverse so overlapping targets unwind correctly.
+    for (auto it = saved.rbegin(); it != saved.rend(); ++it) {
+        int target = it->first, copy = it->second;
+        if (copy >= 0) { dup2(copy, target); close(copy); }
+    }
+}
+
 static std::string buildCmdline(Node* node) {
     std::string cmdline;
     auto appendWords = [&](Node* cmd) {
@@ -201,14 +242,22 @@ static std::string buildCmdline(Node* node) {
 static int runPipelineStage(Node* cmd, ShellState& state, int inFd, int outFd, pid_t& pidOut) {
     // A subshell stage of a pipeline (`(a; b) | c` or `c | (a; b)`): fork,
     // wire the pipe fds, and run the subshell body in the child.
-    if (cmd->kind == NodeKind::Subshell) {
+    // A subshell OR a compound command (if/while/for/case) as a pipeline stage:
+    // fork, wire the pipe fds + the stage's own redirects, and run it in the
+    // child. This is what makes `for ..; done | wc` and `cmd | while read` work.
+    if (cmd->kind == NodeKind::Subshell || cmd->kind == NodeKind::If ||
+        cmd->kind == NodeKind::While || cmd->kind == NodeKind::For ||
+        cmd->kind == NodeKind::Case) {
         std::cout.flush();
         fflush(stdout);
         pid_t pid = fork();
         if (pid == 0) {
             if (inFd != -1) { dup2(inFd, STDIN_FILENO); close(inFd); }
             if (outFd != -1) { dup2(outFd, STDOUT_FILENO); close(outFd); }
-            int rc = execNode(cmd->children[0].get(), state);
+            applyRedirectsInChild(cmd->redirects, state);
+            int rc = (cmd->kind == NodeKind::Subshell)
+                         ? execNode(cmd->children[0].get(), state)
+                         : execNodeNoRedir(cmd, state);
             std::cout.flush();
             _exit(rc & 0xff);
         }
@@ -836,7 +885,7 @@ static int execNodeDispatch(Node* node, ShellState& state) {
 // (POSIX allows it anywhere a pipeline appears, e.g. inside an if-branch) --
 // handled centrally here so every node kind gets it uniformly instead of
 // duplicating background logic in runCommand AND runPipeline separately.
-int execNode(Node* node, ShellState& state) {
+static int execNodeNoRedir(Node* node, ShellState& state) {
     if (node->background && (node->kind == NodeKind::Command || node->kind == NodeKind::Pipeline ||
                              node->kind == NodeKind::Subshell)) {
         std::cout.flush(); // flush BEFORE forking -- see captureCommandOutput()
@@ -865,6 +914,23 @@ int execNode(Node* node, ShellState& state) {
     int status = execNodeDispatch(node, state);
     if (node->negate) status = (status == 0) ? 1 : 0; // leading `!`
     return status;
+}
+
+// Public entry point. Compound commands (if/while/for/case) run in-shell, so
+// their trailing redirects (`for ..; done > f`) are applied to the current
+// process with save/restore around the body. Command/Subshell/Pipeline manage
+// their own redirects (in runCommand / the forked child), so pass through.
+int execNode(Node* node, ShellState& state) {
+    bool wrap = !node->redirects.empty() &&
+                (node->kind == NodeKind::If || node->kind == NodeKind::While ||
+                 node->kind == NodeKind::For || node->kind == NodeKind::Case);
+    if (!wrap) return execNodeNoRedir(node, state);
+    auto saved = applyRedirectsSaving(node->redirects, state);
+    int rc = execNodeNoRedir(node, state);
+    std::cout.flush();
+    fflush(stdout); // flush buffered output to the redirected fd before restoring
+    restoreRedirects(saved);
+    return rc;
 }
 
 std::string captureCommandOutput(const std::string& cmd, ShellState& state) {
