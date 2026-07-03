@@ -4,6 +4,7 @@
 #include "arkfeatures.h"
 #include "pkgmgr.h"
 #include "complete.h"
+#include "overlay.h"
 #include "jobs.h"
 #include "lexer.h"
 #include "parser.h"
@@ -654,6 +655,18 @@ static int runCommand(Node* cmd, ShellState& state) {
 
     maybeAutocorrect(argv); // ARK_AUTOCORRECT=1: fix a typo'd command before spawning
     maybeAutoPath(argv);    // ARK_AUTO_PATH=1: resolve a non-$PATH program via the file index
+
+    // Overlay compositor (ARK_OVERLAY=1, experimental): run the command through
+    // ark's own PTY so its output can be mirrored into the pinned "deadzone" AND
+    // captured for ark's own scrollback. Only for a plain foreground command with
+    // no redirects (those still need the posix_spawn file-actions path); a PTY
+    // setup failure returns -1 and falls through to the normal spawn below.
+    if (overlay::enabled() && cmd->redirects.empty()) {
+        std::cout.flush();
+        fflush(stdout);
+        int st = overlay::run(argv, environ);
+        if (st >= 0) return st;
+    }
 
     std::vector<char*> cargv;
     for (auto& a : argv) cargv.push_back(const_cast<char*>(a.c_str()));
