@@ -23,15 +23,26 @@ std::unique_ptr<Node> Parser::parseCommand() {
             node->redirects.push_back(Redirect{Redirect::Kind::HereDoc, t.text, !t.heredocNoExpand});
             continue;
         }
+        if (k == TokKind::RedirDup) {
+            // `N>&M` / `>&M` / `<&M` -- duplicate one fd onto another; no filename.
+            const Token& t = advance();
+            Redirect r{Redirect::Kind::DupFd, "", true};
+            r.fd = t.fd; r.dupFd = t.dupFd;
+            node->redirects.push_back(r);
+            continue;
+        }
         if (k == TokKind::RedirIn || k == TokKind::RedirOut ||
             k == TokKind::RedirAppend || k == TokKind::RedirErrOut) {
             Redirect::Kind rk = redirKindFor(k);
-            advance(); // consume the operator
+            const Token& op = advance(); // consume the operator (carries the fd)
+            int fd = op.fd;
             if (!check(TokKind::Word)) // a redirection needs a filename word next
                 throw ParseError(peek().line, peek().col, "expected filename after redirection",
                                   peek().kind == TokKind::End);
             std::string target = advance().text; // the filename word
-            node->redirects.push_back(Redirect{rk, target});
+            Redirect r{rk, target, true};
+            r.fd = fd;
+            node->redirects.push_back(r);
             continue;
         }
         // Pipe/And/Or/Amp/LParen/RParen end a simple command in this task;

@@ -130,16 +130,21 @@ static void applyRedirectsFileActions(const std::vector<Redirect>& redirects, po
     for (const auto& r : redirects) {
         switch (r.kind) {
             case Redirect::Kind::In:
-                posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, r.target.c_str(), O_RDONLY, 0);
+                posix_spawn_file_actions_addopen(&actions, r.fd >= 0 ? r.fd : STDIN_FILENO, r.target.c_str(), O_RDONLY, 0);
                 break;
             case Redirect::Kind::Out:
-                posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, r.target.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                posix_spawn_file_actions_addopen(&actions, r.fd >= 0 ? r.fd : STDOUT_FILENO, r.target.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
                 break;
             case Redirect::Kind::Append:
-                posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, r.target.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
+                posix_spawn_file_actions_addopen(&actions, r.fd >= 0 ? r.fd : STDOUT_FILENO, r.target.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
                 break;
             case Redirect::Kind::ErrOut:
                 posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, r.target.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                break;
+            case Redirect::Kind::DupFd:
+                // `N>&M` -> make fd N a copy of fd M; `N>&-` (dupFd<0) closes N.
+                if (r.dupFd >= 0) posix_spawn_file_actions_adddup2(&actions, r.dupFd, r.fd);
+                else posix_spawn_file_actions_addclose(&actions, r.fd);
                 break;
             case Redirect::Kind::HereDoc: {
                 int fd = heredocTempFd(heredocBody(r, state));
@@ -161,12 +166,19 @@ static void applyRedirectsInChild(const std::vector<Redirect>& redirects, ShellS
             if (fd != -1) { dup2(fd, STDIN_FILENO); close(fd); }
             continue;
         }
+        if (r.kind == Redirect::Kind::DupFd) {
+            // `N>&M` -> fd N becomes a copy of fd M (current value); `N>&-` closes N.
+            if (r.dupFd >= 0) dup2(r.dupFd, r.fd);
+            else close(r.fd);
+            continue;
+        }
         int fd = -1, target = -1;
         switch (r.kind) {
-            case Redirect::Kind::In: fd = open(r.target.c_str(), O_RDONLY); target = STDIN_FILENO; break;
-            case Redirect::Kind::Out: fd = open(r.target.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644); target = STDOUT_FILENO; break;
-            case Redirect::Kind::Append: fd = open(r.target.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644); target = STDOUT_FILENO; break;
+            case Redirect::Kind::In: fd = open(r.target.c_str(), O_RDONLY); target = r.fd >= 0 ? r.fd : STDIN_FILENO; break;
+            case Redirect::Kind::Out: fd = open(r.target.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644); target = r.fd >= 0 ? r.fd : STDOUT_FILENO; break;
+            case Redirect::Kind::Append: fd = open(r.target.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644); target = r.fd >= 0 ? r.fd : STDOUT_FILENO; break;
             case Redirect::Kind::ErrOut: fd = open(r.target.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644); target = STDERR_FILENO; break;
+            case Redirect::Kind::DupFd: break;  // handled above
             case Redirect::Kind::HereDoc: break; // handled above
         }
         if (fd != -1) { dup2(fd, target); close(fd); }
