@@ -148,6 +148,15 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
     int histIndex = (int)history.lines().size(); // one-past-the-end = "not browsing history"
     std::string pendingLine; // the in-progress line, stashed when you ↑ into history
     std::string killBuffer; // last text erased by Ctrl-K/U/W, pastable with Ctrl-Y
+    // Live-autocorrect (ARK_LIVE_AUTOCORRECT=1) state: when the command word is
+    // a confident typo and you press space, it's fixed in place. justCorrected is
+    // true only for the ONE keystroke after a fix, so a single backspace then
+    // undoes it (restoring your typo) and acSuppressed keeps us from re-fixing
+    // that same word -- until you edit it and type a fresh one.
+    bool justCorrected = false;
+    size_t acEnd = 0;              // cursor position right after a just-applied fix
+    std::string acOriginal;       // the typo, for one-backspace undo
+    std::string acSuppressed;     // a word you rejected; don't auto-fix it again
 
     // Context-Aware Autosuggestions: prefer history entries that were run in
     // THIS directory. Captured once at readLine entry (cwd can't change mid-
@@ -309,6 +318,10 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
         if (n < 0 && errno == EINTR) continue;
         if (n <= 0) return std::nullopt; // EOF/error
 
+        // A just-applied live-autocorrect is undoable for exactly ONE keystroke.
+        bool justCorrectedNow = justCorrected;
+        justCorrected = false;
+
         if (c == '\r' || c == '\n') { endLine(); return buf; }
         if (c == 3) {
             // Ctrl-C at the prompt: leave the typed text on screen, show "^C",
@@ -332,6 +345,15 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
             continue;
         }
         if (c == 127 || c == 8) { // Backspace
+            // Undo a just-applied live-autocorrect: one backspace right after a
+            // fix restores your original typo and stops re-fixing that word.
+            if (justCorrectedNow && cursor == acEnd && !acOriginal.empty()) {
+                buf = acOriginal + buf.substr(acEnd);
+                cursor = acOriginal.size();
+                acSuppressed = acOriginal;
+                redraw();
+                continue;
+            }
             if (cursor > 0) { buf.erase(cursor - 1, 1); cursor--; redraw(); }
             continue;
         }
@@ -583,6 +605,24 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
                 }
             }
             continue;
+        }
+        // Live autocorrect (ARK_LIVE_AUTOCORRECT=1): pressing space right after a
+        // typo'd COMMAND word (no space in the buffer yet, at its end) fixes it in
+        // place before the space is inserted. Only an unrejected word with a
+        // confident single-edit fix; the space is added by the insert below and
+        // sets up the one-backspace undo.
+        if (c == ' ' && cursor == buf.size() && !buf.empty() && buf.find(' ') == std::string::npos) {
+            if (const char* on = getenv("ARK_LIVE_AUTOCORRECT");
+                on && std::string(on) == "1" && buf != acSuppressed && !commandExists(buf)) {
+                std::string fix = suggestCommand(buf);
+                if (!fix.empty() && fix != buf && levenshtein(buf, fix) == 1 && commandExists(fix)) {
+                    acOriginal = buf;
+                    buf = fix;
+                    cursor = buf.size();
+                    justCorrected = true;
+                    acEnd = cursor + 1; // just after the space about to be inserted
+                }
+            }
         }
         // Only insert printable ASCII (0x20-0x7e) or UTF-8 bytes (high bit set).
         // Any other unhandled control byte -- Ctrl-B (0x02), Ctrl-T, a stray

@@ -63,6 +63,9 @@ const char* arkDefaultConfig() {
 # ─── FEATURES THAT ARE OFF BY DEFAULT (set to 1 to turn ON) ─────────────────
 # export ARK_NU_MODE=1             # nushell-style: `ls` prints a bordered table
 # export ARK_AUTOCORRECT=1         # auto-fix a typo'd command and run it (gti->git)
+# export ARK_LIVE_AUTOCORRECT=1   # fix a typo'd command AS YOU TYPE (space commits
+#                                 #   the fix; one Backspace undoes it)
+# export ARK_AUTO_PATH=1          # run a program found only in the file index (not $PATH)
 # export ARK_PRIVATE=1             # start in private mode (nothing saved to history)
 
 # ─── STARTUP BANNER (only shown when ARK_BANNER is on) ─────────────────────
