@@ -72,6 +72,7 @@ const char* arkDefaultConfig() {
 # export ARK_BANNER_SUBTITLE="heaven"  # tagline shown under the logo
 
 # ─── PROMPT / TERMINAL BEHAVIOR ────────────────────────────────────────────
+# export ARK_EXIT_CODE=0          # don't show the failed exit code in the prompt
 # export ARK_CTRLC=append          # Ctrl-C shows ^C after the line (default: own line)
 # export ARK_DSR_MS=40             # advanced: cursor-query timeout in ms (perf tuning;
 #                                  #   lower = snappier, too low may misplace chrome)

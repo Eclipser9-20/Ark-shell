@@ -63,7 +63,13 @@ static std::string buildPrompt(const ShellState& state, const std::string& home)
     char clock[8];
     strftime(clock, sizeof(clock), "%H:%M", &local);
     std::string arrowColor = state.lastStatus == 0 ? tn::GREEN : tn::RED;
-    return std::string(tn::COMMENT) + clock + " " + arrowColor + "\xe2\x9d\xaf" + tn::R + " ";
+    // When the last command failed, show its exit code in red right before the
+    // arrow (`10:26 ✘2 ❯`). Purely visual; ARK_EXIT_CODE=0 turns it off.
+    std::string code;
+    if (state.lastStatus != 0 &&
+        !(getenv("ARK_EXIT_CODE") && std::string(getenv("ARK_EXIT_CODE")) == "0"))
+        code = std::string(tn::RED) + "\xe2\x9c\x98" + std::to_string(state.lastStatus) + tn::R + " ";
+    return std::string(tn::COMMENT) + clock + " " + code + arrowColor + "\xe2\x9d\xaf" + tn::R + " ";
 }
 
 static std::string continuationPrompt() {
