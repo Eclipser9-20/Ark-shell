@@ -148,18 +148,24 @@ static std::string heredocBody(const Redirect& r, ShellState& state) {
 static void applyRedirectsFileActions(const std::vector<Redirect>& redirects, posix_spawn_file_actions_t& actions,
                                        ShellState& state, std::vector<int>& heredocFds) {
     for (const auto& r : redirects) {
+        // A file-redirect target undergoes expansion (parameters/tilde/command
+        // substitution), no word-splitting -- so `> $F` / `> ~/log` / `> $(f)`
+        // work. addopen copies the path, so a per-iteration temporary is fine.
+        std::string t = (r.kind == Redirect::Kind::In || r.kind == Redirect::Kind::Out ||
+                         r.kind == Redirect::Kind::Append || r.kind == Redirect::Kind::ErrOut)
+                            ? expandWord(r.target, state) : std::string();
         switch (r.kind) {
             case Redirect::Kind::In:
-                posix_spawn_file_actions_addopen(&actions, r.fd >= 0 ? r.fd : STDIN_FILENO, r.target.c_str(), O_RDONLY, 0);
+                posix_spawn_file_actions_addopen(&actions, r.fd >= 0 ? r.fd : STDIN_FILENO, t.c_str(), O_RDONLY, 0);
                 break;
             case Redirect::Kind::Out:
-                posix_spawn_file_actions_addopen(&actions, r.fd >= 0 ? r.fd : STDOUT_FILENO, r.target.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                posix_spawn_file_actions_addopen(&actions, r.fd >= 0 ? r.fd : STDOUT_FILENO, t.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
                 break;
             case Redirect::Kind::Append:
-                posix_spawn_file_actions_addopen(&actions, r.fd >= 0 ? r.fd : STDOUT_FILENO, r.target.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
+                posix_spawn_file_actions_addopen(&actions, r.fd >= 0 ? r.fd : STDOUT_FILENO, t.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
                 break;
             case Redirect::Kind::ErrOut:
-                posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, r.target.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, t.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
                 break;
             case Redirect::Kind::DupFd:
                 // `N>&M` -> make fd N a copy of fd M; `N>&-` (dupFd<0) closes N.
@@ -192,12 +198,13 @@ static void applyRedirectsInChild(const std::vector<Redirect>& redirects, ShellS
             else close(r.fd);
             continue;
         }
+        std::string t = expandWord(r.target, state); // expand $VAR / ~ / $(cmd), no split
         int fd = -1, target = -1;
         switch (r.kind) {
-            case Redirect::Kind::In: fd = open(r.target.c_str(), O_RDONLY); target = r.fd >= 0 ? r.fd : STDIN_FILENO; break;
-            case Redirect::Kind::Out: fd = open(r.target.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644); target = r.fd >= 0 ? r.fd : STDOUT_FILENO; break;
-            case Redirect::Kind::Append: fd = open(r.target.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644); target = r.fd >= 0 ? r.fd : STDOUT_FILENO; break;
-            case Redirect::Kind::ErrOut: fd = open(r.target.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644); target = STDERR_FILENO; break;
+            case Redirect::Kind::In: fd = open(t.c_str(), O_RDONLY); target = r.fd >= 0 ? r.fd : STDIN_FILENO; break;
+            case Redirect::Kind::Out: fd = open(t.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644); target = r.fd >= 0 ? r.fd : STDOUT_FILENO; break;
+            case Redirect::Kind::Append: fd = open(t.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644); target = r.fd >= 0 ? r.fd : STDOUT_FILENO; break;
+            case Redirect::Kind::ErrOut: fd = open(t.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644); target = STDERR_FILENO; break;
             case Redirect::Kind::DupFd: break;  // handled above
             case Redirect::Kind::HereDoc: break; // handled above
         }

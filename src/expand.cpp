@@ -138,8 +138,11 @@ struct ArithEval {
     long parseShift() {
         long v = parseAdd();
         for (;;) {
-            if (eat("<<")) v = v << parseAdd();
-            else if (eat(">>")) v = v >> parseAdd();
+            // Guard the shift COUNT: a count >= 64 or < 0 is undefined behavior
+            // (UBSan-flagged on `$(( 1<<200 ))`); define it as 0 like most shells.
+            // Cast to unsigned for << so a negative value doesn't shift-UB either.
+            if (eat("<<")) { long s = parseAdd(); v = (s >= 0 && s < 64) ? (long)((unsigned long)v << s) : 0; }
+            else if (eat(">>")) { long s = parseAdd(); v = (s >= 0 && s < 64) ? (v >> s) : 0; }
             else break;
         }
         return v;
@@ -243,14 +246,17 @@ static std::string expandParam(const std::string& inner, const ShellState& state
         // substring: parse offset[:length]
         std::string body = rest.substr(1);
         size_t colon2 = body.find(':');
+        bool hasLength = colon2 != std::string::npos; // distinguishes ${x:0} from ${x:0:-1}
         long offset = std::strtol(body.substr(0, colon2).c_str(), nullptr, 10);
-        long length = colon2 == std::string::npos ? -1 : std::strtol(body.substr(colon2 + 1).c_str(), nullptr, 10);
+        long length = hasLength ? std::strtol(body.substr(colon2 + 1).c_str(), nullptr, 10) : 0;
         long n = (long)val.size();
-        if (offset < 0) offset = n + offset; // negative offset counts from end
+        if (offset < 0) offset = n + offset; // negative offset counts from the end
         if (offset < 0) offset = 0;
         if (offset > n) return "";
-        if (length < 0) return val.substr(offset); // to end
-        long end = offset + length;
+        if (!hasLength) return val.substr(offset); // no length -> to the end
+        // A NEGATIVE length is an index from the END (bash): ${x:0:-1} strips the
+        // last char. A positive length is a count from `offset`.
+        long end = length < 0 ? n + length : offset + length;
         if (end > n) end = n;
         if (end < offset) end = offset;
         return val.substr(offset, end - offset);
