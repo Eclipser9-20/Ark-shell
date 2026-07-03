@@ -714,7 +714,7 @@ static int runCommand(Node* cmd, ShellState& state) {
     posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGDEF);
 
     // Hand the child the full screen (drop ark's pinned-bar scroll region) so a
-    // pager/editor/TUI -- man, less, vim, top, claude -- isn't trapped in the
+    // pager/editor/TUI -- man, less, vim, top, lazygit -- isn't trapped in the
     // 2..N-1 band and renders correctly. Only when WE currently own the terminal
     // (a `cmd &` background wrapper must not touch the real foreground's screen).
     // reassertChrome() at the next command boundary re-establishes the region.

@@ -1,5 +1,7 @@
 build/
+build-asan/
 ark
+pistin
 .DS_Store
 *.swp
 backups/

@@ -40,7 +40,7 @@ void setScrollRegion();
 // Hands the WHOLE screen to a foreground child by dropping the DECSTBM scroll
 // region ark keeps for its pinned bars. Without this, a full-screen program --
 // a pager (less, and therefore `man`/`git log`), an editor (vim/nano), or a
-// TUI (top/htop/claude) -- inherits ark's constrained 2..N-1 band: it enters
+// TUI (top/htop/lazygit) -- inherits ark's constrained 2..N-1 band: it enters
 // the alternate screen but is never told it only has N-2 rows, so its cursor
 // math fights the region and the page renders blank or garbled (the exact
 // "man shows nothing" bug). The reset is bracketed with DECSC/DECRC (\x1b7 /
