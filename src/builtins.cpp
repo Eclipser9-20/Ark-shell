@@ -330,8 +330,37 @@ static int b_cd(const std::vector<std::string>& argv, ShellState& state) {
 }
 
 static int b_exit(const std::vector<std::string>& argv, ShellState& state) {
-    int code = argv.size() > 1 ? std::atoi(argv[1].c_str()) : state.lastStatus;
+    int code = state.lastStatus;
+    if (argv.size() > 1) {
+        char* end = nullptr;
+        long v = std::strtol(argv[1].c_str(), &end, 10);
+        if (end == argv[1].c_str() || *end != '\0') {
+            std::cerr << "exit: " << argv[1] << ": numeric argument required\n";
+            std::exit(255);
+        }
+        code = (int)(v & 0xff);
+    }
     std::exit(code);
+}
+
+// `set` -- only the positional-parameter forms are supported:
+//   set -- a b c   (replace $1.. with a b c; `set --` clears them)
+//   set a b c      (same, no leading --)
+// Option flags (set -e, -x, ...) are accepted and ignored; bare `set` is a no-op.
+static int b_set(const std::vector<std::string>& argv, ShellState& state) {
+    size_t i = 1;
+    bool sawDashDash = false;
+    while (i < argv.size()) {
+        if (argv[i] == "--") { sawDashDash = true; i++; break; }
+        if (!argv[i].empty() && (argv[i][0] == '-' || argv[i][0] == '+')) { i++; continue; } // ignore options
+        break; // first operand
+    }
+    if (sawDashDash || i < argv.size()) {
+        std::vector<std::string> params(argv.begin() + i, argv.end());
+        if (state.argStack.empty()) state.argStack.push_back(params);
+        else state.argStack.back() = params;
+    }
+    return 0;
 }
 
 // Shared cd primitive for pushd/popd (does the chdir + OLDPWD/PWD bookkeeping
@@ -579,19 +608,43 @@ static int b_pwd(const std::vector<std::string>&, ShellState& state) {
 }
 
 // Interprets the standard backslash escapes echo -e supports.
-static std::string echoEscapes(const std::string& s) {
+// Interpret `echo -e` backslash escapes. `sawC` is set (and processing stops)
+// when a `\c` is hit -- it suppresses the rest of the output and the newline.
+static std::string echoEscapes(const std::string& s, bool& sawC) {
     std::string out;
     for (size_t i = 0; i < s.size(); i++) {
         if (s[i] == '\\' && i + 1 < s.size()) {
-            switch (s[++i]) {
+            char e = s[++i];
+            switch (e) {
                 case 'n': out += '\n'; break;
                 case 't': out += '\t'; break;
                 case 'r': out += '\r'; break;
                 case '\\': out += '\\'; break;
                 case 'a': out += '\a'; break;
                 case 'b': out += '\b'; break;
-                case '0': out += '\0'; break;
-                default: out += '\\'; out += s[i]; break;
+                case 'f': out += '\f'; break;
+                case 'v': out += '\v'; break;
+                case 'e': out += '\033'; break;
+                case 'c': sawC = true; return out;           // stop; suppress newline
+                case 'x': {                                  // \xHH (1-2 hex digits)
+                    int val = 0, cnt = 0;
+                    while (cnt < 2 && i + 1 < s.size() && std::isxdigit((unsigned char)s[i + 1])) {
+                        char c = s[++i];
+                        val = val * 16 + (c <= '9' ? c - '0' : std::tolower((unsigned char)c) - 'a' + 10);
+                        cnt++;
+                    }
+                    if (cnt == 0) out += "\\x"; else out += (char)val;
+                    break;
+                }
+                case '0': {                                  // \0NNN (up to 3 octal digits)
+                    int val = 0, cnt = 0;
+                    while (cnt < 3 && i + 1 < s.size() && s[i + 1] >= '0' && s[i + 1] <= '7') {
+                        val = val * 8 + (s[++i] - '0'); cnt++;
+                    }
+                    out += (char)val;
+                    break;
+                }
+                default: out += '\\'; out += e; break;
             }
         } else {
             out += s[i];
@@ -617,11 +670,12 @@ static int b_echo(const std::vector<std::string>& argv, ShellState&) {
         }
         start++;
     }
-    for (size_t i = start; i < argv.size(); i++) {
-        std::cout << (escapes ? echoEscapes(argv[i]) : argv[i]);
-        if (i + 1 < argv.size()) std::cout << " ";
+    bool sawC = false;
+    for (size_t i = start; i < argv.size() && !sawC; i++) {
+        std::cout << (escapes ? echoEscapes(argv[i], sawC) : argv[i]);
+        if (!sawC && i + 1 < argv.size()) std::cout << " ";
     }
-    if (newline) std::cout << "\n";
+    if (newline && !sawC) std::cout << "\n";
     return 0;
 }
 
@@ -680,21 +734,67 @@ static int b_unalias(const std::vector<std::string>& argv, ShellState& state) {
     return rc;
 }
 
-static int b_type(const std::vector<std::string>& argv, ShellState&) {
-    if (argv.size() < 2) return 1;
-    auto& reg = builtinRegistry();
-    if (reg.find(argv[1]) != reg.end()) {
-        std::cout << argv[1] << " is a shell builtin\n";
-        return 0;
+// Look up an executable by name on $PATH; returns the full path or "".
+static std::string searchPath(const std::string& name) {
+    if (name.find('/') != std::string::npos) // already a path
+        return access(name.c_str(), X_OK) == 0 ? name : "";
+    const char* path = getenv("PATH");
+    std::string p = path ? path : "/usr/bin:/bin";
+    size_t i = 0;
+    while (i < p.size()) {
+        size_t e = p.find(':', i);
+        std::string dir = p.substr(i, e == std::string::npos ? std::string::npos : e - i);
+        if (!dir.empty()) {
+            std::string cand = dir + "/" + name;
+            if (access(cand.c_str(), X_OK) == 0) return cand;
+        }
+        if (e == std::string::npos) break;
+        i = e + 1;
     }
-    std::cout << argv[1] << " not found\n";
-    return 1;
+    return "";
+}
+
+static int b_type(const std::vector<std::string>& argv, ShellState& state) {
+    if (argv.size() < 2) return 1;
+    int rc = 0;
+    for (size_t a = 1; a < argv.size(); a++) {
+        const std::string& name = argv[a];
+        if (state.functions.count(name)) { std::cout << name << " is a function\n"; continue; }
+        if (state.aliases.count(name)) { std::cout << name << " is aliased to `" << state.aliases.at(name) << "'\n"; continue; }
+        if (builtinRegistry().find(name) != builtinRegistry().end()) { std::cout << name << " is a shell builtin\n"; continue; }
+        std::string full = searchPath(name);
+        if (!full.empty()) std::cout << name << " is " << full << "\n";
+        else { std::cout << name << " not found\n"; rc = 1; }
+    }
+    return rc;
 }
 
 static int b_read(const std::vector<std::string>& argv, ShellState& state) {
     std::string line;
     if (!std::getline(std::cin, line)) return 1;
-    if (argv.size() > 1) state.vars[argv[1]] = line;
+    // Collect target variable names, skipping a leading `-r` (raw) flag.
+    std::vector<std::string> names;
+    for (size_t i = 1; i < argv.size(); i++) {
+        if (argv[i] == "-r") continue;
+        names.push_back(argv[i]);
+    }
+    if (names.empty()) { state.vars["REPLY"] = line; return 0; }
+    // Split on IFS whitespace; the LAST variable absorbs the remainder (with
+    // internal separators, trailing whitespace trimmed) -- matching bash/zsh.
+    size_t pos = 0, n = line.size();
+    auto skipWs = [&](size_t p) { while (p < n && (line[p] == ' ' || line[p] == '\t')) p++; return p; };
+    for (size_t i = 0; i < names.size(); i++) {
+        pos = skipWs(pos);
+        if (i + 1 == names.size()) {
+            std::string rest = line.substr(pos);
+            size_t e = rest.find_last_not_of(" \t");
+            state.vars[names[i]] = (e == std::string::npos) ? "" : rest.substr(0, e + 1);
+        } else {
+            size_t s = pos;
+            while (pos < n && line[pos] != ' ' && line[pos] != '\t') pos++;
+            state.vars[names[i]] = line.substr(s, pos - s);
+        }
+    }
     return 0;
 }
 
@@ -825,7 +925,7 @@ static int b_history(const std::vector<std::string>& argv, ShellState& state) {
 
 const std::unordered_map<std::string, BuiltinFn>& builtinRegistry() {
     static const std::unordered_map<std::string, BuiltinFn> reg = {
-        {"cd", b_cd}, {"exit", b_exit}, {"pwd", b_pwd}, {"echo", b_echo},
+        {"cd", b_cd}, {"exit", b_exit}, {"pwd", b_pwd}, {"echo", b_echo}, {"set", b_set},
         {"export", b_export}, {"unset", b_unset}, {"type", b_type}, {"read", b_read},
         {"jobs", b_jobs}, {"fg", b_fg}, {"bg", b_bg},
         {"alias", b_alias}, {"unalias", b_unalias},

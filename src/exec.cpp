@@ -617,28 +617,20 @@ static int runCommand(Node* cmd, ShellState& state) {
         return it->second(argv, state);
     }
     if (it != reg.end()) {
-        // Builtin with redirects: fork so the redirect doesn't leak into the
-        // interactive shell's own stdout/stdin. BlockSigchld guards the
-        // whole fork+wait sequence: without it, the global SIGCHLD handler
-        // (installed for background-job tracking) can reap this specific
-        // child first, making our own waitpid() below return ECHILD --
-        // silently leaving `status` at its zero-initialized value, which
-        // WIFEXITED/WEXITSTATUS then misreport as "exited successfully".
-        BlockSigchld guard;
-        std::cout.flush(); // flush BEFORE forking -- see captureCommandOutput()
-        fflush(stdout);     // for why (stale buffered output would otherwise
-                            // get duplicated by the child's own flush)
-        pid_t pid = fork();
-        if (pid == 0) {
-            applyRedirectsInChild(cmd->redirects, state);
-            int rc = it->second(argv, state);
-            std::cout.flush(); // same _exit()-skips-iostream-flush issue as
-                                // the pipeline builtin-fork path (Task 13)
-            _exit(rc);
-        }
-        int status = 0;
-        waitpidRetry(pid, &status, 0);
-        return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+        // Builtin WITH redirects: run IN-PROCESS with the redirects applied via
+        // save/restore, NOT in a fork. A forked builtin's state changes (cd,
+        // read, export, set, unset, local) would be lost to the child -- e.g.
+        // `cd dir >/dev/null` or `read x < file` must affect the real shell.
+        // The redirect still applies to the builtin's own stdin/stdout for its
+        // duration, then the shell's fds are restored.
+        std::cout.flush();
+        fflush(stdout);
+        auto saved = applyRedirectsSaving(cmd->redirects, state);
+        int rc = it->second(argv, state);
+        std::cout.flush();
+        fflush(stdout); // flush the builtin's output to the redirected fd first
+        restoreRedirects(saved);
+        return rc;
     }
 
     maybeAutocorrect(argv); // ARK_AUTOCORRECT=1: fix a typo'd command before spawning

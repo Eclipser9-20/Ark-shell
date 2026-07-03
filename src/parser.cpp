@@ -168,13 +168,20 @@ std::unique_ptr<Node> Parser::parseFor() {
     auto fn = std::make_unique<Node>();
     fn->kind = NodeKind::For;
     fn->forVar = advance().text; // variable name
-    advance(); // 'in'
-    // Stop at a statement end (Semi/Newline/End) OR `do` -- crucially including
-    // End, or a truncated `for x in a b` (no trailing separator, the normal
-    // interactive case) loops forever pushing the End sentinel's empty text.
-    // expect(Do) below then reports the missing `do` as incomplete.
-    while (!atStatementEnd() && !check(TokKind::Do)) {
-        fn->forWords.push_back(advance().text);
+    if (check(TokKind::In)) {
+        advance(); // 'in'
+        // Stop at a statement end (Semi/Newline/End) OR `do` -- crucially including
+        // End, or a truncated `for x in a b` (no trailing separator, the normal
+        // interactive case) loops forever pushing the End sentinel's empty text.
+        // expect(Do) below then reports the missing `do` as incomplete.
+        while (!atStatementEnd() && !check(TokKind::Do)) {
+            fn->forWords.push_back(advance().text);
+        }
+    } else {
+        // `for x; do ...; done` with no `in` iterates over the positional
+        // parameters ($@) -- POSIX. (Word-splits params with spaces, which is
+        // fine for the overwhelmingly common no-spaces case.)
+        fn->forWords.push_back("$@");
     }
     while (check(TokKind::Semi) || check(TokKind::Newline)) advance(); // separator(s) before 'do'
     expect(TokKind::Do, "do");
