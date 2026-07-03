@@ -5,6 +5,20 @@
 #include <cstring>
 #include <sstream>
 
+// Shortest decimal string that round-trips back to the same double (like jq /
+// modern JSON writers). The default ostream precision (6) silently truncates,
+// e.g. 0.123456789012345 -> "0.123457". Try 15/16/17 sig digits, take the first
+// that round-trips.
+static std::string dtoa(double d) {
+    char buf[32];
+    for (int prec : {15, 16, 17}) {
+        std::snprintf(buf, sizeof buf, "%.*g", prec, d);
+        if (std::strtod(buf, nullptr) == d) return buf;
+    }
+    std::snprintf(buf, sizeof buf, "%.17g", d);
+    return buf;
+}
+
 // ── Value helpers ───────────────────────────────────────────────────────────
 bool Value::isTable() const {
     if (type != Type::List || list.empty()) return false;
@@ -33,9 +47,7 @@ std::string Value::asString() const {
         case Type::Null: return "";
         case Type::Bool: return b ? "true" : "false";
         case Type::Int: return std::to_string(i);
-        case Type::Float: {
-            std::ostringstream os; os << f; return os.str();
-        }
+        case Type::Float: return dtoa(f);
         case Type::Str: return s;
         default: return ""; // containers have no scalar text
     }
@@ -85,7 +97,7 @@ static void toJsonImpl(const Value& v, std::string& out, bool pretty, int depth)
         case Value::Type::Null: out += "null"; break;
         case Value::Type::Bool: out += v.b ? "true" : "false"; break;
         case Value::Type::Int: out += std::to_string(v.i); break;
-        case Value::Type::Float: { std::ostringstream os; os << v.f; out += os.str(); break; }
+        case Value::Type::Float: out += dtoa(v.f); break;
         case Value::Type::Str: jsonEscape(v.s, out); break;
         case Value::Type::List:
             if (v.list.empty()) { out += "[]"; break; }
@@ -187,12 +199,22 @@ struct JsonParser {
                     case 'r': out += '\r'; break; case '"': out += '"'; break;
                     case '\\': out += '\\'; break; case '/': out += '/'; break;
                     case 'b': out += '\b'; break; case 'f': out += '\f'; break;
-                    case 'u': { // \uXXXX -> UTF-8 (BMP only, good enough here)
+                    case 'u': { // \uXXXX -> UTF-8, combining surrogate pairs for non-BMP
                         if (i + 4 <= t.size()) {
-                            int cp = (int)strtol(t.substr(i,4).c_str(), nullptr, 16); i += 4;
+                            unsigned cp = (unsigned)strtol(t.substr(i,4).c_str(), nullptr, 16); i += 4;
+                            // A high surrogate (D800-DBFF) followed by a low surrogate
+                            // (DC00-DFFF) encodes one code point above U+FFFF.
+                            if (cp >= 0xD800 && cp <= 0xDBFF && i + 6 <= t.size() && t[i] == '\\' && t[i+1] == 'u') {
+                                unsigned lo = (unsigned)strtol(t.substr(i+2,4).c_str(), nullptr, 16);
+                                if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                                    cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                                    i += 6;
+                                }
+                            }
                             if (cp < 0x80) out += (char)cp;
                             else if (cp < 0x800) { out += (char)(0xC0|(cp>>6)); out += (char)(0x80|(cp&0x3F)); }
-                            else { out += (char)(0xE0|(cp>>12)); out += (char)(0x80|((cp>>6)&0x3F)); out += (char)(0x80|(cp&0x3F)); }
+                            else if (cp < 0x10000) { out += (char)(0xE0|(cp>>12)); out += (char)(0x80|((cp>>6)&0x3F)); out += (char)(0x80|(cp&0x3F)); }
+                            else { out += (char)(0xF0|(cp>>18)); out += (char)(0x80|((cp>>12)&0x3F)); out += (char)(0x80|((cp>>6)&0x3F)); out += (char)(0x80|(cp&0x3F)); }
                         }
                         break;
                     }
