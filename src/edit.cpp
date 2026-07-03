@@ -325,7 +325,11 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
             std::cout << "\x1b[K" << (append ? "^C\n" : "\n^C\n") << std::flush;
             return std::string();
         }
-        if (c == 4 && buf.empty()) { endLine(); return std::nullopt; } // Ctrl-D on empty line: EOF
+        if (c == 4) { // Ctrl-D: EOF on an EMPTY line, else delete-char-forward (like bash)
+            if (buf.empty()) { endLine(); return std::nullopt; }
+            if (cursor < buf.size()) { buf.erase(cursor, 1); redraw(); }
+            continue;
+        }
         if (c == 127 || c == 8) { // Backspace
             if (cursor > 0) { buf.erase(cursor - 1, 1); cursor--; redraw(); }
             continue;
@@ -380,6 +384,7 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
 
             bool cancelled = false;
             bool accepted = false;
+            bool runIt = false; // Enter accepts AND runs; other accept-keys just populate
             for (;;) {
                 char sc;
                 ssize_t sn = (ssize_t)arkinput::readByte(sc, /*retryEINTR=*/true);
@@ -393,8 +398,24 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
                     redrawSearch();
                     continue;
                 }
-                if (sc == '\x1b' || sc == 7) { cancelled = true; break; } // Escape or Ctrl-G: cancel
-                if (sc == '\r' || sc == '\n') { accepted = true; break; } // Enter: accept AND run
+                if (sc == 7) { cancelled = true; break; } // Ctrl-G: cancel
+                if (sc == '\x1b') {
+                    // Standalone Escape cancels. An escape SEQUENCE (arrow / Home /
+                    // End / ...) ends the search accepting the current match -- and
+                    // we must CONSUME the rest of the sequence here, or its bytes
+                    // ([C / [D / ...) leak into the edit buffer as literal text.
+                    if (byteAvailableSoon(50)) {
+                        char b2;
+                        if (readByte(b2) > 0 && b2 == '[') {
+                            char fin;
+                            do { if (readByte(fin) <= 0) break; }
+                            while (!((fin >= 'A' && fin <= 'Z') || (fin >= 'a' && fin <= 'z') || fin == '~'));
+                        }
+                        accepted = true; break; // populate the match, don't run
+                    }
+                    cancelled = true; break;
+                }
+                if (sc == '\r' || sc == '\n') { accepted = true; runIt = true; break; } // Enter: accept AND run
                 if (sc == 127 || sc == 8) { // Backspace: shrink the query, re-search from the top
                     if (!query.empty()) query.pop_back();
                     matchIdx = searchHistoryBackward(history.lines(), query, (int)history.lines().size());
@@ -420,24 +441,15 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
             if (accepted && matchIdx >= 0) {
                 buf = history.lines()[matchIdx];
                 cursor = buf.size();
-            } else if (accepted) {
-                // Enter with no match at all: nothing to run, just resume
-                // editing whatever was there before Ctrl-R was pressed.
-                buf = savedBuf;
-                cursor = savedCursor;
-                redraw();
-                continue;
-            } else if (cancelled) {
-                buf = savedBuf;
-                cursor = savedCursor;
-                redraw();
+                if (runIt) { endLine(); return buf; } // Enter: run the match immediately
+                redraw();                             // arrow/other key: populate + keep editing
                 continue;
             }
-            // A real Enter-accept executes immediately, matching bash's
-            // reverse-i-search -- Enter doesn't just populate the prompt,
-            // it runs the matched command right away.
-            endLine();
-            return buf;
+            // No match (or cancelled): resume editing whatever was there before.
+            buf = savedBuf;
+            cursor = savedCursor;
+            redraw();
+            continue;
         }
         if (c == 9) { // Tab
             // If a ghost autosuggestion is showing (cursor at end of line),
@@ -548,8 +560,14 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
             }
             continue;
         }
-        buf.insert(cursor, 1, c);
-        cursor++;
-        redraw();
+        // Only insert printable ASCII (0x20-0x7e) or UTF-8 bytes (high bit set).
+        // Any other unhandled control byte -- Ctrl-B (0x02), Ctrl-T, a stray
+        // 0x7f, a leaked escape-sequence remnant -- is dropped instead of being
+        // embedded as a raw control char into the command that then runs.
+        if ((unsigned char)c >= 0x20 && (unsigned char)c != 0x7f) {
+            buf.insert(cursor, 1, c);
+            cursor++;
+            redraw();
+        }
     }
 }

@@ -106,7 +106,10 @@ static int heredocTempFd(const std::string& body) {
     size_t off = 0;
     while (off < body.size()) {
         ssize_t w = write(fd, body.data() + off, body.size() - off);
-        if (w <= 0) break;
+        if (w < 0) { if (errno == EINTR) continue; break; } // retry on the idle-ticker
+                                                            // SIGALRM instead of
+                                                            // truncating the heredoc
+        if (w == 0) break;
         off += (size_t)w;
     }
     lseek(fd, 0, SEEK_SET);
@@ -300,7 +303,13 @@ static int runPipeline(Node* pipeline, ShellState& state) {
     for (size_t i = 0; i < n; i++) {
         int pipeFds[2] = {-1, -1};
         bool hasNext = i + 1 < n;
-        if (hasNext) pipe(pipeFds);
+        if (hasNext && pipe(pipeFds) != 0) {
+            // Out of fds/resources: can't wire the rest of the pipeline. Report
+            // and stop spawning further stages rather than silently running a
+            // stage's output to the shell's own stdout.
+            perror("ark: pipe");
+            break;
+        }
 
         int inFd = prevReadFd;
         int outFd = hasNext ? pipeFds[1] : -1;
@@ -616,11 +625,17 @@ static int runCommand(Node* cmd, ShellState& state) {
     }
 
     pid_t shellPgid = getpgrp();
-    tcsetpgrp(STDIN_FILENO, pid); // pid doubles as the new job's pgid (pgroup=0 above)
+    // Only hand the terminal to the child if WE actually own it right now. When
+    // runCommand runs inside a background wrapper (`cmd &`), our pgid is the
+    // wrapper's -- NOT the terminal's foreground group -- so grabbing the tty
+    // here (ark ignores SIGTTOU, so it'd succeed) would steal it from ark and
+    // then "restore" it to the wrapper's group, leaving ark not-foreground.
+    bool isForeground = tcgetpgrp(STDIN_FILENO) == shellPgid;
+    if (isForeground) tcsetpgrp(STDIN_FILENO, pid); // pid doubles as the job's pgid
     int status = 0;
     waitpidRetry(pid, &status, WUNTRACED); // WUNTRACED: notice Ctrl-Z/SIGTSTP
                                             // (a stop), not just an exit
-    tcsetpgrp(STDIN_FILENO, shellPgid);
+    if (isForeground) tcsetpgrp(STDIN_FILENO, shellPgid);
 
     if (WIFSTOPPED(status)) {
         int jobId = 0;
@@ -694,6 +709,11 @@ static int runWhile(Node* wn, ShellState& state) {
         bool stopLoop;
         if (consumeLoopCtl(state, stopLoop) && stopLoop) break;
     }
+    // A `break N`/`continue N` that targeted more levels than actually exist
+    // leaves loopCtl set as it propagates up; at the OUTERMOST loop (depth 1,
+    // DepthGuard hasn't decremented yet) clear it, or it would poison every
+    // statement after the loop (runList stops on any non-None loopCtl).
+    if (state.loopDepth == 1) { state.loopCtl = ShellState::LoopCtl::None; state.loopCtlLevels = 0; }
     return status;
 }
 
@@ -712,6 +732,11 @@ static int runFor(Node* fn, ShellState& state) {
         bool stopLoop;
         if (consumeLoopCtl(state, stopLoop) && stopLoop) break;
     }
+    // A `break N`/`continue N` that targeted more levels than actually exist
+    // leaves loopCtl set as it propagates up; at the OUTERMOST loop (depth 1,
+    // DepthGuard hasn't decremented yet) clear it, or it would poison every
+    // statement after the loop (runList stops on any non-None loopCtl).
+    if (state.loopDepth == 1) { state.loopCtl = ShellState::LoopCtl::None; state.loopCtlLevels = 0; }
     return status;
 }
 
