@@ -745,6 +745,16 @@ static int runCommand(Node* cmd, ShellState& state) {
                                         // used elsewhere for signal-based
                                         // termination status
     }
+    if (WIFSIGNALED(status)) {
+        int sig = WTERMSIG(status);
+        // Ctrl-C (SIGINT) / Ctrl-\ (SIGQUIT) leave the cursor mid-line, right
+        // after the terminal's echoed ^C / ^\ (no newline follows it). Drop to a
+        // fresh line so the next prompt -- or a program run right after -- doesn't
+        // collide with it (the "^Csudo:" overlap). Matches bash, and mirrors the
+        // leading '\n' the Ctrl-Z (WIFSTOPPED) branch above already emits.
+        if (sig == SIGINT || sig == SIGQUIT) { std::cout << "\n"; std::cout.flush(); }
+        return 128 + sig; // standard 128+signal termination status
+    }
     return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
 }
 
