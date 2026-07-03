@@ -543,8 +543,17 @@ static std::vector<std::string> braceRange(const std::string& body) {
     if (allDigits(lo) && allDigits(hi)) {
         long a = std::strtol(lo.c_str(), nullptr, 10);
         long b = std::strtol(hi.c_str(), nullptr, 10);
-        if (a <= b) for (long v = a; v <= b; v += step) out.push_back(std::to_string(v));
-        else for (long v = a; v >= b; v -= step) out.push_back(std::to_string(v));
+        // Cap the element count so a huge/extreme range -- {1..99999999999} (OOM
+        // hang) or {1..9223372036854775807} (v+=step overflows -> infinite loop)
+        // -- is left literal instead of hanging the shell. Unsigned subtraction
+        // is well-defined even across LONG_MIN..LONG_MAX; iterate by a bounded
+        // count rather than comparing a possibly-overflowing v.
+        constexpr unsigned long kMaxRange = 100000;
+        unsigned long span = (a <= b) ? (unsigned long)b - (unsigned long)a
+                                      : (unsigned long)a - (unsigned long)b;
+        if (span / (unsigned long)step >= kMaxRange) return {}; // too large -> don't expand
+        for (unsigned long k = 0; k * (unsigned long)step <= span; k++)
+            out.push_back(std::to_string(a <= b ? a + (long)(k * step) : a - (long)(k * step)));
         return out;
     }
     if (lo.size() == 1 && hi.size() == 1 && std::isalpha((unsigned char)lo[0]) && std::isalpha((unsigned char)hi[0])) {
