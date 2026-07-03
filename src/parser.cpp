@@ -162,7 +162,15 @@ std::unique_ptr<Node> Parser::parseCase() {
     // reports the missing esac cleanly (incomplete on End -> continuation
     // prompt interactively).
     while (!check(TokKind::Esac) && !check(TokKind::End)) {
-        std::string pattern = advance().text;
+        // A clause pattern may have a leading '(' and multiple alternatives
+        // joined by '|': `(a|b*|c)`. Collect the whole thing (as `a|b*|c`) up
+        // to the closing ')'; runCase splits on '|' and matches any alternative.
+        if (check(TokKind::LParen)) advance(); // optional leading '('
+        std::string pattern;
+        while (!check(TokKind::RParen) && !check(TokKind::End)) {
+            if (check(TokKind::Pipe)) { pattern += '|'; advance(); }
+            else pattern += advance().text;
+        }
         if (check(TokKind::RParen)) advance(); // ')'
         auto body = parseStatementList({TokKind::DSemi, TokKind::Esac});
         cn->caseClauses.emplace_back(pattern, std::move(body));

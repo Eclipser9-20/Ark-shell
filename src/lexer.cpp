@@ -60,7 +60,9 @@ Token Lexer::lexWord() {
             advance();
             out += '\x01';
             while (!atEnd() && peek() != '"') {
-                if (peek() == '\\' && (peek(1) == '"' || peek(1) == '\\' || peek(1) == '$')) {
+                if (peek() == '\\' && peek(1) == '\n') {
+                    advance(); advance(); // line continuation inside "...": drop both
+                } else if (peek() == '\\' && (peek(1) == '"' || peek(1) == '\\' || peek(1) == '$')) {
                     advance();
                     out += advance();
                 } else {
@@ -73,7 +75,10 @@ Token Lexer::lexWord() {
         }
         if (c == '\\') {
             advance();
-            if (!atEnd()) out += advance();
+            if (!atEnd()) {
+                if (peek() == '\n') advance(); // line continuation: drop backslash+newline
+                else out += advance();
+            }
             continue;
         }
         if (c == '`') {

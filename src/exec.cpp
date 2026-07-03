@@ -743,9 +743,19 @@ static int runFor(Node* fn, ShellState& state) {
 static int runCase(Node* cn, ShellState& state) {
     std::string word = expandWord(cn->caseWord, state);
     for (auto& clause : cn->caseClauses) {
-        if (globMatch(clause.first, word)) {
-            return execNode(clause.second.get(), state);
+        // A clause pattern can hold '|'-separated alternatives (e.g. `a|b*`);
+        // the clause matches if ANY alternative matches.
+        const std::string& pat = clause.first;
+        bool matched = false;
+        size_t start = 0;
+        for (;;) {
+            size_t bar = pat.find('|', start);
+            std::string alt = pat.substr(start, bar == std::string::npos ? std::string::npos : bar - start);
+            if (globMatch(alt, word)) { matched = true; break; }
+            if (bar == std::string::npos) break;
+            start = bar + 1;
         }
+        if (matched) return execNode(clause.second.get(), state);
     }
     return 0;
 }
