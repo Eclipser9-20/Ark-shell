@@ -5,6 +5,7 @@
 #include "pkgmgr.h"
 #include "complete.h"
 #include "overlay.h"
+#include "nucapture.h"
 #include "chrome.h"
 #include "jobs.h"
 #include "lexer.h"
@@ -680,6 +681,22 @@ static int runCommand(Node* cmd, ShellState& state) {
         std::cout.flush();
         fflush(stdout);
         int st = overlay::run(argv, environ);
+        if (st >= 0) return st;
+    }
+
+    // Nu-mode structured auto-format (ARK_NU_MODE=1): run a plain foreground
+    // external command through a PTY and, if its whole output is a JSON document,
+    // render it as a nu table; otherwise stream it through unchanged. Skipped for
+    // redirects/pipes (output isn't terminal-bound), non-terminals, when ark
+    // doesn't own the tty (a `cmd &` wrapper), for known interactive/TUI tools
+    // (they keep the normal path + real job control), and for commands that don't
+    // exist (so the command-not-found path below still gives its suggestions).
+    if (nucapture::enabled() && cmd->redirects.empty() && isatty(STDOUT_FILENO)
+        && tcgetpgrp(STDIN_FILENO) == getpgrp()
+        && !nucapture::isInteractiveCommand(argv[0]) && commandExists(argv[0])) {
+        std::cout.flush();
+        fflush(stdout);
+        int st = nucapture::run(argv, environ);
         if (st >= 0) return st;
     }
 

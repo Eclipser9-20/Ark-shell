@@ -2,6 +2,7 @@
 #include "complete.h"
 #include "exec.h"
 #include "arkfeatures.h"
+#include "value.h"
 #include "history.h"
 #include "lexer.h"
 #include "parser.h"
@@ -959,6 +960,48 @@ static int b_test(const std::vector<std::string>& argv, ShellState&) {
     return testEval(a) ? 0 : 1;
 }
 
+// ── Structured-data bridge: `from <fmt>` / `to <fmt>` (nushell-style) ────────
+// Wire ark's structured engine (value.cpp) to real pipes. `from json` turns a
+// legacy tool's JSON on stdin into a nu bordered table / record; `to json`
+// turns stdin (JSON, or whitespace-tabular text) into pretty JSON. This is how
+// `curl … | from json` renders as a table instead of a wall of plaintext.
+static std::string readAllFd0() {
+    std::string out;
+    char buf[65536];
+    ssize_t n;
+    while ((n = read(STDIN_FILENO, buf, sizeof buf)) > 0) out.append(buf, (size_t)n);
+    return out;
+}
+static void emitRendered(const Value& v) {
+    std::string r = renderText(v);
+    std::cout << r;
+    if (r.empty() || r.back() != '\n') std::cout << "\n";
+}
+static int b_from(const std::vector<std::string>& argv, ShellState&) {
+    std::string fmt = argv.size() > 1 ? argv[1] : "";
+    if (fmt.empty()) { std::cerr << "from: usage: from <json|text>\n"; return 2; }
+    std::string input = readAllFd0();
+    if (fmt == "json") {
+        Value v;
+        if (!fromJson(input, v)) { std::cerr << "from json: invalid JSON\n"; return 1; }
+        emitRendered(v);
+        return 0;
+    }
+    // Any other format: fall back to the whitespace-tabular parser (JSON is
+    // auto-detected inside parseLegacyText anyway).
+    emitRendered(parseLegacyText(input));
+    return 0;
+}
+static int b_to(const std::vector<std::string>& argv, ShellState&) {
+    std::string fmt = argv.size() > 1 ? argv[1] : "";
+    std::string input = readAllFd0();
+    Value v;
+    if (!fromJson(input, v)) v = parseLegacyText(input); // accept JSON or tabular in
+    if (fmt == "json") { std::cout << toJson(v, /*pretty=*/true) << "\n"; return 0; }
+    std::cerr << "to: usage: to <json>\n";
+    return 2;
+}
+
 const std::unordered_map<std::string, BuiltinFn>& builtinRegistry() {
     static const std::unordered_map<std::string, BuiltinFn> reg = {
         {"cd", b_cd}, {"exit", b_exit}, {"pwd", b_pwd}, {"echo", b_echo}, {"set", b_set},
@@ -972,6 +1015,7 @@ const std::unordered_map<std::string, BuiltinFn>& builtinRegistry() {
         {"break", b_break}, {"continue", b_continue},
         {"ls", b_ls}, {"test", b_test}, {"[", b_test},
         {"private", b_private}, {"uvar", b_uvar}, {"history", b_history},
+        {"from", b_from}, {"to", b_to},
     };
     return reg;
 }
