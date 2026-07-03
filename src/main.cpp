@@ -576,8 +576,17 @@ int main(int argc, char** argv) {
             const char* t = getenv("ARK_CHROME_TOP");
             bool chromeOn = !(c && std::string(c) == "0");
             bool inlineTop = t && std::string(t) == "inline";
-            if (chromeOn && inlineTop)
-                std::cout << topBar(state.cwd, findGitBranch(state.cwd)) << "\r\n" << std::flush;
+            if (chromeOn && inlineTop) {
+                // Only print the header when the cwd/branch actually CHANGED since
+                // the last prompt -- so it appears when you `cd`, not stacked above
+                // every command. Keeps scrollback readable in inline mode.
+                std::string header = topBar(state.cwd, findGitBranch(state.cwd));
+                static std::string lastHeader;
+                if (header != lastHeader) {
+                    std::cout << header << "\r\n" << std::flush;
+                    lastHeader = header;
+                }
+            }
         }
         std::string prompt = continuing ? continuationPrompt() : buildPrompt(state, home);
         auto got = readLine(prompt, history, doReassertChrome, cmdValidator);
