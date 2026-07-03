@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-test:
+    name: build + test (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest, name: macOS-arm64, cxx: clang++ }
+          - { os: macos-13,     name: macOS-x86_64, cxx: clang++ }
+          - { os: ubuntu-latest, name: linux-x86_64, cxx: g++ }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compiler version
+        run: ${{ matrix.cxx }} --version
+
+      - name: Build
+        run: make CXX="${{ matrix.cxx }}"
+
+      - name: Unit tests
+        run: make unittest CXX="${{ matrix.cxx }}"
+
+      - name: Integration tests
+        run: make test CXX="${{ matrix.cxx }}"
+
+      - name: Smoke test the binary
+        run: |
+          ARK_CHROME_TOP=off ./ark -c 'echo hi | tr a-z A-Z'
+          ARK_CHROME_TOP=off ./ark -c 'echo $((2**10)); for i in 1 2 3; do echo $i; done | wc -l'

@@ -6,21 +6,62 @@
 
 No bash or zsh underneath. ark has its *own* lexer, parser, expander, globber, job control, and line editor — plus fish-style autosuggestions, live syntax highlighting, a pinned status bar, and the ability to run itself over SSH on a box that's never heard of it.
 
+[![CI](https://github.com/Eclipser9-20/Ark-shell/actions/workflows/ci.yml/badge.svg)](https://github.com/Eclipser9-20/Ark-shell/actions/workflows/ci.yml)
 [![release](https://img.shields.io/github/v/tag/Eclipser9-20/Ark-shell?label=release&sort=semver)](https://github.com/Eclipser9-20/Ark-shell/releases)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-00599C)](https://en.cppreference.com/w/cpp/20)
 [![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)](#install)
+[![stars](https://img.shields.io/github/stars/Eclipser9-20/Ark-shell?style=social)](https://github.com/Eclipser9-20/Ark-shell/stargazers)
+
+<br>
+
+<!-- Demo GIF: record with `vhs demo/ark.tape` (see demo/), commit the output to
+     demo/ark.gif, then this image goes live. Until then it 404s gracefully. -->
+<img src="demo/ark.gif" alt="ark in action — autosuggestions, syntax highlighting, and a nushell-style table" width="720">
+
+<br>
+
+⭐ **If ark makes you smile, star it** — it's how a from-scratch shell earns the notability to reach `brew install ark-shell` from Homebrew core.
 
 </div>
 
 ## Install
 
+**macOS / Linux — Homebrew:**
+
 ```sh
-brew tap eclipser9-20/ark-shell
-brew install ark-shell
+brew install eclipser9-20/ark-shell/ark-shell
 ```
 
-<sub>Or from source — see [Building](#building). Arch/AUR: `yay -S ark-shell` (coming soon).</sub>
+**Any Unix — one-line installer** (builds from source, no Homebrew needed):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Eclipser9-20/Ark-shell/main/install.sh | sh
+```
+
+<sub>Prebuilt binaries for each release are on the [Releases](https://github.com/Eclipser9-20/Ark-shell/releases) page. From source: see [Building](#building). Arch/AUR: `yay -S ark-shell` (coming soon).</sub>
+
+## 60-second tour
+
+```sh
+ark                              # drop into ark (or set it as your login shell, below)
+
+# it's a real shell — pipelines, redirection, arithmetic, the works
+echo $((2**10))                  # 1024   (** ternary comma hex/octal all work)
+ls /nope 2>&1 | head -1          # fd-redirection: stderr down the pipe
+for f in *.md; do echo "$f"; done | wc -l
+
+# the stuff bash makes you install plugins for — built in:
+#  · dim ghost-text autosuggestions from your history + the current dir (→ to accept)
+#  · live syntax highlighting; unknown commands flash red before you hit Enter
+#  · Tab completes flags straight from a command's man page
+
+ARK_NU_MODE=1 ark -c 'ls'        # nushell-style bordered table
+uvar EDITOR nvim                 # a variable that persists across windows AND reboots
+assh you@server                  # your shell + editing on a box with nothing installed
+```
+
+Everything above is one static binary. No runtime, no plugin manager, no framework.
 
 ## Why ark?
 
