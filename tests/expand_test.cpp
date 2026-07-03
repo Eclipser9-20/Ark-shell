@@ -129,7 +129,70 @@ static void test_expand_no_split_single_quoted_literal() {
     assert(expandNoSplit("\x02" "hello $NAME" "\x02", st) == "hello $NAME");
 }
 
+static void test_arith_power() {
+    ShellState st;
+    assert(expandWord("$((2**10))", st) == "1024");
+    assert(expandWord("$((5**3))", st) == "125");
+    assert(expandWord("$((2**2**3))", st) == "256");
+    assert(expandWord("$((2*3))", st) == "6");
+}
+static void test_arith_ternary() {
+    ShellState st; st.vars["n"] = "5";
+    assert(expandWord("$((n>3 ? 100 : 200))", st) == "100");
+    assert(expandWord("$((n<3 ? 100 : 200))", st) == "200");
+    assert(expandWord("$((1 ? 2 ? 3 : 4 : 5))", st) == "3");
+}
+static void test_arith_bases() {
+    ShellState st;
+    assert(expandWord("$((0xff + 1))", st) == "256");
+    assert(expandWord("$((0X10))", st) == "16");
+    assert(expandWord("$((0755))", st) == "493");
+    assert(expandWord("$((100))", st) == "100");
+}
+static void test_arith_comma() {
+    ShellState st;
+    assert(expandWord("$((1, 2, 3))", st) == "3");
+    assert(expandWord("$((1+1, 2+2))", st) == "4");
+}
+static void test_cmdsub_quote_aware() {
+    ShellState st; std::string captured;
+    setCaptureHook([&](const std::string& cmd) -> std::string { captured = cmd; return ""; });
+    expandWord("$(echo 'x)y')", st);
+    assert(captured == "echo 'x)y'");
+    expandWord("$(echo \"a)b\")", st);
+    assert(captured == "echo \"a)b\"");
+    setCaptureHook(nullptr);
+}
+static void test_case_conversion() {
+    ShellState st;
+    st.vars["v"] = "Hello";
+    assert(expandWord("${v^^}", st) == "HELLO");
+    assert(expandWord("${v,,}", st) == "hello");
+    st.vars["w"] = "hello"; assert(expandWord("${w^}", st) == "Hello");
+    st.vars["u"] = "HELLO"; assert(expandWord("${u,}", st) == "hELLO");
+}
+static void test_brace_range_step() {
+    ShellState st;
+    auto join = [](const std::vector<std::string>& v) { std::string o; for (size_t i = 0; i < v.size(); i++) { if (i) o += ' '; o += v[i]; } return o; };
+    assert(join(expandWords({"{1..10..2}"}, st)) == "1 3 5 7 9");
+    assert(join(expandWords({"{10..1..3}"}, st)) == "10 7 4 1");
+    assert(join(expandWords({"{a..i..2}"}, st)) == "a c e g i");
+    assert(join(expandWords({"{1..5}"}, st)) == "1 2 3 4 5");
+}
+static void test_brace_skips_param() {
+    ShellState st; st.vars["v"] = "Hello";
+    assert(expandWord("X${v,,}X", st) == "XhelloX");   // ${...} not brace-split
+}
+
 int main() {
+    test_arith_power();
+    test_arith_ternary();
+    test_arith_bases();
+    test_arith_comma();
+    test_cmdsub_quote_aware();
+    test_case_conversion();
+    test_brace_range_step();
+    test_brace_skips_param();
     test_simple_var();
     test_braced_var();
     test_default_expansion();

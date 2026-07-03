@@ -3,6 +3,8 @@
 #include "expand.h"
 #include "arkfeatures.h"
 #include "pkgmgr.h"
+#include "complete.h"
+#include "overlay.h"
 #include "jobs.h"
 #include "lexer.h"
 #include "parser.h"
@@ -70,6 +72,24 @@ static void maybeAutocorrect(std::vector<std::string>& argv) {
     argv[0] = guess;
 }
 
+// Auto-path (ARK_AUTO_PATH=1): if the command word isn't on $PATH but ark's
+// background file index knows exactly one executable by that name, run THAT full
+// path instead of failing. Off by default; only a bare name (no slash) that PATH
+// can't resolve, and only on an unambiguous single match (findIndexedExecutable
+// returns "" otherwise), so ark never silently runs the wrong thing.
+static void maybeAutoPath(std::vector<std::string>& argv) {
+    const char* on = getenv("ARK_AUTO_PATH");
+    if (!on || std::string(on) != "1" || argv.empty()) return;
+    const std::string cmd = argv[0];
+    if (cmd.empty() || cmd.find('/') != std::string::npos) return; // already a path
+    if (commandExists(cmd)) return;                                // PATH resolves it already
+    std::string full = findIndexedExecutable(cmd);
+    if (!full.empty()) {
+        std::cerr << "ark: " << cmd << " → " << full << "\n";
+        argv[0] = full;
+    }
+}
+
 // Real bug found live: neither Ctrl-C nor Ctrl-Z worked on ANY foreground
 // child (a plain external command, a shell script). Root cause: ark ignores
 // SIGINT/SIGTSTP/SIGTTIN/SIGTTOU for ITSELF (see main.cpp) so it can't be
@@ -128,18 +148,29 @@ static std::string heredocBody(const Redirect& r, ShellState& state) {
 static void applyRedirectsFileActions(const std::vector<Redirect>& redirects, posix_spawn_file_actions_t& actions,
                                        ShellState& state, std::vector<int>& heredocFds) {
     for (const auto& r : redirects) {
+        // A file-redirect target undergoes expansion (parameters/tilde/command
+        // substitution), no word-splitting -- so `> $F` / `> ~/log` / `> $(f)`
+        // work. addopen copies the path, so a per-iteration temporary is fine.
+        std::string t = (r.kind == Redirect::Kind::In || r.kind == Redirect::Kind::Out ||
+                         r.kind == Redirect::Kind::Append || r.kind == Redirect::Kind::ErrOut)
+                            ? expandWord(r.target, state) : std::string();
         switch (r.kind) {
             case Redirect::Kind::In:
-                posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, r.target.c_str(), O_RDONLY, 0);
+                posix_spawn_file_actions_addopen(&actions, r.fd >= 0 ? r.fd : STDIN_FILENO, t.c_str(), O_RDONLY, 0);
                 break;
             case Redirect::Kind::Out:
-                posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, r.target.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                posix_spawn_file_actions_addopen(&actions, r.fd >= 0 ? r.fd : STDOUT_FILENO, t.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
                 break;
             case Redirect::Kind::Append:
-                posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, r.target.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
+                posix_spawn_file_actions_addopen(&actions, r.fd >= 0 ? r.fd : STDOUT_FILENO, t.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
                 break;
             case Redirect::Kind::ErrOut:
-                posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, r.target.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, t.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                break;
+            case Redirect::Kind::DupFd:
+                // `N>&M` -> make fd N a copy of fd M; `N>&-` (dupFd<0) closes N.
+                if (r.dupFd >= 0) posix_spawn_file_actions_adddup2(&actions, r.dupFd, r.fd);
+                else posix_spawn_file_actions_addclose(&actions, r.fd);
                 break;
             case Redirect::Kind::HereDoc: {
                 int fd = heredocTempFd(heredocBody(r, state));
@@ -161,15 +192,64 @@ static void applyRedirectsInChild(const std::vector<Redirect>& redirects, ShellS
             if (fd != -1) { dup2(fd, STDIN_FILENO); close(fd); }
             continue;
         }
+        if (r.kind == Redirect::Kind::DupFd) {
+            // `N>&M` -> fd N becomes a copy of fd M (current value); `N>&-` closes N.
+            if (r.dupFd >= 0) dup2(r.dupFd, r.fd);
+            else close(r.fd);
+            continue;
+        }
+        std::string t = expandWord(r.target, state); // expand $VAR / ~ / $(cmd), no split
         int fd = -1, target = -1;
         switch (r.kind) {
-            case Redirect::Kind::In: fd = open(r.target.c_str(), O_RDONLY); target = STDIN_FILENO; break;
-            case Redirect::Kind::Out: fd = open(r.target.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644); target = STDOUT_FILENO; break;
-            case Redirect::Kind::Append: fd = open(r.target.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644); target = STDOUT_FILENO; break;
-            case Redirect::Kind::ErrOut: fd = open(r.target.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644); target = STDERR_FILENO; break;
+            case Redirect::Kind::In: fd = open(t.c_str(), O_RDONLY); target = r.fd >= 0 ? r.fd : STDIN_FILENO; break;
+            case Redirect::Kind::Out: fd = open(t.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644); target = r.fd >= 0 ? r.fd : STDOUT_FILENO; break;
+            case Redirect::Kind::Append: fd = open(t.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644); target = r.fd >= 0 ? r.fd : STDOUT_FILENO; break;
+            case Redirect::Kind::ErrOut: fd = open(t.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644); target = STDERR_FILENO; break;
+            case Redirect::Kind::DupFd: break;  // handled above
             case Redirect::Kind::HereDoc: break; // handled above
         }
         if (fd != -1) { dup2(fd, target); close(fd); }
+    }
+}
+
+// Dispatch a node applying background/negate but NOT its own (compound)
+// redirects -- used where redirects were already applied by the caller
+// (a pipeline stage's forked child).
+static int execNodeNoRedir(Node* node, ShellState& state);
+
+// Which fd does a redirect target in the current process? (mirrors the
+// target choices in applyRedirectsInChild.)
+static int redirectTargetFd(const Redirect& r) {
+    switch (r.kind) {
+        case Redirect::Kind::In: return r.fd >= 0 ? r.fd : STDIN_FILENO;
+        case Redirect::Kind::Out:
+        case Redirect::Kind::Append: return r.fd >= 0 ? r.fd : STDOUT_FILENO;
+        case Redirect::Kind::ErrOut: return STDERR_FILENO;
+        case Redirect::Kind::DupFd: return r.fd;
+        case Redirect::Kind::HereDoc: return STDIN_FILENO;
+    }
+    return STDOUT_FILENO;
+}
+
+// Apply redirects to the CURRENT process, first saving the affected fds so they
+// can be restored afterward. Used for compound commands (`for..done > f`), which
+// run in-shell -- their variable changes must persist, so we can't just fork.
+static std::vector<std::pair<int, int>> applyRedirectsSaving(const std::vector<Redirect>& redirects, ShellState& state) {
+    std::vector<std::pair<int, int>> saved; // (targetFd, savedCopyFd)
+    for (const auto& r : redirects) {
+        int target = redirectTargetFd(r);
+        int copy = fcntl(target, F_DUPFD_CLOEXEC, 10); // -1 if target wasn't open
+        saved.emplace_back(target, copy);
+    }
+    applyRedirectsInChild(redirects, state); // does the actual opens + dup2s
+    return saved;
+}
+
+static void restoreRedirects(std::vector<std::pair<int, int>>& saved) {
+    // Restore in reverse so overlapping targets unwind correctly.
+    for (auto it = saved.rbegin(); it != saved.rend(); ++it) {
+        int target = it->first, copy = it->second;
+        if (copy >= 0) { dup2(copy, target); close(copy); }
     }
 }
 
@@ -189,14 +269,22 @@ static std::string buildCmdline(Node* node) {
 static int runPipelineStage(Node* cmd, ShellState& state, int inFd, int outFd, pid_t& pidOut) {
     // A subshell stage of a pipeline (`(a; b) | c` or `c | (a; b)`): fork,
     // wire the pipe fds, and run the subshell body in the child.
-    if (cmd->kind == NodeKind::Subshell) {
+    // A subshell OR a compound command (if/while/for/case) as a pipeline stage:
+    // fork, wire the pipe fds + the stage's own redirects, and run it in the
+    // child. This is what makes `for ..; done | wc` and `cmd | while read` work.
+    if (cmd->kind == NodeKind::Subshell || cmd->kind == NodeKind::If ||
+        cmd->kind == NodeKind::While || cmd->kind == NodeKind::For ||
+        cmd->kind == NodeKind::Case) {
         std::cout.flush();
         fflush(stdout);
         pid_t pid = fork();
         if (pid == 0) {
             if (inFd != -1) { dup2(inFd, STDIN_FILENO); close(inFd); }
             if (outFd != -1) { dup2(outFd, STDOUT_FILENO); close(outFd); }
-            int rc = execNode(cmd->children[0].get(), state);
+            applyRedirectsInChild(cmd->redirects, state);
+            int rc = (cmd->kind == NodeKind::Subshell)
+                         ? execNode(cmd->children[0].get(), state)
+                         : execNodeNoRedir(cmd, state);
             std::cout.flush();
             _exit(rc & 0xff);
         }
@@ -556,31 +644,36 @@ static int runCommand(Node* cmd, ShellState& state) {
         return it->second(argv, state);
     }
     if (it != reg.end()) {
-        // Builtin with redirects: fork so the redirect doesn't leak into the
-        // interactive shell's own stdout/stdin. BlockSigchld guards the
-        // whole fork+wait sequence: without it, the global SIGCHLD handler
-        // (installed for background-job tracking) can reap this specific
-        // child first, making our own waitpid() below return ECHILD --
-        // silently leaving `status` at its zero-initialized value, which
-        // WIFEXITED/WEXITSTATUS then misreport as "exited successfully".
-        BlockSigchld guard;
-        std::cout.flush(); // flush BEFORE forking -- see captureCommandOutput()
-        fflush(stdout);     // for why (stale buffered output would otherwise
-                            // get duplicated by the child's own flush)
-        pid_t pid = fork();
-        if (pid == 0) {
-            applyRedirectsInChild(cmd->redirects, state);
-            int rc = it->second(argv, state);
-            std::cout.flush(); // same _exit()-skips-iostream-flush issue as
-                                // the pipeline builtin-fork path (Task 13)
-            _exit(rc);
-        }
-        int status = 0;
-        waitpidRetry(pid, &status, 0);
-        return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+        // Builtin WITH redirects: run IN-PROCESS with the redirects applied via
+        // save/restore, NOT in a fork. A forked builtin's state changes (cd,
+        // read, export, set, unset, local) would be lost to the child -- e.g.
+        // `cd dir >/dev/null` or `read x < file` must affect the real shell.
+        // The redirect still applies to the builtin's own stdin/stdout for its
+        // duration, then the shell's fds are restored.
+        std::cout.flush();
+        fflush(stdout);
+        auto saved = applyRedirectsSaving(cmd->redirects, state);
+        int rc = it->second(argv, state);
+        std::cout.flush();
+        fflush(stdout); // flush the builtin's output to the redirected fd first
+        restoreRedirects(saved);
+        return rc;
     }
 
     maybeAutocorrect(argv); // ARK_AUTOCORRECT=1: fix a typo'd command before spawning
+    maybeAutoPath(argv);    // ARK_AUTO_PATH=1: resolve a non-$PATH program via the file index
+
+    // Overlay compositor (ARK_OVERLAY=1, experimental): run the command through
+    // ark's own PTY so its output can be mirrored into the pinned "deadzone" AND
+    // captured for ark's own scrollback. Only for a plain foreground command with
+    // no redirects (those still need the posix_spawn file-actions path); a PTY
+    // setup failure returns -1 and falls through to the normal spawn below.
+    if (overlay::enabled() && cmd->redirects.empty()) {
+        std::cout.flush();
+        fflush(stdout);
+        int st = overlay::run(argv, environ);
+        if (st >= 0) return st;
+    }
 
     std::vector<char*> cargv;
     for (auto& a : argv) cargv.push_back(const_cast<char*>(a.c_str()));
@@ -743,9 +836,19 @@ static int runFor(Node* fn, ShellState& state) {
 static int runCase(Node* cn, ShellState& state) {
     std::string word = expandWord(cn->caseWord, state);
     for (auto& clause : cn->caseClauses) {
-        if (globMatch(clause.first, word)) {
-            return execNode(clause.second.get(), state);
+        // A clause pattern can hold '|'-separated alternatives (e.g. `a|b*`);
+        // the clause matches if ANY alternative matches.
+        const std::string& pat = clause.first;
+        bool matched = false;
+        size_t start = 0;
+        for (;;) {
+            size_t bar = pat.find('|', start);
+            std::string alt = pat.substr(start, bar == std::string::npos ? std::string::npos : bar - start);
+            if (globMatch(alt, word)) { matched = true; break; }
+            if (bar == std::string::npos) break;
+            start = bar + 1;
         }
+        if (matched) return execNode(clause.second.get(), state);
     }
     return 0;
 }
@@ -814,7 +917,7 @@ static int execNodeDispatch(Node* node, ShellState& state) {
 // (POSIX allows it anywhere a pipeline appears, e.g. inside an if-branch) --
 // handled centrally here so every node kind gets it uniformly instead of
 // duplicating background logic in runCommand AND runPipeline separately.
-int execNode(Node* node, ShellState& state) {
+static int execNodeNoRedir(Node* node, ShellState& state) {
     if (node->background && (node->kind == NodeKind::Command || node->kind == NodeKind::Pipeline ||
                              node->kind == NodeKind::Subshell)) {
         std::cout.flush(); // flush BEFORE forking -- see captureCommandOutput()
@@ -843,6 +946,23 @@ int execNode(Node* node, ShellState& state) {
     int status = execNodeDispatch(node, state);
     if (node->negate) status = (status == 0) ? 1 : 0; // leading `!`
     return status;
+}
+
+// Public entry point. Compound commands (if/while/for/case) run in-shell, so
+// their trailing redirects (`for ..; done > f`) are applied to the current
+// process with save/restore around the body. Command/Subshell/Pipeline manage
+// their own redirects (in runCommand / the forked child), so pass through.
+int execNode(Node* node, ShellState& state) {
+    bool wrap = !node->redirects.empty() &&
+                (node->kind == NodeKind::If || node->kind == NodeKind::While ||
+                 node->kind == NodeKind::For || node->kind == NodeKind::Case);
+    if (!wrap) return execNodeNoRedir(node, state);
+    auto saved = applyRedirectsSaving(node->redirects, state);
+    int rc = execNodeNoRedir(node, state);
+    std::cout.flush();
+    fflush(stdout); // flush buffered output to the redirected fd before restoring
+    restoreRedirects(saved);
+    return rc;
 }
 
 std::string captureCommandOutput(const std::string& cmd, ShellState& state) {

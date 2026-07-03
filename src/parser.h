@@ -70,6 +70,8 @@ private:
     }
 
     std::unique_ptr<Node> parseCommand();
+    bool parseRedirectInto(Node* node); // consume one redirection token into node; false if none
+    void parseTrailingRedirects(Node* node); // consume redirects after a compound/subshell
     std::unique_ptr<Node> parsePipelineElement();
     std::unique_ptr<Node> parsePipeline();
     std::unique_ptr<Node> parseStatement();

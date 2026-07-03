@@ -10,32 +10,52 @@ static Redirect::Kind redirKindFor(TokKind t) {
     }
 }
 
+// Consume ONE redirection token (and its filename, if any) into node->redirects.
+// Returns false if the current token isn't a redirection.
+bool Parser::parseRedirectInto(Node* node) {
+    TokKind k = peek().kind;
+    if (k == TokKind::RedirHeredoc) {
+        const Token& t = advance();
+        node->redirects.push_back(Redirect{Redirect::Kind::HereDoc, t.text, !t.heredocNoExpand});
+        return true;
+    }
+    if (k == TokKind::RedirDup) {
+        // `N>&M` / `>&M` / `<&M` -- duplicate one fd onto another; no filename.
+        const Token& t = advance();
+        Redirect r{Redirect::Kind::DupFd, "", true};
+        r.fd = t.fd; r.dupFd = t.dupFd;
+        node->redirects.push_back(r);
+        return true;
+    }
+    if (k == TokKind::RedirIn || k == TokKind::RedirOut ||
+        k == TokKind::RedirAppend || k == TokKind::RedirErrOut) {
+        Redirect::Kind rk = redirKindFor(k);
+        const Token& op = advance(); // consume the operator (carries the fd)
+        int fd = op.fd;
+        if (!check(TokKind::Word)) // a redirection needs a filename word next
+            throw ParseError(peek().line, peek().col, "expected filename after redirection",
+                              peek().kind == TokKind::End);
+        std::string target = advance().text; // the filename word
+        Redirect r{rk, target, true};
+        r.fd = fd;
+        node->redirects.push_back(r);
+        return true;
+    }
+    return false;
+}
+
+// Redirections trailing a compound/subshell: `for ...; done > f`, `(a;b) 2>&1`.
+void Parser::parseTrailingRedirects(Node* node) {
+    while (parseRedirectInto(node)) { /* keep consuming */ }
+}
+
 std::unique_ptr<Node> Parser::parseCommand() {
     auto node = std::make_unique<Node>();
     node->kind = NodeKind::Command;
     while (!atStatementEnd()) {
         TokKind k = peek().kind;
-        if (k == TokKind::RedirHeredoc) {
-            // The lexer already collected the body into this token's text and
-            // recorded whether the delimiter was quoted -- no following word
-            // to consume (unlike a file redirect).
-            const Token& t = advance();
-            node->redirects.push_back(Redirect{Redirect::Kind::HereDoc, t.text, !t.heredocNoExpand});
-            continue;
-        }
-        if (k == TokKind::RedirIn || k == TokKind::RedirOut ||
-            k == TokKind::RedirAppend || k == TokKind::RedirErrOut) {
-            Redirect::Kind rk = redirKindFor(k);
-            advance(); // consume the operator
-            if (!check(TokKind::Word)) // a redirection needs a filename word next
-                throw ParseError(peek().line, peek().col, "expected filename after redirection",
-                                  peek().kind == TokKind::End);
-            std::string target = advance().text; // the filename word
-            node->redirects.push_back(Redirect{rk, target});
-            continue;
-        }
-        // Pipe/And/Or/Amp/LParen/RParen end a simple command in this task;
-        // handled by higher-level parsing added in Task 5.
+        if (parseRedirectInto(node.get())) continue;
+        // Pipe/And/Or/Amp/RParen end a simple command; handled higher up.
         if (k == TokKind::Pipe || k == TokKind::And || k == TokKind::Or ||
             k == TokKind::Amp || k == TokKind::RParen) {
             break;
@@ -50,15 +70,29 @@ std::unique_ptr<Node> Parser::parseCommand() {
 // `c | (a;b)` -- with the pipe correctly consumed (a bare parseCommand can't
 // parse a subshell, so those pipes used to be left dangling).
 std::unique_ptr<Node> Parser::parsePipelineElement() {
+    // A `( subshell )` or a compound command (if/while/for/case) can each be a
+    // pipeline stage -- `for x in ..; do ..; done | wc`, `cmd | while read l; do ..`.
+    // Each may also carry trailing redirects -- `for ..; done > f`, `(a;b) 2>&1`.
+    std::unique_ptr<Node> node;
     if (check(TokKind::LParen)) {
         advance(); // '('
-        auto sub = std::make_unique<Node>();
-        sub->kind = NodeKind::Subshell;
-        sub->children.push_back(parseStatementList({TokKind::RParen}));
+        node = std::make_unique<Node>();
+        node->kind = NodeKind::Subshell;
+        node->children.push_back(parseStatementList({TokKind::RParen}));
         expect(TokKind::RParen, ")");
-        return sub;
+    } else if (check(TokKind::If)) {
+        node = parseIf();
+    } else if (check(TokKind::While)) {
+        node = parseWhile();
+    } else if (check(TokKind::For)) {
+        node = parseFor();
+    } else if (check(TokKind::Case)) {
+        node = parseCase();
+    } else {
+        return parseCommand(); // parseCommand handles its own redirects inline
     }
-    return parseCommand();
+    parseTrailingRedirects(node.get());
+    return node;
 }
 
 std::unique_ptr<Node> Parser::parsePipeline() {
@@ -134,13 +168,20 @@ std::unique_ptr<Node> Parser::parseFor() {
     auto fn = std::make_unique<Node>();
     fn->kind = NodeKind::For;
     fn->forVar = advance().text; // variable name
-    advance(); // 'in'
-    // Stop at a statement end (Semi/Newline/End) OR `do` -- crucially including
-    // End, or a truncated `for x in a b` (no trailing separator, the normal
-    // interactive case) loops forever pushing the End sentinel's empty text.
-    // expect(Do) below then reports the missing `do` as incomplete.
-    while (!atStatementEnd() && !check(TokKind::Do)) {
-        fn->forWords.push_back(advance().text);
+    if (check(TokKind::In)) {
+        advance(); // 'in'
+        // Stop at a statement end (Semi/Newline/End) OR `do` -- crucially including
+        // End, or a truncated `for x in a b` (no trailing separator, the normal
+        // interactive case) loops forever pushing the End sentinel's empty text.
+        // expect(Do) below then reports the missing `do` as incomplete.
+        while (!atStatementEnd() && !check(TokKind::Do)) {
+            fn->forWords.push_back(advance().text);
+        }
+    } else {
+        // `for x; do ...; done` with no `in` iterates over the positional
+        // parameters ($@) -- POSIX. (Word-splits params with spaces, which is
+        // fine for the overwhelmingly common no-spaces case.)
+        fn->forWords.push_back("$@");
     }
     while (check(TokKind::Semi) || check(TokKind::Newline)) advance(); // separator(s) before 'do'
     expect(TokKind::Do, "do");
@@ -162,7 +203,15 @@ std::unique_ptr<Node> Parser::parseCase() {
     // reports the missing esac cleanly (incomplete on End -> continuation
     // prompt interactively).
     while (!check(TokKind::Esac) && !check(TokKind::End)) {
-        std::string pattern = advance().text;
+        // A clause pattern may have a leading '(' and multiple alternatives
+        // joined by '|': `(a|b*|c)`. Collect the whole thing (as `a|b*|c`) up
+        // to the closing ')'; runCase splits on '|' and matches any alternative.
+        if (check(TokKind::LParen)) advance(); // optional leading '('
+        std::string pattern;
+        while (!check(TokKind::RParen) && !check(TokKind::End)) {
+            if (check(TokKind::Pipe)) { pattern += '|'; advance(); }
+            else pattern += advance().text;
+        }
         if (check(TokKind::RParen)) advance(); // ')'
         auto body = parseStatementList({TokKind::DSemi, TokKind::Esac});
         cn->caseClauses.emplace_back(pattern, std::move(body));
@@ -201,12 +250,10 @@ std::unique_ptr<Node> Parser::parseStatement() {
     // Leading `!` negates the statement's exit status (bash's pipeline `!`).
     bool negate = false;
     if (check(TokKind::Word) && peek().text == "!") { advance(); negate = true; }
-    auto applyNegate = [&](std::unique_ptr<Node> n) { if (negate) n->negate = !n->negate; return n; };
 
-    if (check(TokKind::If)) return applyNegate(parseIf());
-    if (check(TokKind::While)) return applyNegate(parseWhile());
-    if (check(TokKind::For)) return applyNegate(parseFor());
-    if (check(TokKind::Case)) return applyNegate(parseCase());
+    // Compound commands (if/while/for/case) and subshells are parsed as pipeline
+    // elements (see parsePipelineElement), so `for ..; done | wc`, redirects, and
+    // &/&&/||/; all flow through the same parsePipeline path below.
     if (check(TokKind::Function)) return parseFunctionDef();
     // Note: a `( subshell )` is parsed as a pipeline element (see
     // parsePipelineElement), so it flows through parsePipeline below and gets

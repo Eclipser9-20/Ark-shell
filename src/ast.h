@@ -8,9 +8,11 @@ enum class NodeKind { Command, Pipeline, If, While, For, Case, FunctionDef, List
 enum class JoinOp { None, And, Or, Seq };
 
 struct Redirect {
-    enum class Kind { In, Out, Append, ErrOut, HereDoc } kind;
+    enum class Kind { In, Out, Append, ErrOut, HereDoc, DupFd } kind;
     std::string target;       // filename for file redirects; the BODY for HereDoc
     bool heredocExpand = true; // HereDoc: expand $vars in the body (false for <<'EOF')
+    int fd = -1;              // source fd being redirected; -1 = default per kind
+    int dupFd = -1;           // DupFd: the fd to duplicate FROM (e.g. `2>&1` -> fd=2, dupFd=1)
 };
 
 struct Node {

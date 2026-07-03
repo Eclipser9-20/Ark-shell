@@ -59,3 +59,9 @@ void rebuildFileIndex();   // force a fresh walk (ark-reindex)
 bool fileIndexReady();
 size_t fileIndexSize();
 std::vector<std::string> completeFromIndex(const std::string& prefix, bool execOnly);
+
+// Full path of an executable in the background index whose basename EXACTLY
+// matches `name` -- for auto-path (running a program that isn't on $PATH).
+// Returns "" if the index isn't ready, nothing matches, or the match is
+// ambiguous (more than one distinct path), so ark never silently guesses.
+std::string findIndexedExecutable(const std::string& name);

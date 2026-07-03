@@ -62,8 +62,15 @@ struct ArithEval {
         }
         if (std::isdigit((unsigned char)c)) {
             size_t j = pos;
-            while (j < s.size() && std::isdigit((unsigned char)s[j])) j++;
-            long v = std::strtol(s.substr(pos, j - pos).c_str(), nullptr, 10);
+            int base = 10;
+            if (s[j] == '0' && j + 1 < s.size() && (s[j + 1] == 'x' || s[j + 1] == 'X')) {
+                base = 16; j += 2; while (j < s.size() && std::isxdigit((unsigned char)s[j])) j++;
+            } else if (s[j] == '0' && j + 1 < s.size() && s[j + 1] >= '0' && s[j + 1] <= '7') {
+                base = 8; while (j < s.size() && s[j] >= '0' && s[j] <= '7') j++;
+            } else {
+                while (j < s.size() && std::isdigit((unsigned char)s[j])) j++;
+            }
+            long v = std::strtol(s.substr(pos, j - pos).c_str(), nullptr, base);
             pos = j;
             return v;
         }
@@ -79,13 +86,30 @@ struct ArithEval {
         return 0;
     }
 
+    // Exponentiation `a ** b`: binds tighter than * / % but looser than unary
+    // minus (so -2**2 == -(2**2) == -4, matching bash/python). Right-associative:
+    // 2**3**2 == 2**(3**2) == 512, via parsing the exponent through parseUnary.
+    long parsePower() {
+        long base = parsePrimary();
+        skipSpace();
+        if (pos + 1 < s.size() && s[pos] == '*' && s[pos + 1] == '*') {
+            pos += 2;
+            long e = parseUnary();
+            if (e < 0) return 0;
+            long r = 1;
+            for (long k = 0; k < e; k++) r *= base;
+            return r;
+        }
+        return base;
+    }
+
     long parseUnary() {
         skipSpace();
         if (eat("!")) return !parseUnary();
         if (eat("~")) return ~parseUnary();
         if (pos < s.size() && s[pos] == '-') { pos++; return -parseUnary(); }
         if (pos < s.size() && s[pos] == '+') { pos++; return parseUnary(); }
-        return parsePrimary();
+        return parsePower();
     }
 
     long parseMul() {
@@ -114,8 +138,11 @@ struct ArithEval {
     long parseShift() {
         long v = parseAdd();
         for (;;) {
-            if (eat("<<")) v = v << parseAdd();
-            else if (eat(">>")) v = v >> parseAdd();
+            // Guard the shift COUNT: a count >= 64 or < 0 is undefined behavior
+            // (UBSan-flagged on `$(( 1<<200 ))`); define it as 0 like most shells.
+            // Cast to unsigned for << so a negative value doesn't shift-UB either.
+            if (eat("<<")) { long s = parseAdd(); v = (s >= 0 && s < 64) ? (long)((unsigned long)v << s) : 0; }
+            else if (eat(">>")) { long s = parseAdd(); v = (s >= 0 && s < 64) ? (v >> s) : 0; }
             else break;
         }
         return v;
@@ -150,7 +177,30 @@ struct ArithEval {
     long parseLAnd() { long v = parseBOr(); while (eat("&&")) { long r = parseBOr(); v = (v && r); } return v; }
     long parseLOr()  { long v = parseLAnd(); while (eat("||")) { long r = parseLAnd(); v = (v || r); } return v; }
 
-    long parseExpr() { return parseLOr(); }
+    // Ternary `cond ? a : b` -- lowest precedence bar comma, right-associative
+    // so `a ? b : c ? d : e` parses as `a ? b : (c ? d : e)`.
+    long parseTernary() {
+        long c = parseLOr();
+        skipSpace();
+        if (pos < s.size() && s[pos] == '?') {
+            pos++;
+            long a = parseTernary();
+            skipSpace();
+            if (pos < s.size() && s[pos] == ':') pos++; else ok = false;
+            long b = parseTernary();
+            return c ? a : b;
+        }
+        return c;
+    }
+
+    // Comma operator: lowest precedence, left-to-right, yields the last value.
+    long parseComma() {
+        long v = parseTernary();
+        while (peek() == ',') { pos++; v = parseTernary(); }
+        return v;
+    }
+
+    long parseExpr() { return parseComma(); }
 };
 } // namespace
 
@@ -196,14 +246,17 @@ static std::string expandParam(const std::string& inner, const ShellState& state
         // substring: parse offset[:length]
         std::string body = rest.substr(1);
         size_t colon2 = body.find(':');
+        bool hasLength = colon2 != std::string::npos; // distinguishes ${x:0} from ${x:0:-1}
         long offset = std::strtol(body.substr(0, colon2).c_str(), nullptr, 10);
-        long length = colon2 == std::string::npos ? -1 : std::strtol(body.substr(colon2 + 1).c_str(), nullptr, 10);
+        long length = hasLength ? std::strtol(body.substr(colon2 + 1).c_str(), nullptr, 10) : 0;
         long n = (long)val.size();
-        if (offset < 0) offset = n + offset; // negative offset counts from end
+        if (offset < 0) offset = n + offset; // negative offset counts from the end
         if (offset < 0) offset = 0;
         if (offset > n) return "";
-        if (length < 0) return val.substr(offset); // to end
-        long end = offset + length;
+        if (!hasLength) return val.substr(offset); // no length -> to the end
+        // A NEGATIVE length is an index from the END (bash): ${x:0:-1} strips the
+        // last char. A positive length is a count from `offset`.
+        long end = length < 0 ? n + length : offset + length;
         if (end > n) end = n;
         if (end < offset) end = offset;
         return val.substr(offset, end - offset);
@@ -279,6 +332,21 @@ static std::string expandParam(const std::string& inner, const ShellState& state
         return out;
     }
 
+    // ${name,} ${name,,} -- lowercase (first char / all); ${name^} ${name^^} -- uppercase.
+    if (rest[0] == ',' || rest[0] == '^') {
+        char op = rest[0];
+        bool all = rest.size() > 1 && rest[1] == op;
+        std::string r = val;
+        if (op == ',') {
+            if (all) for (char& ch : r) ch = (char)std::tolower((unsigned char)ch);
+            else if (!r.empty()) r[0] = (char)std::tolower((unsigned char)r[0]);
+        } else {
+            if (all) for (char& ch : r) ch = (char)std::toupper((unsigned char)ch);
+            else if (!r.empty()) r[0] = (char)std::toupper((unsigned char)r[0]);
+        }
+        return r;
+    }
+
     return val; // unrecognized operator: fall back to the plain value
 }
 
@@ -302,6 +370,12 @@ static std::string expandOne(const std::string& src, size_t& i, const ShellState
         std::string expr;
         bool closed = false;
         while (j < src.size()) {
+            if (src[j] == '\'' || src[j] == '"') {
+                char q = src[j]; expr += src[j]; j++;
+                while (j < src.size() && src[j] != q) { if (q == '"' && src[j] == '\\' && j + 1 < src.size()) { expr += src[j]; j++; } expr += src[j]; j++; }
+                if (j < src.size()) { expr += src[j]; j++; }
+                continue;
+            }
             if (src[j] == '(') { depth++; expr += src[j]; j++; }
             else if (src[j] == ')') {
                 if (depth == 0) {
@@ -325,9 +399,18 @@ static std::string expandOne(const std::string& src, size_t& i, const ShellState
         int depth = 1;
         size_t j = i + 1;
         while (j < src.size() && depth > 0) {
-            if (src[j] == '(') depth++;
-            else if (src[j] == ')') depth--;
-            if (depth > 0) j++;
+            char c = src[j];
+            // Skip quoted spans so a ')' inside '...' or "..." doesn't
+            // prematurely close the command substitution.
+            if (c == '\'' || c == '"') {
+                char q = c; j++;
+                while (j < src.size() && src[j] != q) { if (q == '"' && src[j] == '\\' && j + 1 < src.size()) j++; j++; }
+                if (j < src.size()) j++;
+                continue;
+            }
+            if (c == '(') depth++;
+            else if (c == ')') { depth--; if (depth == 0) break; }
+            j++;
         }
         std::string cmd = src.substr(i + 1, j - i - 1);
         i = j + 1;
@@ -437,8 +520,17 @@ static std::vector<std::string> braceRange(const std::string& body) {
     size_t dots = body.find("..");
     if (dots == std::string::npos) return {};
     std::string lo = body.substr(0, dots);
-    std::string hi = body.substr(dots + 2);
-    if (hi.find("..") != std::string::npos) return {}; // {a..b..c} step form unsupported
+    std::string afterLo = body.substr(dots + 2);
+    // Optional step: {lo..hi..step}. A third ".." beyond that is malformed.
+    std::string hi, stepStr;
+    size_t dots2 = afterLo.find("..");
+    if (dots2 == std::string::npos) {
+        hi = afterLo;
+    } else {
+        hi = afterLo.substr(0, dots2);
+        stepStr = afterLo.substr(dots2 + 2);
+        if (stepStr.find("..") != std::string::npos) return {};
+    }
     if (lo.empty() || hi.empty()) return {};
 
     auto allDigits = [](const std::string& s) {
@@ -447,18 +539,33 @@ static std::vector<std::string> braceRange(const std::string& body) {
         for (; k < s.size(); k++) if (!std::isdigit((unsigned char)s[k])) return false;
         return true;
     };
+    long step = 1;
+    if (!stepStr.empty()) {
+        if (!allDigits(stepStr)) return {};
+        step = std::labs(std::strtol(stepStr.c_str(), nullptr, 10));
+        if (step == 0) step = 1;
+    }
     std::vector<std::string> out;
     if (allDigits(lo) && allDigits(hi)) {
         long a = std::strtol(lo.c_str(), nullptr, 10);
         long b = std::strtol(hi.c_str(), nullptr, 10);
-        if (a <= b) for (long v = a; v <= b; v++) out.push_back(std::to_string(v));
-        else for (long v = a; v >= b; v--) out.push_back(std::to_string(v));
+        // Cap the element count so a huge/extreme range -- {1..99999999999} (OOM
+        // hang) or {1..9223372036854775807} (v+=step overflows -> infinite loop)
+        // -- is left literal instead of hanging the shell. Unsigned subtraction
+        // is well-defined even across LONG_MIN..LONG_MAX; iterate by a bounded
+        // count rather than comparing a possibly-overflowing v.
+        constexpr unsigned long kMaxRange = 100000;
+        unsigned long span = (a <= b) ? (unsigned long)b - (unsigned long)a
+                                      : (unsigned long)a - (unsigned long)b;
+        if (span / (unsigned long)step >= kMaxRange) return {}; // too large -> don't expand
+        for (unsigned long k = 0; k * (unsigned long)step <= span; k++)
+            out.push_back(std::to_string(a <= b ? a + (long)(k * step) : a - (long)(k * step)));
         return out;
     }
     if (lo.size() == 1 && hi.size() == 1 && std::isalpha((unsigned char)lo[0]) && std::isalpha((unsigned char)hi[0])) {
-        char a = lo[0], b = hi[0];
-        if (a <= b) for (char c = a; c <= b; c++) out.push_back(std::string(1, c));
-        else for (char c = a; c >= b; c--) out.push_back(std::string(1, c));
+        int a = (unsigned char)lo[0], b = (unsigned char)hi[0];
+        if (a <= b) for (int c = a; c <= b; c += step) out.push_back(std::string(1, (char)c));
+        else for (int c = a; c >= b; c -= step) out.push_back(std::string(1, (char)c));
         return out;
     }
     return {};
@@ -493,6 +600,19 @@ static std::vector<std::string> braceExpand(const std::string& w) {
             size_t j = i + 1;
             while (j < n && w[j] != s) j++;
             i = j;
+            continue;
+        }
+        // Skip `$`-prefixed constructs whole: ${param}, $(cmd), $((arith)) are
+        // NOT brace groups. Without this, `${v,,}` is mis-read as brace group
+        // `{v,,}` and comma-split, and braces inside $(...) get wrongly expanded.
+        if (w[i] == '$' && i + 1 < n && (w[i + 1] == '{' || w[i + 1] == '(')) {
+            char open = w[i + 1], close = (open == '{') ? '}' : ')';
+            int depth = 0; size_t j = i + 1;
+            for (; j < n; j++) {
+                if (w[j] == open) depth++;
+                else if (w[j] == close) { depth--; if (depth == 0) { j++; break; } }
+            }
+            i = j - 1;
             continue;
         }
         if (w[i] != '{') continue;

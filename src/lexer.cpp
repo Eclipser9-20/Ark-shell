@@ -60,7 +60,9 @@ Token Lexer::lexWord() {
             advance();
             out += '\x01';
             while (!atEnd() && peek() != '"') {
-                if (peek() == '\\' && (peek(1) == '"' || peek(1) == '\\' || peek(1) == '$')) {
+                if (peek() == '\\' && peek(1) == '\n') {
+                    advance(); advance(); // line continuation inside "...": drop both
+                } else if (peek() == '\\' && (peek(1) == '"' || peek(1) == '\\' || peek(1) == '$')) {
                     advance();
                     out += advance();
                 } else {
@@ -73,7 +75,10 @@ Token Lexer::lexWord() {
         }
         if (c == '\\') {
             advance();
-            if (!atEnd()) out += advance();
+            if (!atEnd()) {
+                if (peek() == '\n') advance(); // line continuation: drop backslash+newline
+                else out += advance();
+            }
             continue;
         }
         if (c == '`') {
@@ -115,6 +120,14 @@ Token Lexer::lexWord() {
             while (!atEnd() && depth > 0) {
                 char cc = advance();
                 out += cc;
+                // Skip quoted spans so a paren inside '...'/"..." doesn't
+                // throw off the depth count (e.g. $(echo 'x)y')).
+                if (cc == '\'' || cc == '"') {
+                    char q = cc;
+                    while (!atEnd() && peek() != q) { if (q == '"' && peek() == '\\') out += advance(); out += advance(); }
+                    if (!atEnd()) out += advance();
+                    continue;
+                }
                 if (cc == '(') depth++;
                 else if (cc == ')') depth--;
             }
@@ -194,13 +207,9 @@ std::vector<Token> Lexer::tokenize() {
             pending.clear();
             continue;
         }
-        if (peek() == '2' && peek(1) == '>') {
-            int l = line_, c = col_;
-            advance(); advance();
-            toks.push_back(Token{TokKind::RedirErrOut, "2>", l, c});
-            continue;
-        }
         // Here-doc: `<<` or `<<-`, followed by a (possibly quoted) delimiter.
+        // Checked before the general redirect scanner so `<<` isn't read as two
+        // input redirects.
         if (peek() == '<' && peek(1) == '<') {
             int l = line_, c = col_;
             advance(); advance(); // '<<'
@@ -223,6 +232,46 @@ std::vector<Token> Lexer::tokenize() {
             toks.push_back(Token{TokKind::RedirHeredoc, "", l, c});
             pending.push_back(PendingHeredoc{toks.size() - 1, delim, stripTabs, noExpand});
             continue;
+        }
+        // Redirections with an optional leading fd and fd-duplication:
+        //   >  >>  <   N>  N>>  N<   >&M  N>&M  <&M  N<&M
+        // (Bare `>`/`<` fall here too, with fd defaulting to 1/0.) Checked
+        // after `<<` so here-docs win. A leading digit run only counts as an fd
+        // when immediately followed by `<`/`>` -- otherwise it's a plain word.
+        {
+            size_t p = pos_;
+            while (p < src_.size() && std::isdigit((unsigned char)src_[p])) p++;
+            if (p < src_.size() && (src_[p] == '<' || src_[p] == '>')) {
+                int l = line_, c = col_;
+                int fdnum = (p > pos_) ? std::atoi(src_.substr(pos_, p - pos_).c_str()) : -1;
+                while (pos_ < p) advance();       // consume fd digits
+                char dir = advance();             // '<' or '>'
+                bool append = (dir == '>' && peek() == '>');
+                if (append) advance();
+                if (peek() == '&') {              // fd-duplication: >&M / N>&M / <&M
+                    advance();
+                    std::string t;
+                    while (!atEnd() && std::isdigit((unsigned char)peek())) t += advance();
+                    Token tk{TokKind::RedirDup, "", l, c};
+                    tk.fd = (fdnum >= 0) ? fdnum : (dir == '>' ? 1 : 0);
+                    tk.dupFd = t.empty() ? -1 : std::atoi(t.c_str());
+                    toks.push_back(tk);
+                    continue;
+                }
+                // Preserve the legacy dedicated `2>` token (RedirErrOut) so the
+                // existing stderr-redirect path/tests are unchanged; other fds
+                // use the general fd-carrying Out/Append/In tokens.
+                if (fdnum == 2 && dir == '>' && !append) {
+                    toks.push_back(Token{TokKind::RedirErrOut, "2>", l, c});
+                    continue;
+                }
+                TokKind k = (dir == '<') ? TokKind::RedirIn
+                          : (append ? TokKind::RedirAppend : TokKind::RedirOut);
+                Token tk{k, dir == '<' ? "<" : (append ? ">>" : ">"), l, c};
+                tk.fd = fdnum;
+                toks.push_back(tk);
+                continue;
+            }
         }
         if (std::string("|&;<>()").find(peek()) != std::string::npos) {
             int l = line_, c = col_;

@@ -22,6 +22,7 @@
 #include <iostream>
 #include <iterator>
 #include <string>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
@@ -570,8 +571,17 @@ int main(int argc, char** argv) {
             const char* t = getenv("ARK_CHROME_TOP");
             bool chromeOn = !(c && std::string(c) == "0");
             bool inlineTop = t && std::string(t) == "inline";
-            if (chromeOn && inlineTop)
-                std::cout << topBar(state.cwd, findGitBranch(state.cwd)) << "\r\n" << std::flush;
+            if (chromeOn && inlineTop) {
+                // Only print the header when the cwd/branch actually CHANGED since
+                // the last prompt -- so it appears when you `cd`, not stacked above
+                // every command. Keeps scrollback readable in inline mode.
+                std::string header = topBar(state.cwd, findGitBranch(state.cwd));
+                static std::string lastHeader;
+                if (header != lastHeader) {
+                    std::cout << header << "\r\n" << std::flush;
+                    lastHeader = header;
+                }
+            }
         }
         std::string prompt = continuing ? continuationPrompt() : buildPrompt(state, home);
         auto got = readLine(prompt, history, doReassertChrome, cmdValidator);
@@ -597,6 +607,20 @@ int main(int argc, char** argv) {
                                 // case THIS command (clear/vim/etc) left it
                                 // somewhere invalid -- e.g. `clear`'s own
                                 // \x1b[H parks it at row 1, on the pinned bar
+            // Exit code belongs to the command you JUST RAN, not the next prompt:
+            // a red ✘<code> right-aligned on the (fresh) line under its output.
+            // ARK_EXIT_CODE=0 disables. The reassert above already left the cursor
+            // on a clean line (freshline), so \r + column-move lands it cleanly.
+            if (state.lastStatus != 0 &&
+                !(getenv("ARK_EXIT_CODE") && std::string(getenv("ARK_EXIT_CODE")) == "0")) {
+                struct winsize ws;
+                int cols = (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0) ? ws.ws_col : 80;
+                std::string num = std::to_string(state.lastStatus);
+                int col = cols - (1 + (int)num.size()) + 1; // ✘ is 1 display col + digits
+                if (col < 1) col = 1;
+                std::cout << "\r\x1b[" << col << "G" << tn::RED << "\xe2\x9c\x98" << num
+                          << tn::R << "\r\n" << std::flush;
+            }
             // Private Mode: while on, write NOTHING to history/disk. Otherwise
             // record the command tagged with the cwd it ran in (context-aware
             // autosuggestions use that). Multi-line entries stored as one line.

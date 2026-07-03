@@ -72,6 +72,20 @@ int main() {
     assert(Value::integer(0).truthy() == false);
     assert(Value::str("").truthy() == false);
 
+    // \u surrogate pairs decode to non-BMP UTF-8 (😀 U+1F600 = f0 9f 98 80)
+    Value emoji;
+    assert(fromJson("\"\\uD83D\\uDE00\"", emoji));
+    assert(emoji.s == "\xf0\x9f\x98\x80");
+    // BMP \u still works (é = U+00E9 = c3 a9)
+    Value acc;
+    assert(fromJson("\"\\u00e9\"", acc) && acc.s == "\xc3\xa9");
+
+    // Float serialization round-trips (no truncation to 6 significant digits)
+    Value fp;
+    assert(fromJson("0.123456789012345", fp) && fp.type == Value::Type::Float);
+    assert(toJson(fp) == "0.123456789012345");
+    assert(toJson(Value::real(3.5)) == "3.5"); // clean values stay clean
+
     printf("all value/json tests passed\n");
     return 0;
 }

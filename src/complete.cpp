@@ -210,6 +210,22 @@ bool fileIndexReady() { return g_indexReady.load(std::memory_order_acquire); }
 
 size_t fileIndexSize() { std::lock_guard<std::mutex> lk(g_indexMu); return g_index.size(); }
 
+std::string findIndexedExecutable(const std::string& name) {
+    if (name.size() < 3) return ""; // completeFromIndex needs a 3+ char prefix
+    std::string found;
+    for (std::string p : completeFromIndex(name, /*execOnly=*/true)) {
+        size_t slash = p.find_last_of('/');
+        std::string base = slash == std::string::npos ? p : p.substr(slash + 1);
+        if (base != name) continue; // basename must match EXACTLY, not just prefix
+        if (p.size() >= 2 && p[0] == '~' && p[1] == '/') { // un-abbreviate ~ so it's execable
+            if (const char* home = getenv("HOME")) p = std::string(home) + p.substr(1);
+        }
+        if (!found.empty() && found != p) return ""; // ambiguous -> refuse to guess
+        found = p;
+    }
+    return found;
+}
+
 std::vector<std::string> completeFromIndex(const std::string& prefix, bool execOnly) {
     std::vector<std::string> out;
     // Require 3+ chars (keeps per-keystroke cost and result count sane) and a

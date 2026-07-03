@@ -24,147 +24,110 @@
 #include <unistd.h>
 
 const char* arkDefaultConfig() {
-    return R"CFG(# ark.config -- sourced at startup (interactive sessions), like ~/.zshrc.
+    return R"CFG(
+# ark.config -- sourced at startup (interactive sessions), like ~/.zshrc.
 # Your aliases, exports, and functions here persist across sessions. Everything
-# below the YOUR SETTINGS block is COMMENTED OUT -- uncomment only what you want.
-#   ark-settings   open this file in your editor
-#   ark-reload     re-read this file into the running shell (no restart needed)
+# under the catalogue below is COMMENTED -- uncomment only what you want.
+#   ark-settings   edit this file in your editor
+#   ark-reload     re-read it into the running shell (no restart)
 
-# ─── YOUR SETTINGS ─────────────────────────────────────────────────────────
+# --- YOUR SETTINGS -----------------------------------------------------------
 # alias ll='ls -la'
 # alias gs='git status'
 # export EDITOR=nvim        # your editor for `ark-settings`
 
-# ═══════════════════════════════════════════════════════════════════════════
-#  EVERYTHING ARK CAN DO  —  every knob below is a comment; uncomment to change
-# ═══════════════════════════════════════════════════════════════════════════
+# =============================================================================
+#  EVERYTHING ARK CAN DO  --  every knob below; uncomment to change a default
+# =============================================================================
 
-# ─── FEATURES THAT ARE ON BY DEFAULT (set to 0 to turn OFF) ─────────────────
+# --- FEATURES ON BY DEFAULT (set to 0 to turn OFF) ---------------------------
 # export ARK_GHOST_TEXT=0          # fish-style autosuggestions (dim ghost text)
 # export ARK_SYNTAX_HIGHLIGHT=0    # colored command line as you type
 # export ARK_VALIDATE=0            # red unknown-command highlight as you type
-# export ARK_CHROME=0              # inline top bar + pinned bottom status bar
-# export ARK_CHROME_TOP=inline     # top bar: pinned (default; fixed top-left, NO
-#                                  #   scrollback) | inline (scrolls with output,
-#                                  #   keeps scrollback) | off (hide the top bar)
-# export ARK_DEFAULT_TERMINAL=1    # "look like plain bash": strip all chrome, the
-#                                  #   banner, ghost text + highlighting; classic
-#                                  #   user@host:cwd$ prompt. (master off-switch)
-# export ARK_PLAIN_CHROME=1        # keep the pinned bars but flat/plain (no rounded
-#                                  #   LazyVim pills or colors); bare $ prompt
+# export ARK_CHROME=0              # pinned top + bottom status bars
 # export ARK_AUTOCD=0              # type a directory name to cd into it
 # export ARK_SPELLCHECK=0          # "did you mean X?" on an unknown command
-# export ARK_BREW_SUGGEST=0        # brew reverse lookup for installs (rg->ripgrep)
+# export ARK_BREW_SUGGEST=0        # brew reverse lookup for install hints (rg->ripgrep)
 # export ARK_MANPAGE_COMPLETE=0    # Tab-complete flags from a command's man page
 # export ARK_BANNER=0              # neofetch-style startup panel (logo + sysinfo)
 # export ARK_INDEX=0               # background home-tree index (Tab finds anything)
 # export ARK_FRESHLINE=0           # auto-add a newline when output lacks a final one
+# export ARK_LS_COLOR=0            # colorized `ls` (dirs / symlinks / executables)
+# export ARK_EXIT_CODE=0           # show a failed command's exit code (red X N)
 
-# ─── FEATURES THAT ARE OFF BY DEFAULT (set to 1 to turn ON) ─────────────────
+# --- FEATURES OFF BY DEFAULT (set to 1 to turn ON) ---------------------------
 # export ARK_NU_MODE=1             # nushell-style: `ls` prints a bordered table
 # export ARK_AUTOCORRECT=1         # auto-fix a typo'd command and run it (gti->git)
+# export ARK_LIVE_AUTOCORRECT=1    # fix a typo AS YOU TYPE (space commits; one Backspace undoes)
+# export ARK_AUTO_PATH=1           # run a program found only in the index, not $PATH
 # export ARK_PRIVATE=1             # start in private mode (nothing saved to history)
+# export ARK_OVERLAY=1             # EXPERIMENTAL: PTY compositor (fixed bars + scrollback)
 
-# ─── STARTUP BANNER (only shown when ARK_BANNER is on) ─────────────────────
-# export ARK_BANNER_LOGO=ark       # bolt (default lightning bolt) | ark (wordmark) | none
+# --- LOOK & FEEL -------------------------------------------------------------
+# export ARK_CHROME_TOP=pinned     # top bar: pinned (default; fixed, NO scrollback) |
+#                                  #   inline (scrolls, keeps scrollback) | off
+# export ARK_PLAIN_CHROME=1        # keep the pinned bars but flat/plain (no rounded pills)
+# export ARK_DEFAULT_TERMINAL=1    # look like stock bash: no chrome/banner, user@host:cwd$
+# export ARK_BANNER_LOGO=ark       # bolt (default lightning) | ark (wordmark) | none
 # export ARK_BANNER_ACCENT=purple  # blue/green/red/purple/pink/cyan/yellow/orange or hex 7aa2f7
-# export ARK_BANNER_INFO=os,cpu,mem  # user,os,kernel,shell,host,cpu,mem,uptime (or 'all')
-# export ARK_BANNER_SUBTITLE="heaven"  # tagline shown under the logo
+# export ARK_BANNER_INFO=os,cpu,mem  # ssh,os,kernel,shell,host,cpu,mem,uptime (or 'all')
+# export ARK_BANNER_SUBTITLE="heaven"  # a tagline under the logo
+# export ARK_CTRLC=append          # Ctrl-C shows ^C after the line (default: its own line)
 
-# ─── PROMPT / TERMINAL BEHAVIOR ────────────────────────────────────────────
-# export ARK_CTRLC=append          # Ctrl-C shows ^C after the line (default: own line)
-# export ARK_DSR_MS=40             # advanced: cursor-query timeout in ms (perf tuning;
-#                                  #   lower = snappier, too low may misplace chrome)
+# --- COMMAND-NOT-FOUND: OFFER TO INSTALL IT ----------------------------------
+# On an unknown command (not a close typo) ark offers to install it -- press y
+# (no Enter). unset = autodetect (brew/port on macOS; apt/dnf/pacman/zypper/apk on
+# Linux; winget/scoop on Windows). "" = off. A path or name forces one.
+# export ARK_PACKAGE_MANAGER=""
+# export ARK_PACKAGE_MANAGER=/opt/homebrew/bin/brew
+# export ARK_PACKAGE_MANAGER=pacman
 
-# ─── COMMAND-NOT-FOUND: OFFER TO INSTALL IT ────────────────────────────────
-# When you run a command ark can't find (and it isn't a close typo of a real
-# one), ark offers to install it with your package manager — press y (no Enter)
-# and it runs the install, handing over the terminal so sudo/brew can prompt.
-#   unset  → autodetect: brew/port (macOS), apt/dnf/pacman/zypper/apk/yum (Linux),
-#            winget/scoop/choco (Windows). System managers get a `sudo` prefix.
-#   ""     → turn the whole feature off.
-#   path   → force a specific manager; install syntax is inferred from its name.
-# export ARK_PACKAGE_MANAGER=""              # disable install prompts entirely
-# export ARK_PACKAGE_MANAGER=/opt/homebrew/bin/brew   # force a specific one
-# export ARK_PACKAGE_MANAGER=pacman          # or just a name found on $PATH
+# --- COMPLETION --------------------------------------------------------------
+# Tab accepts the ghost suggestion if shown, else completes the word. The index
+# (ARK_INDEX) lets Tab find any file/program by name; `ark-reindex` rebuilds it.
+# export ARK_INDEX_ROOTS="$HOME:/opt"                # index roots (default: $HOME)
+# export ARK_SEARCH_DIRS="$HOME/bin:$HOME/scripts"   # extra dirs completed by FULL path
 
-# ─── COMPLETION: FIND ANYTHING, ANYWHERE ───────────────────────────────────
-# Tab accepts the ghost suggestion if one's showing, else completes the word.
-# The background index (ARK_INDEX above) lets Tab find any file/program by name
-# from anywhere; `ark-reindex` rebuilds it after you add files this session.
-# export ARK_INDEX_ROOTS="$HOME:/opt"       # roots to index (default: $HOME)
-# Extra dirs whose entries complete by FULL PATH (lighter than the index):
-# export ARK_SEARCH_DIRS="$HOME/bin:$HOME/projects:$HOME/scripts"
+# --- ADVANCED / PERFORMANCE --------------------------------------------------
+# export ARK_DSR_MS=60             # cursor-position query timeout, ms (lower = snappier)
 
-# ─── POWER FEATURES (built in; commands, not toggles) ──────────────────────
-# private [on|off]   Private Mode: pause writing commands to history/disk.
-# uvar NAME VALUE    Universal Variable: persists across ALL windows AND survives
-# uvar NAME          reboot (stored in ~/.config/ark/universal, also exported).
-# uvar               Set in one window, appears in the others live. `uvar -u NAME`.
-# history            Shared across every window/tab live. `history -c` clears it.
-# Autosuggestions are CONTEXT-AWARE: a match from the current directory wins.
+# --- POWER FEATURES (built-in commands, not toggles) -------------------------
+# private [on|off]   pause writing history/disk this session
+# uvar NAME VALUE    universal var: persists across ALL windows AND survives reboot
+# history / history -c   shared live across windows; -c clears it
+# ark-reload         re-source this file      ark-reindex   rebuild the index
 # Metadata globbing:  *(.)=files *(/)=dirs *(@)=symlinks *(x)=exec
-#   *(.L+1000)=files >1000 bytes (Lk/Lm/Lg units)   *(.mh-2)=modified <2h ago
-#   (m units h/d/w; '-'=newer than, '+'=older than)  e.g.  ls -la *.log(.mh-1)
+#   *(.L+1000)=>1000 bytes (Lk/Lm/Lg)   *(.mh-2)=modified <2h (m units h/d/w; -/+)
+# Line editing:  right-arrow accepts ONE word of the suggestion; Tab/Ctrl-F take all.
 
-# ─── ALIASES ───────────────────────────────────────────────────────────────
+# --- ALIASES / FUNCTIONS (examples) ------------------------------------------
 # alias la='ls -A'
-# alias gd='git diff'
 # alias ..='cd ..'
-# alias ...='cd ../..'
-# alias grep='grep --color=auto'
-
-# ─── ENVIRONMENT ───────────────────────────────────────────────────────────
-# export PAGER=less
-# export PATH="$HOME/bin:$PATH"   # note: re-runs on `ark-reload`; keep it idempotent
-
-# ─── FUNCTIONS ─────────────────────────────────────────────────────────────
-# mkcd() { mkdir -p "$1" && cd "$1"; }        # make a dir and enter it
-# backup() { cp "$1" "$1.bak"; }
+# mkcd() { mkdir -p "$1" && cd "$1"; }
 # greet() { echo "hi, ${1:-world}"; }
 
-# ═══════════════════════════════════════════════════════════════════════════
-#  REFERENCE  —  the ark language (always-on; a cheat sheet, nothing to enable)
-# ═══════════════════════════════════════════════════════════════════════════
-#
+# =============================================================================
+#  REFERENCE  --  the ark language (always on; a cheat sheet, nothing to enable)
+# =============================================================================
 #  EXPANSION
-#    $VAR  ${VAR}  ${VAR:-default}  ${VAR:+alt}  ${#VAR}   (length)
-#    ${VAR#prefix} ${VAR##prefix}   strip prefix (## longest)  → basename: ${p##*/}
-#    ${VAR%suffix} ${VAR%%suffix}   strip suffix (%% longest)  → dirname:  ${p%/*}
-#    ${VAR/a/b}    ${VAR//a/b}      replace first / all
-#    ${VAR:off:len}                 substring (negative off counts from end)
-#    $(cmd)   `cmd`                 command substitution
-#    $(( 2 + 3*4 ))                 arithmetic: + - * / % << >> & | ^ && || < <= == !=
-#    {a,b,c}  {1..9}  {a..z}        brace expansion (+ cartesian: a{b,c}{1,2})
-#    *  ?  [abc]  **/               globs; ** recurses to any depth
-#    ~  ~/path                      home expansion
-#    "$x"  '$x'  a"b c"d            double / single / mixed quoting
-#    $?  $$  $#  $@  $*  $0         special parameters
-#
+#    $VAR  ${VAR}  ${VAR:-default}  ${VAR:+alt}  ${#VAR}
+#    ${VAR#pfx} ${VAR##pfx}  strip prefix (## longest)  -> basename: ${p##*/}
+#    ${VAR%sfx} ${VAR%%sfx}  strip suffix (%% longest)  -> dirname:  ${p%/*}
+#    ${VAR/a/b}  ${VAR//a/b}  replace first / all       ${VAR:off:len}  substring
+#    $(cmd)  `cmd`  cmd sub    $(( 2+3*4 ))  arithmetic (+ - * / % << >> & | ^ && ||)
+#    {a,b,c} {1..9} {a..z}  brace exp    *  ?  [abc]  **/  globs    ~  home
+#    "$x" '$x'  quoting        $? $$ $# $@ $* $0  special params
 #  CONTROL FLOW
-#    if COND; then ..; elif COND; then ..; else ..; fi
-#    for x in LIST; do ..; done          while COND; do ..; done
-#    case WORD in pat) .. ;; *) .. ;; esac
-#    break [N]   continue [N]   return [N]
-#    cmd && cmd   cmd || cmd   cmd ; cmd   ! cmd   ( subshell )
-#
-#  FUNCTIONS   name() { .. }      function name { .. }      local VAR=val
-#
-#  REDIRECTION
-#    > file   >> file   < file   2> file        cmd | cmd | cmd      cmd &
-#    << EOF .. EOF      <<'EOF' (literal)        <<- EOF (strip tabs)
-#
-#  BUILTINS
-#    cd (cd -, auto_cd)  pwd  echo (-n -e)  export  unset  type  read
-#    alias unalias  pushd popd dirs  source (.)  return local break continue
-#    jobs fg bg  exit
-#    ark-settings (edit config)  ark-reload (re-source it)  ark-reindex (rebuild index)
-#    private  uvar  history(-c)
-#
-#  LINE EDITING (at the prompt)
-#    Ctrl-A/E start/end   Ctrl-K/U kill to end/start   Ctrl-W kill word
-#    Ctrl-Y yank   Alt-←/→ word jump   Ctrl-R history search
-#    Tab complete   →/Ctrl-F accept autosuggestion   Up/Down history
+#    if COND; then ..; elif ..; else ..; fi     for x in LIST; do ..; done
+#    while COND; do ..; done    case WORD in pat) .. ;; *) .. ;; esac
+#    break [N]  continue [N]  return [N]   cmd && cmd || cmd ; cmd   ! cmd  ( sub )
+#  FUNCTIONS   name() { ..; }    function name { ..; }    local VAR=val
+#  REDIRECTION  > >> < 2>  |  &   << EOF   <<'EOF' (literal)   <<- EOF (strip tabs)
+#  BUILTINS  cd pwd echo(-n -e) export unset set type read alias unalias
+#            pushd popd dirs source(.) return local break continue jobs fg bg exit
+#            private uvar history  ark-settings ark-reload ark-reindex
+#  LINE EDITING  Ctrl-A/E  Ctrl-K/U kill  Ctrl-W word  Ctrl-Y yank  Alt-</>  Ctrl-R
+#            Tab complete   ->/Ctrl-F accept suggestion   Up/Down history
 )CFG";
 }
 
@@ -330,8 +293,37 @@ static int b_cd(const std::vector<std::string>& argv, ShellState& state) {
 }
 
 static int b_exit(const std::vector<std::string>& argv, ShellState& state) {
-    int code = argv.size() > 1 ? std::atoi(argv[1].c_str()) : state.lastStatus;
+    int code = state.lastStatus;
+    if (argv.size() > 1) {
+        char* end = nullptr;
+        long v = std::strtol(argv[1].c_str(), &end, 10);
+        if (end == argv[1].c_str() || *end != '\0') {
+            std::cerr << "exit: " << argv[1] << ": numeric argument required\n";
+            std::exit(255);
+        }
+        code = (int)(v & 0xff);
+    }
     std::exit(code);
+}
+
+// `set` -- only the positional-parameter forms are supported:
+//   set -- a b c   (replace $1.. with a b c; `set --` clears them)
+//   set a b c      (same, no leading --)
+// Option flags (set -e, -x, ...) are accepted and ignored; bare `set` is a no-op.
+static int b_set(const std::vector<std::string>& argv, ShellState& state) {
+    size_t i = 1;
+    bool sawDashDash = false;
+    while (i < argv.size()) {
+        if (argv[i] == "--") { sawDashDash = true; i++; break; }
+        if (!argv[i].empty() && (argv[i][0] == '-' || argv[i][0] == '+')) { i++; continue; } // ignore options
+        break; // first operand
+    }
+    if (sawDashDash || i < argv.size()) {
+        std::vector<std::string> params(argv.begin() + i, argv.end());
+        if (state.argStack.empty()) state.argStack.push_back(params);
+        else state.argStack.back() = params;
+    }
+    return 0;
 }
 
 // Shared cd primitive for pushd/popd (does the chdir + OLDPWD/PWD bookkeeping
@@ -579,19 +571,43 @@ static int b_pwd(const std::vector<std::string>&, ShellState& state) {
 }
 
 // Interprets the standard backslash escapes echo -e supports.
-static std::string echoEscapes(const std::string& s) {
+// Interpret `echo -e` backslash escapes. `sawC` is set (and processing stops)
+// when a `\c` is hit -- it suppresses the rest of the output and the newline.
+static std::string echoEscapes(const std::string& s, bool& sawC) {
     std::string out;
     for (size_t i = 0; i < s.size(); i++) {
         if (s[i] == '\\' && i + 1 < s.size()) {
-            switch (s[++i]) {
+            char e = s[++i];
+            switch (e) {
                 case 'n': out += '\n'; break;
                 case 't': out += '\t'; break;
                 case 'r': out += '\r'; break;
                 case '\\': out += '\\'; break;
                 case 'a': out += '\a'; break;
                 case 'b': out += '\b'; break;
-                case '0': out += '\0'; break;
-                default: out += '\\'; out += s[i]; break;
+                case 'f': out += '\f'; break;
+                case 'v': out += '\v'; break;
+                case 'e': out += '\033'; break;
+                case 'c': sawC = true; return out;           // stop; suppress newline
+                case 'x': {                                  // \xHH (1-2 hex digits)
+                    int val = 0, cnt = 0;
+                    while (cnt < 2 && i + 1 < s.size() && std::isxdigit((unsigned char)s[i + 1])) {
+                        char c = s[++i];
+                        val = val * 16 + (c <= '9' ? c - '0' : std::tolower((unsigned char)c) - 'a' + 10);
+                        cnt++;
+                    }
+                    if (cnt == 0) out += "\\x"; else out += (char)val;
+                    break;
+                }
+                case '0': {                                  // \0NNN (up to 3 octal digits)
+                    int val = 0, cnt = 0;
+                    while (cnt < 3 && i + 1 < s.size() && s[i + 1] >= '0' && s[i + 1] <= '7') {
+                        val = val * 8 + (s[++i] - '0'); cnt++;
+                    }
+                    out += (char)val;
+                    break;
+                }
+                default: out += '\\'; out += e; break;
             }
         } else {
             out += s[i];
@@ -617,11 +633,12 @@ static int b_echo(const std::vector<std::string>& argv, ShellState&) {
         }
         start++;
     }
-    for (size_t i = start; i < argv.size(); i++) {
-        std::cout << (escapes ? echoEscapes(argv[i]) : argv[i]);
-        if (i + 1 < argv.size()) std::cout << " ";
+    bool sawC = false;
+    for (size_t i = start; i < argv.size() && !sawC; i++) {
+        std::cout << (escapes ? echoEscapes(argv[i], sawC) : argv[i]);
+        if (!sawC && i + 1 < argv.size()) std::cout << " ";
     }
-    if (newline) std::cout << "\n";
+    if (newline && !sawC) std::cout << "\n";
     return 0;
 }
 
@@ -680,21 +697,67 @@ static int b_unalias(const std::vector<std::string>& argv, ShellState& state) {
     return rc;
 }
 
-static int b_type(const std::vector<std::string>& argv, ShellState&) {
-    if (argv.size() < 2) return 1;
-    auto& reg = builtinRegistry();
-    if (reg.find(argv[1]) != reg.end()) {
-        std::cout << argv[1] << " is a shell builtin\n";
-        return 0;
+// Look up an executable by name on $PATH; returns the full path or "".
+static std::string searchPath(const std::string& name) {
+    if (name.find('/') != std::string::npos) // already a path
+        return access(name.c_str(), X_OK) == 0 ? name : "";
+    const char* path = getenv("PATH");
+    std::string p = path ? path : "/usr/bin:/bin";
+    size_t i = 0;
+    while (i < p.size()) {
+        size_t e = p.find(':', i);
+        std::string dir = p.substr(i, e == std::string::npos ? std::string::npos : e - i);
+        if (!dir.empty()) {
+            std::string cand = dir + "/" + name;
+            if (access(cand.c_str(), X_OK) == 0) return cand;
+        }
+        if (e == std::string::npos) break;
+        i = e + 1;
     }
-    std::cout << argv[1] << " not found\n";
-    return 1;
+    return "";
+}
+
+static int b_type(const std::vector<std::string>& argv, ShellState& state) {
+    if (argv.size() < 2) return 1;
+    int rc = 0;
+    for (size_t a = 1; a < argv.size(); a++) {
+        const std::string& name = argv[a];
+        if (state.functions.count(name)) { std::cout << name << " is a function\n"; continue; }
+        if (state.aliases.count(name)) { std::cout << name << " is aliased to `" << state.aliases.at(name) << "'\n"; continue; }
+        if (builtinRegistry().find(name) != builtinRegistry().end()) { std::cout << name << " is a shell builtin\n"; continue; }
+        std::string full = searchPath(name);
+        if (!full.empty()) std::cout << name << " is " << full << "\n";
+        else { std::cout << name << " not found\n"; rc = 1; }
+    }
+    return rc;
 }
 
 static int b_read(const std::vector<std::string>& argv, ShellState& state) {
     std::string line;
     if (!std::getline(std::cin, line)) return 1;
-    if (argv.size() > 1) state.vars[argv[1]] = line;
+    // Collect target variable names, skipping a leading `-r` (raw) flag.
+    std::vector<std::string> names;
+    for (size_t i = 1; i < argv.size(); i++) {
+        if (argv[i] == "-r") continue;
+        names.push_back(argv[i]);
+    }
+    if (names.empty()) { state.vars["REPLY"] = line; return 0; }
+    // Split on IFS whitespace; the LAST variable absorbs the remainder (with
+    // internal separators, trailing whitespace trimmed) -- matching bash/zsh.
+    size_t pos = 0, n = line.size();
+    auto skipWs = [&](size_t p) { while (p < n && (line[p] == ' ' || line[p] == '\t')) p++; return p; };
+    for (size_t i = 0; i < names.size(); i++) {
+        pos = skipWs(pos);
+        if (i + 1 == names.size()) {
+            std::string rest = line.substr(pos);
+            size_t e = rest.find_last_not_of(" \t");
+            state.vars[names[i]] = (e == std::string::npos) ? "" : rest.substr(0, e + 1);
+        } else {
+            size_t s = pos;
+            while (pos < n && line[pos] != ' ' && line[pos] != '\t') pos++;
+            state.vars[names[i]] = line.substr(s, pos - s);
+        }
+    }
     return 0;
 }
 
@@ -823,9 +886,82 @@ static int b_history(const std::vector<std::string>& argv, ShellState& state) {
     return 0;
 }
 
+// ── test / [ ──────────────────────────────────────────────────────────────
+// POSIX `test` and `[` as a builtin. Without this, every `[ ... ]` in a loop
+// forks /bin/[ -- a 100k-iteration `while [ ... ]` becomes 100k forks and
+// effectively hangs. Covers string, integer, and file tests plus ! and -a/-o.
+static bool testFileOp(char op, const std::string& path) {
+    struct stat st;
+    switch (op) {
+        case 'e': return ::stat(path.c_str(), &st) == 0;
+        case 'f': return ::stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode);
+        case 'd': return ::stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
+        case 's': return ::stat(path.c_str(), &st) == 0 && st.st_size > 0;
+        case 'r': return ::access(path.c_str(), R_OK) == 0;
+        case 'w': return ::access(path.c_str(), W_OK) == 0;
+        case 'x': return ::access(path.c_str(), X_OK) == 0;
+        case 'L': case 'h': return ::lstat(path.c_str(), &st) == 0 && S_ISLNK(st.st_mode);
+        default: return false;
+    }
+}
+static bool testAsInt(const std::string& s, long& out) {
+    if (s.empty()) return false;
+    char* end = nullptr;
+    long v = std::strtol(s.c_str(), &end, 10);
+    if (end != s.c_str() + s.size()) return false;
+    out = v;
+    return true;
+}
+static bool testBinary(const std::string& l, const std::string& op, const std::string& r) {
+    if (op == "=" || op == "==") return l == r;
+    if (op == "!=") return l != r;
+    if (op == "<") return l < r;
+    if (op == ">") return l > r;
+    long li, ri;
+    if (testAsInt(l, li) && testAsInt(r, ri)) {
+        if (op == "-eq") return li == ri;
+        if (op == "-ne") return li != ri;
+        if (op == "-lt") return li < ri;
+        if (op == "-le") return li <= ri;
+        if (op == "-gt") return li > ri;
+        if (op == "-ge") return li >= ri;
+    }
+    return false;
+}
+static bool testEval(const std::vector<std::string>& a) {
+    size_t n = a.size();
+    if (n == 0) return false;
+    if (n == 1) return !a[0].empty();
+    // -a (and) / -o (or): split at the FIRST -o (lowest precedence), then -a.
+    for (const char* conj : {"-o", "-a"})
+        for (size_t i = 1; i + 1 < n; i++)
+            if (a[i] == conj) {
+                bool lhs = testEval({a.begin(), a.begin() + i});
+                bool rhs = testEval({a.begin() + i + 1, a.end()});
+                return std::string(conj) == "-o" ? (lhs || rhs) : (lhs && rhs);
+            }
+    if (a[0] == "!") return !testEval({a.begin() + 1, a.end()});
+    if (n == 2) { // unary: -z/-n/-e/-f/-d/... arg
+        if (a[0] == "-z") return a[1].empty();
+        if (a[0] == "-n") return !a[1].empty();
+        if (a[0].size() == 2 && a[0][0] == '-') return testFileOp(a[0][1], a[1]);
+        return false;
+    }
+    if (n == 3) return testBinary(a[0], a[1], a[2]);
+    return false; // unsupported longer form
+}
+static int b_test(const std::vector<std::string>& argv, ShellState&) {
+    std::vector<std::string> a(argv.begin() + 1, argv.end());
+    if (!argv.empty() && argv[0] == "[") { // `[` requires a closing `]`
+        if (a.empty() || a.back() != "]") { std::cerr << "[: missing `]'\n"; return 2; }
+        a.pop_back();
+    }
+    return testEval(a) ? 0 : 1;
+}
+
 const std::unordered_map<std::string, BuiltinFn>& builtinRegistry() {
     static const std::unordered_map<std::string, BuiltinFn> reg = {
-        {"cd", b_cd}, {"exit", b_exit}, {"pwd", b_pwd}, {"echo", b_echo},
+        {"cd", b_cd}, {"exit", b_exit}, {"pwd", b_pwd}, {"echo", b_echo}, {"set", b_set},
         {"export", b_export}, {"unset", b_unset}, {"type", b_type}, {"read", b_read},
         {"jobs", b_jobs}, {"fg", b_fg}, {"bg", b_bg},
         {"alias", b_alias}, {"unalias", b_unalias},
@@ -834,7 +970,7 @@ const std::unordered_map<std::string, BuiltinFn>& builtinRegistry() {
         {"source", b_source}, {".", b_source},
         {"return", b_return}, {"local", b_local},
         {"break", b_break}, {"continue", b_continue},
-        {"ls", b_ls},
+        {"ls", b_ls}, {"test", b_test}, {"[", b_test},
         {"private", b_private}, {"uvar", b_uvar}, {"history", b_history},
     };
     return reg;

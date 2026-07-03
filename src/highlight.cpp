@@ -99,7 +99,8 @@ std::vector<Span> classify(const std::string& raw) {
             char wc = raw[i];
             if (wc == ' ' || wc == '\t' || wc == '\'' || wc == '"' || wc == '$' ||
                 isOperatorStart(wc)) break;
-            if (wc == '2' && i + 1 < raw.size() && raw[i + 1] == '>') break;
+            // NOTE: a `2` mid-word is part of the word (`cat2>x` = cmd `cat2` + `>`),
+            // NOT an fd-2 redirect. A standalone `2>` is handled at the top level.
             i++;
         }
         std::string word = raw.substr(start, i - start);

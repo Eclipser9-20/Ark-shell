@@ -1,0 +1,68 @@
+name: Release
+
+# On a version tag (v*), build binaries for macOS (arm64 + x86_64) and Linux
+# (x86_64), then publish them on the GitHub Release so people can download a
+# prebuilt ark without a compiler, and so the Homebrew formula / curl installer
+# have versioned artifacts to point at.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest, name: macos-arm64, cxx: clang++ }
+          - { os: macos-13,     name: macos-x86_64, cxx: clang++ }
+          - { os: ubuntu-latest, name: linux-x86_64, cxx: g++ }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build (release)
+        run: make CXX="${{ matrix.cxx }}"
+
+      - name: Test
+        run: make unittest CXX="${{ matrix.cxx }}" && make test CXX="${{ matrix.cxx }}"
+
+      - name: Package
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          DIR="ark-${VER}-${{ matrix.name }}"
+          mkdir -p "$DIR"
+          cp ark assh README.md LICENSE "$DIR"/
+          tar -czf "${DIR}.tar.gz" "$DIR"
+          shasum -a 256 "${DIR}.tar.gz" > "${DIR}.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            ark-*.tar.gz
+            ark-*.tar.gz.sha256
+
+  release:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: dist
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/ark-*.tar.gz
+            dist/ark-*.tar.gz.sha256
+          generate_release_notes: true
+          fail_on_unmatched_files: true
