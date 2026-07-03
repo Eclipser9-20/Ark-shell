@@ -261,11 +261,25 @@ std::vector<std::string> parseManFlags(const std::string& cmd) {
     std::string text = stripOverstrike(captureCommand({"man", cmd}));
     std::unordered_set<std::string> seen;
 
+    // Accept a flag only where an option is DEFINED, not merely mentioned. In a
+    // man page, option definitions are the first token on their (indented) line
+    // (`     -A   Include...`, `-D format`, `-a, --all`) or appear inside a
+    // SYNOPSIS group (`[-l]`, `(-a|-b)`). Example/usage lines (`$ ls -lioF`,
+    // `ls -lt /var/log`) have other words before the flag on the same line, so
+    // they're rejected -- that's what kept leaking `-lioF`/`-lt` into `ls -<Tab>`.
+    auto definitionContext = [&](size_t i) -> bool {
+        long k = (long)i - 1;
+        while (k >= 0 && (text[k] == ' ' || text[k] == '\t')) k--; // skip inline indent
+        if (k < 0 || text[k] == '\n') return true;                 // first token on its line
+        char c = text[k];
+        return c == '[' || c == '(' || c == ',' || c == '|' || c == '/'; // synopsis / alias separators
+    };
+
     size_t i = 0;
     while (i < text.size()) {
-        // A flag starts with '-' at the start of the string or after a
-        // non-flag character (space, comma, '(', '[', tab, newline).
-        if (text[i] == '-' && (i == 0 || strchr(" \t\n,([", text[i - 1]))) {
+        // A flag starts with '-' at a token boundary AND in a definition context
+        // (an option being defined/listed, not used in an example or prose).
+        if (text[i] == '-' && (i == 0 || strchr(" \t\n,([", text[i - 1])) && definitionContext(i)) {
             size_t j = i + 1;
             if (j < text.size() && text[j] == '-') j++; // long option
             size_t s = j;
