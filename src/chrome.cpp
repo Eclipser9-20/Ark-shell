@@ -701,11 +701,18 @@ void reassertChrome(const std::string& cwd, const std::string& gitBranch,
     // Config toggle: ARK_CHROME=0 disables the pinned top/bottom bars. When
     // off, reset the scroll region to the full screen (\x1b[r) so the whole
     // terminal scrolls normally, and paint nothing. Cheap to check each call.
+    static bool chromeOffReset = false;
     if (const char* c = getenv("ARK_CHROME"); c && std::string(c) == "0") {
-        printf("\x1b[r");
-        fflush(stdout);
+        // Chrome disabled: drop any scroll region ONCE, then do nothing further.
+        // Emitting \x1b[r on EVERY call (before/after each command AND the ~1Hz
+        // idle tick) was a real bug -- DECSTBM-reset homes the cursor to (1,1),
+        // so a tick firing while the user paused mid-typing yanked the cursor to
+        // the top-left and the line redrew there, making the prompt and commands
+        // appear to nest and glitch. Reset once, then leave the terminal alone.
+        if (!chromeOffReset) { printf("\x1b[r"); fflush(stdout); chromeOffReset = true; }
         return;
     }
+    chromeOffReset = false; // chrome is on; re-arm the one-shot for a later disable
 
     // Resize handling. A terminal resize REFLOWS the screen -- the terminal
     // moves the previously-visible content (including our pinned top/bottom

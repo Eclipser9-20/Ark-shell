@@ -273,6 +273,12 @@ int main(int argc, char** argv) {
     JobTable jobTable;
     state.jobs = &jobTable;
     ensureStandardPath();      // brew / /usr/local/bin tools resolve even under a bare login PATH
+    // Stop ark's command-not-found brew lookups (brew which-formula / formulae)
+    // from kicking off Homebrew's auto-update -- that spawns a git/curl/ruby storm
+    // that showed up as "running a ton of stuff" on an unknown command. Only set
+    // it if the user hasn't chosen otherwise (overwrite=0), so `brew` still
+    // auto-updates for them if they've explicitly opted in.
+    setenv("HOMEBREW_NO_AUTO_UPDATE", "1", 0);
     importEnvironment(state);  // $PATH/$HOME/$USER/... visible to ark's own expansion
 
     // Default-terminal mode: make ark look like a stock bash shell -- strip the

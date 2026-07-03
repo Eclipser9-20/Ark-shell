@@ -6,6 +6,7 @@
 #include "lexer.h"
 #include "parser.h"
 #include <algorithm>
+#include <cerrno>
 #include <climits>
 #include <csignal>
 #include <cstdio>
@@ -461,14 +462,38 @@ static int b_ark_settings(const std::vector<std::string>&, ShellState&) {
         f << arkDefaultConfig();
     }
 
-    // Honor the user's editor choice: $VISUAL, then $EDITOR, then a common
-    // fallback that exists on a bare box. (Set `export EDITOR=...` in ark.config
-    // to always open the config in your editor of choice.)
+    // Pick an editor that ACTUALLY EXISTS. Preference: $VISUAL, $EDITOR, then a
+    // chain of common editors. Each candidate is checked with access(X_OK) --
+    // an absolute path directly, a bare name against every $PATH dir -- so a
+    // $EDITOR pointing at something uninstalled (the "ark-settings: command not
+    // found" report) falls through to one that's really there instead of failing.
+    auto runnable = [](const std::string& e) -> bool {
+        if (e.empty()) return false;
+        if (e.find('/') != std::string::npos) return access(e.c_str(), X_OK) == 0;
+        const char* path = getenv("PATH");
+        std::string p = path ? path : "/usr/local/bin:/usr/bin:/bin";
+        std::string dir;
+        for (size_t i = 0; i <= p.size(); i++) {
+            if (i == p.size() || p[i] == ':') {
+                if (!dir.empty() && access((dir + "/" + e).c_str(), X_OK) == 0) return true;
+                dir.clear();
+            } else dir += p[i];
+        }
+        return false;
+    };
     std::string editor;
-    if (const char* v = getenv("VISUAL"); v && *v) editor = v;
-    else if (const char* e = getenv("EDITOR"); e && *e) editor = e;
-    else if (access("/usr/bin/nano", X_OK) == 0 || access("/opt/homebrew/bin/nano", X_OK) == 0) editor = "nano";
-    else editor = "vi";
+    for (const char* cand : {(const char*)getenv("VISUAL"), (const char*)getenv("EDITOR"),
+                             "nano", "vim", "vi", "nvim", "micro", "emacs"}) {
+        if (cand && runnable(cand)) { editor = cand; break; }
+    }
+    if (editor.empty()) {
+        // No editor at all -- don't fail silently; tell the user where the file
+        // is and how to pick an editor, so the config is still editable by hand.
+        std::cerr << "ark-settings: no editor found (tried $VISUAL, $EDITOR, nano, vim, vi).\n"
+                  << "  Set one:   export EDITOR=<your-editor>   (add it to " << cfg << ")\n"
+                  << "  Or edit directly:   " << cfg << "\n";
+        return 1;
+    }
 
     BlockSigchld guard;
     pid_t pid = fork();
@@ -478,7 +503,7 @@ static int b_ark_settings(const std::vector<std::string>&, ShellState&) {
         signal(SIGTTOU, SIG_DFL);
         signal(SIGTTIN, SIG_DFL);
         execlp(editor.c_str(), editor.c_str(), cfg.c_str(), (char*)nullptr);
-        std::cerr << "ark-settings: could not launch " << editor << "\n";
+        std::cerr << "ark-settings: could not launch " << editor << ": " << std::strerror(errno) << "\n";
         _exit(127);
     }
     int status = 0;
