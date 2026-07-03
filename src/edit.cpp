@@ -146,6 +146,7 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
     std::string buf;
     size_t cursor = 0;
     int histIndex = (int)history.lines().size(); // one-past-the-end = "not browsing history"
+    std::string pendingLine; // the in-progress line, stashed when you ↑ into history
     std::string killBuffer; // last text erased by Ctrl-K/U/W, pastable with Ctrl-Y
 
     // Context-Aware Autosuggestions: prefer history entries that were run in
@@ -563,11 +564,20 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
             else if (final == 'H' && params.empty()) { cursor = 0; redraw(); }           // Home
             else if (final == 'F' && params.empty()) { cursor = buf.size(); redraw(); }  // End
             else if (final == 'A' && params.empty()) { // Up: older history
-                if (histIndex > 0) { histIndex--; buf = history.lines()[histIndex]; cursor = buf.size(); redraw(); }
+                if (histIndex > 0) {
+                    // Leaving the editing line for history: stash what you typed
+                    // so ↓ can bring it right back (readline behavior).
+                    if (histIndex == (int)history.lines().size()) pendingLine = buf;
+                    histIndex--;
+                    buf = history.lines()[histIndex];
+                    cursor = buf.size();
+                    redraw();
+                }
             } else if (final == 'B' && params.empty()) { // Down: newer history
                 if (histIndex < (int)history.lines().size()) {
                     histIndex++;
-                    buf = histIndex == (int)history.lines().size() ? "" : history.lines()[histIndex];
+                    // Back past the newest entry -> restore the stashed in-progress line.
+                    buf = histIndex == (int)history.lines().size() ? pendingLine : history.lines()[histIndex];
                     cursor = buf.size();
                     redraw();
                 }
