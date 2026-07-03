@@ -51,6 +51,10 @@ static std::string buildPrompt(const ShellState& state, const std::string& home)
         return std::string(user ? user : "user") + "@" + host + ":" + cwd +
                (geteuid() == 0 ? "# " : "$ ");
     }
+    // Plain-chrome mode (ARK_PLAIN_CHROME=1): the pinned bars stay (drawn plain by
+    // chrome.cpp) and carry the cwd, so the prompt itself is just a bare $ / #.
+    if (const char* p = getenv("ARK_PLAIN_CHROME"); p && std::string(p) == "1")
+        return geteuid() == 0 ? "# " : "$ ";
     // cwd now lives in the pinned top bar (chrome.h's paintChrome), so the
     // per-command prompt simplifies to just the time and the status arrow.
     time_t now = time(nullptr);

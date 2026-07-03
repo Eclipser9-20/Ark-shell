@@ -171,6 +171,23 @@ static bool chromeTopPinned() {
 // only when a pinned top bar occupies row 1; otherwise row 1 is normal content.
 static int chromeHomeRow() { return chromeTopPinned() ? 2 : 1; }
 
+// Plain-chrome mode (ARK_PLAIN_CHROME=1): keep the pinned bars, but render them
+// as flat one-color text -- no rounded LazyVim pills, no per-segment truecolor.
+// The bars stay in the same rows; only their look changes (and the prompt goes
+// plain, see buildPrompt). Chrome must be on for this to matter.
+static bool plainChrome() {
+    const char* p = getenv("ARK_PLAIN_CHROME");
+    return p && std::string(p) == "1";
+}
+
+// $HOME abbreviated to ~ in `path` (for the plain bars/prompt).
+static std::string tildeAbbrev(const std::string& path) {
+    const char* h = getenv("HOME");
+    if (h && *h && path.compare(0, std::string(h).size(), h) == 0)
+        return "~" + path.substr(std::string(h).size());
+    return path;
+}
+
 void setScrollRegion() {
     int rows, cols;
     if (!getTerminalSize(rows, cols) || rows <= 2) return;
@@ -289,6 +306,12 @@ static std::string sshClientIp() {
 std::string topBar(const std::string& cwd, const std::string& gitBranch) {
     int rows, cols;
     if (!getTerminalSize(rows, cols)) cols = 80;
+    if (plainChrome()) {
+        // Flat text: " ~/dir  branch" in one muted color, no pills/icons.
+        std::string line = std::string(FG_INFO) + " " + tildeAbbrev(cwd);
+        if (!gitBranch.empty()) line += "  " + gitBranch;
+        return line + RESET;
+    }
     int pillOverhead = 1 + 1 + 4; // icon + space-after-icon + 2 padding + 2 rounded caps
     std::string dirText = cwd;
     int dirVisible = (int)cwd.size();
@@ -320,6 +343,20 @@ void paintChrome(const std::string& cwd, const std::string& gitBranch,
     const char* user = getenv("USER");
     std::string userHost = std::string(user ? user : "user") + "@" + host;
     std::string sessionStr = formatSession(sessionSeconds);
+
+    if (plainChrome()) {
+        // Flat one-line bottom bar: " user@host  <session>  cpu N%  mem X/YG".
+        // No pills, no right-justify -- just plain text at the last row (and the
+        // plain top bar at row 1 when pinned).
+        char hb[80];
+        snprintf(hb, sizeof(hb), "cpu %.0f%%  mem %.1f/%.1fG", hw.cpuPercent, hw.memUsedGB, hw.memTotalGB);
+        std::string line = std::string(FG_INFO) + " " + userHost + "  " + sessionStr + "  " + hb + RESET;
+        if (chromeTopPinned())
+            printf("\x1b[1;1H\x1b[2K%s", topBar(cwd, gitBranch).c_str());
+        printf("\x1b[%d;1H\x1b[2K%s", rows, line.c_str());
+        fflush(stdout);
+        return;
+    }
 
     // In an SSH session, swap the user icon for a "server" glyph and glow the
     // chip green -- an at-a-glance "you're on a remote box" signal. user@host
