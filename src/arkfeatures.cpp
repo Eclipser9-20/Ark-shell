@@ -354,12 +354,17 @@ std::string brewFormulaFor(const std::string& cmd) {
     std::string brew = brewPath();
     std::string result;
     if (!brew.empty()) {
-        // 1) Authoritative reverse lookup (handles cmd != formula) when the
-        //    homebrew/command-not-found tap is installed.
-        std::string wf = firstToken(captureCommand({brew, "which-formula", cmd}));
-        if (!wf.empty()) result = wf;
-        // 2) Fallback: a formula literally named `cmd`.
-        else if (brewFormulaeSet(brew).count(cmd)) result = cmd;
+        // FAST path first: a formula literally named `cmd` -- the common case
+        // (git, curl, htop, jq, wget...) -- is an instant in-memory set lookup.
+        if (brewFormulaeSet(brew).count(cmd)) {
+            result = cmd;
+        } else {
+            // Only on a miss do we pay the slow `brew which-formula` subprocess
+            // (handles cmd != formula, e.g. rg -> ripgrep). This is what made a
+            // not-found line feel laggy before the next prompt.
+            std::string wf = firstToken(captureCommand({brew, "which-formula", cmd}));
+            if (!wf.empty()) result = wf;
+        }
     }
     std::lock_guard<std::mutex> lk(g_brewMu);
     g_brewCache[cmd] = result;

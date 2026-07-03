@@ -180,6 +180,11 @@ PackageManager activePackageManager() {
 
 std::string packageForCommand(const PackageManager& pm, const std::string& cmd) {
     if (!pm.valid() || cmd.empty()) return "";
+    // A package name starts with a letter or underscore. Bail early on things
+    // that clearly aren't commands -- `2+2`, `2+`, arithmetic typos -- so a
+    // not-found line doesn't stall on a slow `brew which-formula` lookup before
+    // the next prompt returns.
+    if (!(std::isalpha((unsigned char)cmd[0]) || cmd[0] == '_')) return "";
     // Only ever hand safe package-name characters to a package manager.
     for (char c : cmd)
         if (!(std::isalnum((unsigned char)c) || c == '-' || c == '_' || c == '.' || c == '+'))
