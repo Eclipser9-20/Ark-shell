@@ -115,6 +115,14 @@ Token Lexer::lexWord() {
             while (!atEnd() && depth > 0) {
                 char cc = advance();
                 out += cc;
+                // Skip quoted spans so a paren inside '...'/"..." doesn't
+                // throw off the depth count (e.g. $(echo 'x)y')).
+                if (cc == '\'' || cc == '"') {
+                    char q = cc;
+                    while (!atEnd() && peek() != q) { if (q == '"' && peek() == '\\') out += advance(); out += advance(); }
+                    if (!atEnd()) out += advance();
+                    continue;
+                }
                 if (cc == '(') depth++;
                 else if (cc == ')') depth--;
             }
