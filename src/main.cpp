@@ -22,6 +22,7 @@
 #include <iostream>
 #include <iterator>
 #include <string>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
@@ -63,13 +64,7 @@ static std::string buildPrompt(const ShellState& state, const std::string& home)
     char clock[8];
     strftime(clock, sizeof(clock), "%H:%M", &local);
     std::string arrowColor = state.lastStatus == 0 ? tn::GREEN : tn::RED;
-    // When the last command failed, show its exit code in red right before the
-    // arrow (`10:26 ✘2 ❯`). Purely visual; ARK_EXIT_CODE=0 turns it off.
-    std::string code;
-    if (state.lastStatus != 0 &&
-        !(getenv("ARK_EXIT_CODE") && std::string(getenv("ARK_EXIT_CODE")) == "0"))
-        code = std::string(tn::RED) + "\xe2\x9c\x98" + std::to_string(state.lastStatus) + tn::R + " ";
-    return std::string(tn::COMMENT) + clock + " " + code + arrowColor + "\xe2\x9d\xaf" + tn::R + " ";
+    return std::string(tn::COMMENT) + clock + " " + arrowColor + "\xe2\x9d\xaf" + tn::R + " ";
 }
 
 static std::string continuationPrompt() {
@@ -612,6 +607,20 @@ int main(int argc, char** argv) {
                                 // case THIS command (clear/vim/etc) left it
                                 // somewhere invalid -- e.g. `clear`'s own
                                 // \x1b[H parks it at row 1, on the pinned bar
+            // Exit code belongs to the command you JUST RAN, not the next prompt:
+            // a red ✘<code> right-aligned on the (fresh) line under its output.
+            // ARK_EXIT_CODE=0 disables. The reassert above already left the cursor
+            // on a clean line (freshline), so \r + column-move lands it cleanly.
+            if (state.lastStatus != 0 &&
+                !(getenv("ARK_EXIT_CODE") && std::string(getenv("ARK_EXIT_CODE")) == "0")) {
+                struct winsize ws;
+                int cols = (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0) ? ws.ws_col : 80;
+                std::string num = std::to_string(state.lastStatus);
+                int col = cols - (1 + (int)num.size()) + 1; // ✘ is 1 display col + digits
+                if (col < 1) col = 1;
+                std::cout << "\r\x1b[" << col << "G" << tn::RED << "\xe2\x9c\x98" << num
+                          << tn::R << "\r\n" << std::flush;
+            }
             // Private Mode: while on, write NOTHING to history/disk. Otherwise
             // record the command tagged with the cwd it ran in (context-aware
             // autosuggestions use that). Multi-line entries stored as one line.
