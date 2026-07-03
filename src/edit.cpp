@@ -539,9 +539,23 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
                 if (params.size() > 8) break; // sanity guard against a malformed/runaway sequence
             }
 
-            if (final == 'C' && params.empty()) { // Right: forward char, or accept autosuggestion at end
+            if (final == 'C' && params.empty()) { // Right: forward char, or accept ONE WORD of the suggestion
                 if (cursor < buf.size()) { cursor++; redraw(); }
-                else { std::string s = currentSuggestion(); if (!s.empty()) { buf += s; cursor = buf.size(); redraw(); } }
+                else {
+                    std::string s = currentSuggestion();
+                    if (!s.empty()) {
+                        // Accept just the next word (fish-style): skip leading
+                        // spaces, take the word, include one trailing space.
+                        // Ctrl-F / Tab still accept the whole suggestion.
+                        size_t adv = 0;
+                        while (adv < s.size() && s[adv] == ' ') adv++;
+                        while (adv < s.size() && s[adv] != ' ') adv++;
+                        if (adv < s.size() && s[adv] == ' ') adv++;
+                        buf += s.substr(0, adv);
+                        cursor = buf.size();
+                        redraw();
+                    }
+                }
             }
             else if (final == 'D' && params.empty() && cursor > 0) { cursor--; redraw(); }
             else if (final == 'C' && params == "1;3") { moveWordForward(buf, cursor); redraw(); }  // xterm Alt+Right
