@@ -203,13 +203,22 @@ void releaseScrollRegionForChild() {
     // When chrome painted no bars there's no region to drop -- and emitting the
     // reset anyway is pointless churn.
     if (const char* c = getenv("ARK_CHROME"); c && std::string(c) == "0") return;
-    // \0337  save cursor (DECSC)         -- octal \033 == ESC, kept as \0NN so
-    // \033[r reset scroll region (full)     the trailing 7/8 aren't swallowed
-    //        -- \033[r ALSO homes the cursor to (1,1) on Ghostty/xterm, which
-    //        is why it must be bracketed
-    // \0338  restore cursor (DECRC) so the child (and any plain-command output
-    //        that follows) resumes exactly where the prompt left off
-    printf("\0337\033[r\0338");
+    // Dropping the region un-pins the bottom bar (it's on the last row, which
+    // the region used to protect). If we leave it there, the child's scrolling
+    // output shoves it UP into the scrollback -- and every reassert repaints a
+    // fresh one, so the history fills with ghost copies of the bar (the "it's
+    // duplicating itself / that's not an overlay" bug). So ERASE the bar row as
+    // part of releasing: the child gets a clean full screen, nothing scrolls
+    // into history, and reassertChrome repaints exactly one bar afterwards.
+    //   \0337  save cursor (DECSC)   -- octal \033 == ESC, kept as \0NN so the
+    //   \033[r reset region (full)      trailing 7/8/H digits aren't swallowed
+    //   \033[<rows>;1H \033[2K erase the (now-unpinned) bottom bar row
+    //   \0338  restore cursor (DECRC) to where the prompt left off
+    int rows, cols;
+    if (getTerminalSize(rows, cols) && rows > 1)
+        printf("\0337\033[r\033[%d;1H\033[2K\0338", rows);
+    else
+        printf("\0337\033[r\0338");
     fflush(stdout);
 }
 
