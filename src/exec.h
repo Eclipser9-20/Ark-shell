@@ -15,3 +15,8 @@ int execNode(Node* node, ShellState& state);
 // startup (see main.cpp) -- both interactive and non-interactive modes need
 // it, since $(...) can appear in scripts too.
 std::string captureCommandOutput(const std::string& cmd, ShellState& state);
+
+// The `let` builtin: evaluates each argument as an arithmetic expression (with
+// side effects -- assignment, `++`, etc.), like `(( ))` but as a normal command.
+// Exit status is 0 iff the LAST expression evaluates to nonzero (bash semantics).
+int builtinLet(const std::vector<std::string>& argv, ShellState& state);

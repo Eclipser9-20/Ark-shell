@@ -2,6 +2,7 @@
 #include "complete.h"
 #include "exec.h"
 #include "arkfeatures.h"
+#include "arkpy.h"
 #include "value.h"
 #include "history.h"
 #include "lexer.h"
@@ -121,12 +122,21 @@ const char* arkDefaultConfig() {
 #  CONTROL FLOW
 #    if COND; then ..; elif ..; else ..; fi     for x in LIST; do ..; done
 #    while COND; do ..; done    case WORD in pat) .. ;; *) .. ;; esac
+#    for (( i=0; i<n; i++ )); do ..; done        C-style arithmetic loop
 #    break [N]  continue [N]  return [N]   cmd && cmd || cmd ; cmd   ! cmd  ( sub )
+#  TESTS & ARITHMETIC
+#    [[ EXPR ]]   ==/!= (glob)  =~ (regex)  < > (string)  &&  ||  !  ( )
+#                 -e -f -d -r -w -x -s -L  -z/-n str  -eq -ne -lt -le -gt -ge  -nt -ot -ef
+#    (( EXPR ))   arithmetic command (exit 0 iff nonzero); assignment + i++ take effect
+#    let 'i = i + 1'   let i++     arithmetic as a normal command
 #  FUNCTIONS   name() { ..; }    function name { ..; }    local VAR=val
 #  REDIRECTION  > >> < 2>  |  &   << EOF   <<'EOF' (literal)   <<- EOF (strip tabs)
-#  BUILTINS  cd pwd echo(-n -e) export unset set type read alias unalias
+#  BUILTINS  cd pwd echo(-n -e) export unset set type read alias unalias let
 #            pushd popd dirs source(.) return local break continue jobs fg bg exit
 #            private uvar history  ark-settings ark-reload ark-reindex
+#  ark-py  in-shell Python IDE: syntax highlight + Tab autocomplete, ^R run,
+#          ^B build, ^S save.  ark-py -o app.py            edit/save source
+#          ark-py -oc app.pyc   compile to bytecode        ark-py -ocb app  native ($ARK_PY_NATIVE_CC)
 #  LINE EDITING  Ctrl-A/E  Ctrl-K/U kill  Ctrl-W word  Ctrl-Y yank  Alt-</>  Ctrl-R
 #            Tab complete   ->/Ctrl-F accept suggestion   Up/Down history
 )CFG";
@@ -234,9 +244,25 @@ static int nuLs(const std::string& dir, time_t now) {
 static int b_ls(const std::vector<std::string>& argv, ShellState& state) {
     const char* nu = getenv("ARK_NU_MODE");
     if (nu && std::string(nu) == "1") {
-        std::string dir = argv.size() > 1 ? argv[1] : state.cwd;
-        if (dir.empty()) dir = ".";
-        return nuLs(dir, time(nullptr));
+        // The nu table only renders a SINGLE directory with no options. The old
+        // code took argv[1] as the directory unconditionally, so `ls -la` tried
+        // to open a directory literally named "-la" ("ls: cannot open -la"). If
+        // the user passed ANY flag or more than one path, the table can't show
+        // it -- fall through to the real ls so `ls -la`, `ls -l`, `ls a b` all
+        // behave exactly as expected.
+        int paths = 0;
+        bool hasFlag = false;
+        std::string dir;
+        for (size_t i = 1; i < argv.size(); i++) {
+            if (!argv[i].empty() && argv[i][0] == '-') hasFlag = true; // -la, -l, "-"
+            else { if (++paths == 1) dir = argv[i]; }
+        }
+        if (!hasFlag && paths <= 1) {
+            if (dir.empty()) dir = state.cwd;
+            if (dir.empty()) dir = ".";
+            return nuLs(dir, time(nullptr));
+        }
+        // else: fall through to the real /bin/ls passthrough below
     }
     // Passthrough to the real ls, COLORIZED by default (dirs/symlinks/exec/etc.,
     // like `ls --color` or most distros' default alias). ARK_LS_COLOR=0 disables.
@@ -968,8 +994,21 @@ static int b_test(const std::vector<std::string>& argv, ShellState&) {
 static std::string readAllFd0() {
     std::string out;
     char buf[65536];
-    ssize_t n;
-    while ((n = read(STDIN_FILENO, buf, sizeof buf)) > 0) out.append(buf, (size_t)n);
+    constexpr size_t kMaxInput = 64u * 1024u * 1024u; // don't let `from json < /dev/zero` eat RAM
+    for (;;) {
+        ssize_t n = read(STDIN_FILENO, buf, sizeof buf);
+        // ark's 1Hz idle ticker (SIGALRM, no SA_RESTART) interrupts this read within
+        // a second. Bailing on EINTR made a bare `from json` at the prompt return
+        // EMPTY instead of waiting for input -- it printed "invalid JSON" instantly
+        // and the JSON you then typed got run as a command.
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;
+        out.append(buf, (size_t)n);
+        if (out.size() > kMaxInput) {
+            std::cerr << "from/to: input too large (>64MB), truncating\n";
+            break;
+        }
+    }
     return out;
 }
 static void emitRendered(const Value& v) {
@@ -1016,6 +1055,7 @@ const std::unordered_map<std::string, BuiltinFn>& builtinRegistry() {
         {"ls", b_ls}, {"test", b_test}, {"[", b_test},
         {"private", b_private}, {"uvar", b_uvar}, {"history", b_history},
         {"from", b_from}, {"to", b_to},
+        {"ark-py", arkPyMain}, {"let", builtinLet},
     };
     return reg;
 }

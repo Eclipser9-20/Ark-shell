@@ -142,12 +142,27 @@ static const char* BAD_COMMAND = "\x1b[38;2;247;118;142m";
 
 std::string highlightLineValidated(const std::string& raw,
                                    const std::function<bool(const std::string&)>& isValidCommand) {
+    // A leading NAME=value is an ASSIGNMENT, not a command -- `x=5` must not be
+    // validated against $PATH and painted red (it works fine; it just looked
+    // broken). NAME must be a shell identifier; `--flag=v` and `key=v` args are
+    // excluded (they start with '-' / aren't in command position anyway).
+    auto isAssignmentWord = [](const std::string& t) {
+        size_t eq = t.find('=');
+        if (eq == std::string::npos || eq == 0) return false;
+        if (!(std::isalpha((unsigned char)t[0]) || t[0] == '_')) return false;
+        for (size_t i = 1; i < eq; i++)
+            if (!(std::isalnum((unsigned char)t[i]) || t[i] == '_')) return false;
+        return true;
+    };
     auto spans = classify(raw);
     std::string out;
     out.reserve(raw.size() + 32);
     for (const auto& sp : spans) {
         std::string text = raw.substr(sp.start, sp.end - sp.start);
         const char* color = colorFor(sp.kind);
+        if (sp.kind == SpanKind::Command && isAssignmentWord(text)) {
+            color = colorFor(SpanKind::Variable); // it's an assignment, colour it as one
+        } else
         // A command that doesn't resolve turns red -- but only once the word
         // looks "finished": we can't know if a half-typed name is valid yet,
         // and reddening every prefix keystroke is noise. Heuristic: validate a

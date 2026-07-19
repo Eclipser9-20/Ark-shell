@@ -149,9 +149,35 @@ struct PendingHeredoc {
     bool noExpand;
 };
 
+// Sentinel bytes marking a captured `[[ ... ]]` extended test / `(( ... ))`
+// arithmetic construct in a Word's text. These control bytes never occur in
+// real input, so the parser/exec can detect them unambiguously (see
+// SENT_COND/SENT_ARITH in exec.cpp).
+static const char SENT_COND  = '\x1d';  // `[[ ... ]]`  -> "\x1d" + raw inner
+static const char SENT_ARITH = '\x1e';  // `(( ... ))`  -> "\x1e" + raw inner
+
 std::vector<Token> Lexer::tokenize() {
     std::vector<Token> toks;
     std::vector<PendingHeredoc> pending;
+
+    // Are we at a command-word position? `[[` and `((` are only reserved words
+    // (extended test / arithmetic) at the start of a command -- everywhere else
+    // (`echo [[ x ]]`, a glob char-class) they are literal. Approximated by the
+    // kind of the previously emitted token: a separator/keyword that introduces
+    // a command list means the next word starts a fresh command.
+    auto atCommandPos = [&]() -> bool {
+        if (toks.empty()) return true;
+        switch (toks.back().kind) {
+            case TokKind::Newline: case TokKind::Semi:  case TokKind::And:
+            case TokKind::Or:      case TokKind::Pipe:  case TokKind::LParen:
+            case TokKind::If:      case TokKind::Then:  case TokKind::Elif:
+            case TokKind::Else:    case TokKind::While: case TokKind::Do:
+            case TokKind::For:     case TokKind::DSemi:
+                return true;
+            default:
+                return false;
+        }
+    };
 
     // Read one whole source line (up to and including the newline, which is
     // consumed). Used to collect here-doc bodies after a command line ends.
@@ -205,6 +231,44 @@ std::vector<Token> Lexer::tokenize() {
                 toks[ph.tokenIndex].heredocNoExpand = ph.noExpand;
             }
             pending.clear();
+            continue;
+        }
+        // `[[ ... ]]` extended test: captured whole as a single sentinel-marked
+        // Word so it never reaches the command/word path (where `[[` was being
+        // "autocorrected" to `[`). Only at command position and only when a space
+        // follows `[[` -- so a glob char-class like `[[:alnum:]]` in an argument
+        // is left alone. Reads raw source up to the matching top-level `]]`.
+        if (atCommandPos() && peek() == '[' && peek(1) == '[' &&
+            (peek(2) == ' ' || peek(2) == '\t')) {
+            int l = line_, c = col_;
+            advance(); advance(); // '[['
+            std::string inner;
+            while (!atEnd()) {
+                if (peek() == ']' && peek(1) == ']') { advance(); advance(); break; }
+                if (peek() == '\n') break; // unterminated on this line
+                inner += advance();
+            }
+            toks.push_back(Token{TokKind::Word, std::string(1, SENT_COND) + inner, l, c});
+            continue;
+        }
+        // `(( ... ))` arithmetic command / C-style-for header: captured whole as
+        // a sentinel-marked Word. Only at command position (a bare `(subshell)`
+        // has a space after the first paren, or a single `(`). `$(( ))` never
+        // reaches here -- it's consumed inside lexWord's `$(` handler. Balanced on
+        // inner parens so `(( (1+2)*3 ))` captures correctly.
+        if (atCommandPos() && peek() == '(' && peek(1) == '(') {
+            int l = line_, c = col_;
+            advance(); advance(); // '(('
+            std::string inner;
+            int bal = 0;
+            while (!atEnd()) {
+                if (peek() == ')' && peek(1) == ')' && bal == 0) { advance(); advance(); break; }
+                char cc = advance();
+                if (cc == '(') bal++;
+                else if (cc == ')') bal--;
+                inner += cc;
+            }
+            toks.push_back(Token{TokKind::Word, std::string(1, SENT_ARITH) + inner, l, c});
             continue;
         }
         // Here-doc: `<<` or `<<-`, followed by a (possibly quoted) delimiter.

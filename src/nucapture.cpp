@@ -1,5 +1,6 @@
 #include "nucapture.h"
 #include "value.h"
+#include "jobs.h"   // BlockSigchld -- the global SIGCHLD handler must not reap our child
 #include <cerrno>
 #include <csignal>
 #include <cstdlib>
@@ -82,6 +83,13 @@ int run(const std::vector<std::string>& argv, char** env) {
     ws.ws_col = (unsigned short)cols;
     ioctl(slave, TIOCSWINSZ, &ws);
 
+    // The global SIGCHLD handler reaps ANY child (waitpid(-1, WNOHANG|...)). Without
+    // this guard it reaped our PTY child before the waitpid() below, which then
+    // returned ECHILD leaving status == 0 -- so under ARK_NU_MODE every command
+    // reported SUCCESS: `false` looked true, and every `&&` / `if cmd` broke.
+    // Every other foreground wait path in ark takes this same guard.
+    BlockSigchld sigchldGuard;
+
     pid_t pid = fork();
     if (pid < 0) { close(master); close(slave); return -1; }
     if (pid == 0) {
@@ -145,6 +153,12 @@ int run(const std::vector<std::string>& argv, char** env) {
         }
         if (FD_ISSET(master, &fds)) {
             ssize_t k = read(master, rb, sizeof rb);
+            // ark's 1Hz idle ticker (SIGALRM, installed without SA_RESTART) and
+            // SIGWINCH both interrupt this read. Treating EINTR as EOF abandoned a
+            // LIVE child: we'd close(master), then block forever in waitpid() while
+            // the child blocked writing to a PTY nobody was reading -- an unkillable
+            // hung shell. Only a real 0/error is end-of-child.
+            if (k < 0 && errno == EINTR) continue;
             if (k <= 0) break; // child closed the PTY -> it's exiting
             if (mode == PASS) { writeAll(STDOUT_FILENO, rb, (size_t)k); continue; }
 

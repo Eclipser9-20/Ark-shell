@@ -1,0 +1,8 @@
+[[ abc == a* ]] && echo m1
+[[ abc == x* ]] || echo m2
+[[ hello =~ ^h.*o$ ]] && echo m3
+e=; [[ -z "$e" ]] && echo m4
+[[ -n nonempty ]] && echo m5
+[[ 5 -gt 3 ]] && echo m6
+[[ 1 -eq 1 && ( 2 -eq 3 || ! 4 -eq 5 ) ]] && echo m7
+[[ apple < banana ]] && echo m8

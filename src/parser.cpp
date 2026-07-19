@@ -167,6 +167,34 @@ std::unique_ptr<Node> Parser::parseFor() {
     advance(); // 'for'
     auto fn = std::make_unique<Node>();
     fn->kind = NodeKind::For;
+
+    // C-style loop: `for (( init; cond; step )); do ... done`. The lexer captured
+    // the `(( ... ))` header as one sentinel-marked Word ('\x1e' + inner). Split
+    // the inner on top-level ';' into the three arithmetic clauses and stash them
+    // in forWords, marking the loop with forVar = "\x1e" so runFor picks the
+    // C-style path. A missing clause (e.g. `for ((;;))`) yields an empty string.
+    if (check(TokKind::Word) && !peek().text.empty() && peek().text[0] == '\x1e') {
+        std::string inner = advance().text.substr(1);
+        std::vector<std::string> parts;
+        std::string cur;
+        int depth = 0;
+        for (char ch : inner) {
+            if (ch == '(') depth++;
+            else if (ch == ')') depth--;
+            if (ch == ';' && depth == 0) { parts.push_back(cur); cur.clear(); }
+            else cur += ch;
+        }
+        parts.push_back(cur);
+        while (parts.size() < 3) parts.push_back("");
+        fn->forVar = "\x1e"; // C-style marker
+        fn->forWords = {parts[0], parts[1], parts[2]};
+        while (check(TokKind::Semi) || check(TokKind::Newline)) advance();
+        expect(TokKind::Do, "do");
+        fn->children.push_back(parseStatementList({TokKind::Done}));
+        expect(TokKind::Done, "done");
+        return fn;
+    }
+
     fn->forVar = advance().text; // variable name
     if (check(TokKind::In)) {
         advance(); // 'in'

@@ -200,6 +200,14 @@ void setScrollRegion() {
 }
 
 void releaseScrollRegionForChild() {
+    // ONLY ever write to a real terminal. The caller checks tcgetpgrp() == our
+    // pgid, but that answers "do we own the tty", NOT "is our stdout the tty".
+    // Inside a command substitution `x=$(cmd)` the subshell keeps the shell's
+    // pgid while stdout is a PIPE, so these escape bytes went straight into the
+    // captured value: x became "\x1b7\x1b[r\x1b8hi", and `[ "$(uname)" = Darwin ]`
+    // silently stopped matching. Same for `cmd > file` in a script. isatty() is
+    // the question that actually needed asking.
+    if (!isatty(STDOUT_FILENO)) return;
     // When chrome painted no bars there's no region to drop -- and emitting the
     // reset anyway is pointless churn.
     if (const char* c = getenv("ARK_CHROME"); c && std::string(c) == "0") return;

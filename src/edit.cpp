@@ -226,7 +226,11 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
     };
     int plen = dispWidth(prompt);       // prompt is fixed for this readLine call
     int lastRows = 1;                    // rows the previous refresh occupied (incl. ghost)
-    size_t lastPos = 0;                  // cursor byte-pos at the previous refresh
+    int lastCurCol = 0;                  // cursor's DISPLAY column at the previous refresh.
+                                         // This used to be a BYTE offset, which over-counted
+                                         // any non-ASCII input (é=2 bytes, emoji=4) and put
+                                         // the erase loop on the wrong row -- wiping lines
+                                         // above the prompt and leaving stale text below.
 
     // Multi-line-aware refresh (linenoise-style). The old naive "\r\x1b[K" only
     // cleared ONE row, so a line + ghost that WRAPPED past the terminal width
@@ -254,12 +258,23 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
         }
         int glen = dispWidth(sug);
         int total = plen + bw + glen;                    // full display width incl ghost
-        int rows = cols > 0 ? (total + cols) / cols : 1; if (rows < 1) rows = 1;
+        // DEFERRED WRAP: writing the cell in the LAST column leaves the cursor in
+        // that cell with a pending-wrap flag -- it does NOT move to the next row.
+        // The old code guessed at this and the three geometry formulas disagreed
+        // (rows counted a full row as 2, endRow counted it as 1). Since step 3
+        // only issues RELATIVE moves, that error got baked into lastRows and
+        // corrupted every later redraw: the input line climbed one row at each
+        // width crossing and erased the output line above it -- the everyday
+        // "text clipping into the prompt" / "prompt duping" bug. Fix: force the
+        // wrap ourselves (step 2) so all three formulas describe reality.
+        bool wrapPending = cols > 0 && total > 0 && total % cols == 0;
+        int rows = cols > 0 ? (total + cols - 1) / cols : 1; if (rows < 1) rows = 1;
+        if (wrapPending) rows++;                         // the forced wrap adds a row
         int curCol = plen + dispWidth(buf.substr(0, cursor)); // cursor's display column (absolute)
 
         std::string out;
         // 1. Go to the last row of the OLD render, then clear each row upward.
-        int oldCursorRow = cols > 0 ? (plen + (int)lastPos) / cols + 1 : 1; // approx (byte≈col for ascii)
+        int oldCursorRow = cols > 0 ? lastCurCol / cols + 1 : 1;
         if (lastRows - oldCursorRow > 0) out += "\x1b[" + std::to_string(lastRows - oldCursorRow) + "B";
         for (int j = 0; j < lastRows - 1; j++) out += "\r\x1b[K\x1b[1A";
         out += "\r\x1b[K";
@@ -267,6 +282,7 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
         out += prompt;
         out += rendered;
         if (!sug.empty()) out += std::string("\x1b[38;2;86;95;137m") + sug + "\x1b[0m";
+        if (wrapPending) out += "\n\r";                  // resolve the pending wrap NOW
         // 3. Reposition the cursor (which is now at the end) back to its spot.
         int endRow = cols > 0 ? total / cols : 0;
         int curRow = cols > 0 ? curCol / cols : 0;
@@ -277,7 +293,7 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
 
         std::cout << out << std::flush;
         lastRows = rows;
-        lastPos = cursor;
+        lastCurCol = curCol;
     };
 
     // Finalize the visible line before returning/cancelling: move the cursor
@@ -285,9 +301,26 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
     // suggestion sitting to the right of the cursor is wiped instead of being
     // left frozen on the submitted line (real bug: the ghost stayed on screen
     // after Enter). Then emit the newline.
+    // Park the cursor at the TRUE end of the input, crossing wrapped rows.
+    // This used to be a bare `\x1b[<n>C`, but CUF CLAMPS at the right edge -- it
+    // cannot step onto a wrapped row -- so on a line long enough to wrap, the
+    // newline landed in the MIDDLE of the input and the next prompt was drawn
+    // straight over the command's own continuation text.
+    auto gotoEndOfInput = [&]() {
+        int cols = terminalCols();
+        int curCol = plen + dispWidth(buf.substr(0, cursor));
+        int endCol = plen + dispWidth(buf);
+        int curRow = cols > 0 ? curCol / cols : 0;
+        int endRow = cols > 0 ? endCol / cols : 0;
+        if (endRow - curRow > 0) std::cout << "\x1b[" << (endRow - curRow) << "B";
+        std::cout << "\r";
+        int c = cols > 0 ? endCol % cols : endCol;
+        if (c > 0) std::cout << "\x1b[" << c << "C";
+    };
+
     auto endLine = [&]() {
-        if (cursor < buf.size()) std::cout << "\x1b[" << (buf.size() - cursor) << "C";
-        std::cout << "\x1b[K\n" << std::flush;
+        gotoEndOfInput();
+        std::cout << "\x1b[K\n" << std::flush; // wipe the ghost, then end the line
         cursor = buf.size();
     };
 
@@ -333,7 +366,7 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
             //   command and the next prompt:   cmd / ^C / ❯
             // ARK_CTRLC = "append": bash style, "^C" right after the command:
             //   cmd^C / ❯
-            if (cursor < buf.size()) std::cout << "\x1b[" << (buf.size() - cursor) << "C";
+            gotoEndOfInput(); // same wrapped-row walk as endLine()
             const char* mode = getenv("ARK_CTRLC");
             bool append = mode && std::string(mode) == "append";
             std::cout << "\x1b[K" << (append ? "^C\n" : "\n^C\n") << std::flush;

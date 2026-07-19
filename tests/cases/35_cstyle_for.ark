@@ -1,0 +1,6 @@
+out=""
+for ((i=0; i<3; i++)); do out="$out$i"; done
+echo $out
+s=0
+for ((j=1; j<=5; j++)); do s=$((s+j)); done
+echo $s

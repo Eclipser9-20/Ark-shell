@@ -18,6 +18,7 @@
 #include <cstring>
 #include <fcntl.h>
 #include <iostream>
+#include <regex>
 #include <spawn.h>
 #include <set>
 #include <sys/stat.h>
@@ -268,7 +269,12 @@ static std::string buildCmdline(Node* node) {
     return cmdline;
 }
 
-static int runPipelineStage(Node* cmd, ShellState& state, int inFd, int outFd, pid_t& pidOut) {
+// siblingReadFd is the read end of THIS stage's own output pipe -- the fd the
+// parent keeps for the next stage. Every stage's child inherits it and MUST
+// close it: otherwise the writer is its OWN phantom reader, so when a later
+// stage (e.g. `head`) closes the pipe early, the write never gets EPIPE and the
+// stage hangs forever holding the whole pipeline open. -1 for the last stage.
+static int runPipelineStage(Node* cmd, ShellState& state, int inFd, int outFd, int siblingReadFd, pid_t& pidOut) {
     // A subshell stage of a pipeline (`(a; b) | c` or `c | (a; b)`): fork,
     // wire the pipe fds, and run the subshell body in the child.
     // A subshell OR a compound command (if/while/for/case) as a pipeline stage:
@@ -283,6 +289,7 @@ static int runPipelineStage(Node* cmd, ShellState& state, int inFd, int outFd, p
         if (pid == 0) {
             if (inFd != -1) { dup2(inFd, STDIN_FILENO); close(inFd); }
             if (outFd != -1) { dup2(outFd, STDOUT_FILENO); close(outFd); }
+            if (siblingReadFd != -1) close(siblingReadFd); // don't be our own reader
             applyRedirectsInChild(cmd->redirects, state);
             int rc = (cmd->kind == NodeKind::Subshell)
                          ? execNode(cmd->children[0].get(), state)
@@ -306,6 +313,7 @@ static int runPipelineStage(Node* cmd, ShellState& state, int inFd, int outFd, p
         posix_spawn_file_actions_adddup2(&actions, inFd, STDIN_FILENO);
         posix_spawn_file_actions_addclose(&actions, inFd);
     }
+    if (siblingReadFd != -1) posix_spawn_file_actions_addclose(&actions, siblingReadFd);
     if (outFd != -1) {
         posix_spawn_file_actions_adddup2(&actions, outFd, STDOUT_FILENO);
         posix_spawn_file_actions_addclose(&actions, outFd);
@@ -334,6 +342,7 @@ static int runPipelineStage(Node* cmd, ShellState& state, int inFd, int outFd, p
         if (pid == 0) {
             if (inFd != -1) { dup2(inFd, STDIN_FILENO); close(inFd); }
             if (outFd != -1) { dup2(outFd, STDOUT_FILENO); close(outFd); }
+            if (siblingReadFd != -1) close(siblingReadFd); // don't be our own reader
             applyRedirectsInChild(cmd->redirects, state);
             int rc = it->second(argv, state);
             std::cout.flush(); // _exit() below skips iostream buffer flushing
@@ -411,7 +420,7 @@ static int runPipeline(Node* pipeline, ShellState& state) {
         int inFd = prevReadFd;
         int outFd = hasNext ? pipeFds[1] : -1;
 
-        runPipelineStage(pipeline->children[i].get(), state, inFd, outFd, pids[i]);
+        runPipelineStage(pipeline->children[i].get(), state, inFd, outFd, hasNext ? pipeFds[0] : -1, pids[i]);
 
         // All stages share one process group (the first stage's pid is the
         // group leader). Both parent and child call setpgid on the same
@@ -528,7 +537,24 @@ static size_t assignmentEq(const std::string& word) {
     return std::string::npos; // no '=' at all
 }
 
+// Sentinels the lexer stamps on captured `(( ... ))` / `[[ ... ]]` words (see
+// lexer.cpp). Detected as the sole word of a Command node so these constructs
+// never go through normal command lookup/expansion.
+static const char SENT_ARITH = '\x1e';
+static const char SENT_COND  = '\x1d';
+static long arithMutEval(const std::string& expr, ShellState& state, bool* ok = nullptr);
+static bool evalDBracket(const std::string& inner, ShellState& state);
+
 static int runCommand(Node* cmd, ShellState& state) {
+    // `(( expr ))` arithmetic command / `[[ test ]]` extended test: the lexer
+    // captured either as a single sentinel-marked word. Dispatch before any
+    // assignment-peeling/expansion. `(( ))` exits 0 iff the expression is nonzero
+    // (and applies its side effects, e.g. `(( i++ ))`); `[[ ]]` exits 0 iff true.
+    if (!cmd->words.empty() && !cmd->words[0].empty()) {
+        char s0 = cmd->words[0][0];
+        if (s0 == SENT_ARITH) return arithMutEval(cmd->words[0].substr(1), state) != 0 ? 0 : 1;
+        if (s0 == SENT_COND)  return evalDBracket(cmd->words[0].substr(1), state) ? 0 : 1;
+    }
     // Leading NAME=value words are assignments (bash: they precede the
     // command, if any). Peel them off the raw (pre-expansion) words -- the
     // NAME and '=' are literal, only the VALUE gets expanded, and never
@@ -856,6 +882,28 @@ static int runFor(Node* fn, ShellState& state) {
     int status = 0;
     state.loopDepth++;
     struct DepthGuard { int& d; ~DepthGuard() { d--; } } dg{state.loopDepth};
+
+    // C-style loop: `for (( init; cond; step ))`. Marked by forVar == "\x1e"; the
+    // three arithmetic clauses live in forWords. An empty condition means "true"
+    // (an infinite loop, e.g. `for ((;;))`). Clauses run through the mutable
+    // arithmetic evaluator so `i++` and `i=0` take effect on shell variables.
+    if (fn->forVar == std::string(1, SENT_ARITH)) {
+        const std::string& init = fn->forWords.size() > 0 ? fn->forWords[0] : "";
+        const std::string& cond = fn->forWords.size() > 1 ? fn->forWords[1] : "";
+        const std::string& step = fn->forWords.size() > 2 ? fn->forWords[2] : "";
+        if (!init.empty()) arithMutEval(init, state);
+        for (;;) {
+            if (!cond.empty() && arithMutEval(cond, state) == 0) break;
+            status = execNode(fn->children[0].get(), state);
+            if (state.returnFlag) break;
+            bool stopLoop;
+            if (consumeLoopCtl(state, stopLoop) && stopLoop) break;
+            if (!step.empty()) arithMutEval(step, state);
+        }
+        if (state.loopDepth == 1) { state.loopCtl = ShellState::LoopCtl::None; state.loopCtlLevels = 0; }
+        return status;
+    }
+
     // Expand the word list with FULL expansion (glob + split), so
     // `for f in *.txt` iterates once per matching file, and `for w in $LIST`
     // iterates over the split words -- not the raw single word.
@@ -893,6 +941,324 @@ static int runCase(Node* cn, ShellState& state) {
         if (matched) return execNode(clause.second.get(), state);
     }
     return 0;
+}
+
+// ── Mutable integer arithmetic evaluator: powers `(( ... ))` and C-style for ──
+// Unlike expand.cpp's read-only ArithEval, this one WRITES back to shell
+// variables, so assignment (`=`, `+=` …), pre/post increment (`++i`, `i++`),
+// and the C-style loop step all take effect. C operator precedence; bare names
+// and `$name`/`${name}` resolve to their integer value (0 if unset/non-numeric).
+namespace {
+struct ArithMut {
+    const std::string& s;
+    size_t pos = 0;
+    ShellState& st;
+    bool ok = true;
+    ArithMut(const std::string& str, ShellState& state) : s(str), st(state) {}
+
+    void skipSpace() { while (pos < s.size() && std::isspace((unsigned char)s[pos])) pos++; }
+    long readVar(const std::string& n) {
+        std::string v;
+        auto it = st.vars.find(n);
+        if (it != st.vars.end()) v = it->second;
+        else if (const char* e = getenv(n.c_str())) v = e;
+        if (v.empty()) return 0;
+        return std::strtol(v.c_str(), nullptr, 0);
+    }
+    void writeVar(const std::string& n, long val) {
+        std::string v = std::to_string(val);
+        st.vars[n] = v;
+        ::setenv(n.c_str(), v.c_str(), 1);
+    }
+    std::string readName() {
+        size_t j = pos;
+        while (j < s.size() && (std::isalnum((unsigned char)s[j]) || s[j] == '_')) j++;
+        std::string n = s.substr(pos, j - pos);
+        pos = j;
+        return n;
+    }
+
+    long parsePrimary() {
+        skipSpace();
+        if (pos >= s.size()) { ok = false; return 0; }
+        char c = s[pos];
+        if (c == '(') { pos++; long v = parseComma(); skipSpace();
+                        if (pos < s.size() && s[pos] == ')') pos++; else ok = false; return v; }
+        if (c == '$') {
+            pos++;
+            std::string n;
+            if (pos < s.size() && s[pos] == '{') { pos++; n = readName(); if (pos < s.size() && s[pos] == '}') pos++; }
+            else n = readName();
+            return readVar(n);
+        }
+        if (std::isdigit((unsigned char)c)) {
+            long v = std::strtol(s.c_str() + pos, nullptr, 0);
+            // advance past the number (base-aware)
+            size_t j = pos;
+            if (s[j] == '0' && j + 1 < s.size() && (s[j+1]=='x'||s[j+1]=='X')) { j += 2; while (j<s.size() && std::isxdigit((unsigned char)s[j])) j++; }
+            else while (j < s.size() && std::isdigit((unsigned char)s[j])) j++;
+            pos = j;
+            return v;
+        }
+        if (std::isalpha((unsigned char)c) || c == '_') {
+            std::string n = readName();
+            if (pos + 1 < s.size() && s[pos] == '+' && s[pos+1] == '+') { pos += 2; long cur = readVar(n); writeVar(n, cur + 1); return cur; }
+            if (pos + 1 < s.size() && s[pos] == '-' && s[pos+1] == '-') { pos += 2; long cur = readVar(n); writeVar(n, cur - 1); return cur; }
+            return readVar(n);
+        }
+        ok = false;
+        return 0;
+    }
+    long parseUnary() {
+        skipSpace();
+        if (pos + 1 < s.size() && s[pos] == '+' && s[pos+1] == '+') { pos += 2; skipSpace(); std::string n = readName(); long v = readVar(n) + 1; writeVar(n, v); return v; }
+        if (pos + 1 < s.size() && s[pos] == '-' && s[pos+1] == '-') { pos += 2; skipSpace(); std::string n = readName(); long v = readVar(n) - 1; writeVar(n, v); return v; }
+        if (pos < s.size() && s[pos] == '!') { pos++; return !parseUnary(); }
+        if (pos < s.size() && s[pos] == '~') { pos++; return ~parseUnary(); }
+        if (pos < s.size() && s[pos] == '-') { pos++; return -parseUnary(); }
+        if (pos < s.size() && s[pos] == '+') { pos++; return parseUnary(); }
+        return parsePower();
+    }
+    long parsePower() {
+        long b = parsePrimary();
+        skipSpace();
+        if (pos + 1 < s.size() && s[pos] == '*' && s[pos+1] == '*') { pos += 2; long e = parseUnary(); long r = 1; for (long k = 0; k < e; k++) r *= b; return r; }
+        return b;
+    }
+    bool eat(const char* op) { skipSpace(); size_t n = std::strlen(op); if (s.compare(pos, n, op) == 0) { pos += n; return true; } return false; }
+    long parseMul() { long v = parseUnary(); for (;;) { skipSpace();
+        if (pos<s.size() && s[pos]=='*' && !(pos+1<s.size()&&s[pos+1]=='*')) { pos++; v = v * parseUnary(); }
+        else if (pos<s.size() && s[pos]=='/') { pos++; long d = parseUnary(); v = d ? v / d : 0; }
+        else if (pos<s.size() && s[pos]=='%') { pos++; long d = parseUnary(); v = d ? v % d : 0; }
+        else break; } return v; }
+    long parseAdd() { long v = parseMul(); for (;;) { skipSpace();
+        if (pos<s.size() && s[pos]=='+' && !(pos+1<s.size()&&s[pos+1]=='+')) { pos++; v = v + parseMul(); }
+        else if (pos<s.size() && s[pos]=='-' && !(pos+1<s.size()&&s[pos+1]=='-')) { pos++; v = v - parseMul(); }
+        else break; } return v; }
+    long parseShift() { long v = parseAdd(); for (;;) {
+        if (eat("<<")) { long n = parseAdd(); v = (n>=0&&n<64) ? (long)((unsigned long)v << n) : 0; }
+        else if (eat(">>")) { long n = parseAdd(); v = (n>=0&&n<64) ? (v >> n) : 0; }
+        else break; } return v; }
+    long parseRel() { long v = parseShift(); for (;;) {
+        if (eat("<=")) v = (v <= parseShift());
+        else if (eat(">=")) v = (v >= parseShift());
+        else if (eat("<")) v = (v < parseShift());
+        else if (eat(">")) v = (v > parseShift());
+        else break; } return v; }
+    long parseEq() { long v = parseRel(); for (;;) {
+        if (eat("==")) v = (v == parseRel());
+        else if (eat("!=")) v = (v != parseRel());
+        else break; } return v; }
+    long parseBAnd() { long v = parseEq(); while (true) { skipSpace(); if (pos<s.size() && s[pos]=='&' && !(pos+1<s.size()&&s[pos+1]=='&')) { pos++; v = v & parseEq(); } else break; } return v; }
+    long parseBXor() { long v = parseBAnd(); while (true) { skipSpace(); if (pos<s.size() && s[pos]=='^') { pos++; v = v ^ parseBAnd(); } else break; } return v; }
+    long parseBOr()  { long v = parseBXor(); while (true) { skipSpace(); if (pos<s.size() && s[pos]=='|' && !(pos+1<s.size()&&s[pos+1]=='|')) { pos++; v = v | parseBXor(); } else break; } return v; }
+    long parseLAnd() { long v = parseBOr(); while (eat("&&")) { long r = parseBOr(); v = (v && r); } return v; }
+    long parseLOr()  { long v = parseLAnd(); while (eat("||")) { long r = parseLAnd(); v = (v || r); } return v; }
+    long parseTernary() { long c = parseLOr(); skipSpace();
+        if (pos < s.size() && s[pos] == '?') { pos++; long a = parseAssign(); skipSpace(); if (pos<s.size() && s[pos]==':') pos++; else ok=false; long b = parseAssign(); return c ? a : b; }
+        return c; }
+    // Assignment (right-associative, below ternary): NAME op= expr.
+    long parseAssign() {
+        skipSpace();
+        size_t save = pos;
+        if (pos < s.size() && (std::isalpha((unsigned char)s[pos]) || s[pos] == '_')) {
+            std::string n = readName();
+            skipSpace();
+            const char* op = nullptr; int adv = 0;
+            if (pos < s.size() && s[pos] == '=' && !(pos+1<s.size() && s[pos+1]=='=')) { op = "="; adv = 1; }
+            else if (pos+1 < s.size() && s[pos+1] == '=' && std::strchr("+-*/%&|^", s[pos])) { op = nullptr; adv = 2; }
+            else if (pos+2 < s.size() && (s.compare(pos,3,"<<=")==0 || s.compare(pos,3,">>=")==0)) { adv = 3; }
+            char kind = (adv == 1) ? '=' : (adv >= 2 ? s[pos] : 0);
+            if (adv > 0) {
+                pos += adv;
+                long rhs = parseAssign();
+                long cur = readVar(n);
+                long res = rhs;
+                switch (kind) {
+                    case '=': res = rhs; break;
+                    case '+': res = cur + rhs; break;
+                    case '-': res = cur - rhs; break;
+                    case '*': res = cur * rhs; break;
+                    case '/': res = rhs ? cur / rhs : 0; break;
+                    case '%': res = rhs ? cur % rhs : 0; break;
+                    case '&': res = cur & rhs; break;
+                    case '|': res = cur | rhs; break;
+                    case '^': res = cur ^ rhs; break;
+                    case '<': res = (rhs>=0&&rhs<64) ? (long)((unsigned long)cur << rhs) : 0; break; // <<=
+                    case '>': res = (rhs>=0&&rhs<64) ? (cur >> rhs) : 0; break;                       // >>=
+                }
+                writeVar(n, res);
+                return res;
+            }
+            (void)op;
+            pos = save; // not an assignment -- rewind
+        }
+        return parseTernary();
+    }
+    long parseComma() { long v = parseAssign(); while (true) { skipSpace(); if (pos<s.size() && s[pos]==',') { pos++; v = parseAssign(); } else break; } return v; }
+};
+} // namespace
+
+static long arithMutEval(const std::string& expr, ShellState& state, bool* ok) {
+    ArithMut e(expr, state);
+    long v = e.parseComma();
+    if (ok) *ok = e.ok;
+    return v;
+}
+
+int builtinLet(const std::vector<std::string>& argv, ShellState& state) {
+    long last = 0;
+    for (size_t k = 1; k < argv.size(); k++) last = arithMutEval(argv[k], state);
+    return last != 0 ? 0 : 1;
+}
+
+// ── `[[ ... ]]` extended-test evaluator ──────────────────────────────────────
+namespace {
+struct DBTok { std::string raw; bool quoted; enum { WORD, LP, RP, AND, OR, NOT } type; };
+
+// Expand a raw `[[ ]]` operand (which still carries literal quote chars):
+// $-expansion applies outside quotes and inside "double" quotes, but 'single'
+// quotes are literal. Quote characters are removed. No field splitting or
+// pathname globbing (that's the caller's job for the RHS of ==/!=). expandWord
+// only does $-expansion and leaves the \x01/\x02 sentinels in, so we never route
+// quotes through it -- we strip them here and expand each unquoted/dq segment.
+std::string dbExpand(const std::string& raw, const ShellState& state) {
+    std::string result;
+    size_t i = 0, n = raw.size();
+    while (i < n) {
+        char c = raw[i];
+        if (c == '\'') { i++; while (i < n && raw[i] != '\'') result += raw[i++]; if (i < n) i++; }
+        else if (c == '"') { i++; std::string seg; while (i < n && raw[i] != '"') seg += raw[i++]; if (i < n) i++; result += expandWord(seg, state); }
+        else { std::string seg; while (i < n && raw[i] != '\'' && raw[i] != '"') seg += raw[i++]; result += expandWord(seg, state); }
+    }
+    return result;
+}
+
+std::vector<DBTok> dbTokenize(const std::string& in) {
+    std::vector<DBTok> toks;
+    size_t i = 0, n = in.size();
+    auto isSep = [](char c) { return c == ' ' || c == '\t'; };
+    while (i < n) {
+        while (i < n && isSep(in[i])) i++;
+        if (i >= n) break;
+        if (in[i] == '(' ) { toks.push_back({"(", false, DBTok::LP}); i++; continue; }
+        if (in[i] == ')' ) { toks.push_back({")", false, DBTok::RP}); i++; continue; }
+        if (in[i] == '&' && i+1 < n && in[i+1] == '&') { toks.push_back({"&&", false, DBTok::AND}); i += 2; continue; }
+        if (in[i] == '|' && i+1 < n && in[i+1] == '|') { toks.push_back({"||", false, DBTok::OR}); i += 2; continue; }
+        if (in[i] == '!' && (i+1 >= n || isSep(in[i+1]))) { toks.push_back({"!", false, DBTok::NOT}); i++; continue; }
+        // a word: read until whitespace or a structural boundary, keeping quotes
+        std::string w; bool quoted = false;
+        while (i < n && !isSep(in[i])) {
+            char c = in[i];
+            if (c == '\'' ) { quoted = true; w += c; i++; while (i < n && in[i] != '\'') w += in[i++]; if (i<n) { w += in[i++]; } continue; }
+            if (c == '"' )  { quoted = true; w += c; i++; while (i < n && in[i] != '"')  w += in[i++]; if (i<n) { w += in[i++]; } continue; }
+            if (c == '(' || c == ')') break;
+            if ((c == '&' && i+1<n && in[i+1]=='&') || (c == '|' && i+1<n && in[i+1]=='|')) break;
+            w += c; i++;
+        }
+        toks.push_back({w, quoted, DBTok::WORD});
+    }
+    return toks;
+}
+
+struct DBParser {
+    const std::vector<DBTok>& t;
+    size_t i = 0;
+    ShellState& st;
+    DBParser(const std::vector<DBTok>& toks, ShellState& state) : t(toks), st(state) {}
+
+    bool isBinOp(const std::string& s) {
+        static const std::set<std::string> ops = {
+            "==","=","!=","=~","<",">","-eq","-ne","-lt","-le","-gt","-ge","-nt","-ot","-ef"};
+        return ops.count(s) > 0;
+    }
+    bool isUnOp(const std::string& s) {
+        static const std::set<std::string> ops = {
+            "-e","-f","-d","-r","-w","-x","-s","-z","-n","-L","-h","-b","-c","-p","-S","-g","-u","-k","-t","-v","-o"};
+        return ops.count(s) > 0;
+    }
+    bool fileTest(const std::string& op, const std::string& path) {
+        struct stat sb;
+        bool ex = (stat(path.c_str(), &sb) == 0);
+        struct stat lsb; bool lex = (lstat(path.c_str(), &lsb) == 0);
+        if (op == "-e") return ex;
+        if (op == "-f") return ex && S_ISREG(sb.st_mode);
+        if (op == "-d") return ex && S_ISDIR(sb.st_mode);
+        if (op == "-b") return ex && S_ISBLK(sb.st_mode);
+        if (op == "-c") return ex && S_ISCHR(sb.st_mode);
+        if (op == "-p") return ex && S_ISFIFO(sb.st_mode);
+        if (op == "-S") return ex && S_ISSOCK(sb.st_mode);
+        if (op == "-L" || op == "-h") return lex && S_ISLNK(lsb.st_mode);
+        if (op == "-s") return ex && sb.st_size > 0;
+        if (op == "-r") return access(path.c_str(), R_OK) == 0;
+        if (op == "-w") return access(path.c_str(), W_OK) == 0;
+        if (op == "-x") return access(path.c_str(), X_OK) == 0;
+        if (op == "-g") return ex && (sb.st_mode & S_ISGID);
+        if (op == "-u") return ex && (sb.st_mode & S_ISUID);
+        if (op == "-k") return ex && (sb.st_mode & S_ISVTX);
+        return false;
+    }
+
+    bool parseOr()  { bool v = parseAnd(); while (i < t.size() && t[i].type == DBTok::OR)  { i++; bool r = parseAnd(); v = v || r; } return v; }
+    bool parseAnd() { bool v = parseNot(); while (i < t.size() && t[i].type == DBTok::AND) { i++; bool r = parseNot(); v = v && r; } return v; }
+    bool parseNot() { if (i < t.size() && t[i].type == DBTok::NOT) { i++; return !parseNot(); } return parsePrimary(); }
+    bool parsePrimary() {
+        if (i >= t.size()) return false;
+        if (t[i].type == DBTok::LP) { i++; bool v = parseOr(); if (i < t.size() && t[i].type == DBTok::RP) i++; return v; }
+        // unary test:  -f FILE  /  -z STR ...
+        if (t[i].type == DBTok::WORD && !t[i].quoted && isUnOp(t[i].raw) &&
+            i + 1 < t.size() && t[i+1].type == DBTok::WORD) {
+            std::string op = t[i].raw;
+            std::string arg = dbExpand(t[i+1].raw, st);
+            i += 2;
+            if (op == "-z") return arg.empty();
+            if (op == "-n") return !arg.empty();
+            if (op == "-v") return st.vars.count(arg) > 0 || getenv(arg.c_str()) != nullptr;
+            if (op == "-o") { const char* v = getenv(("ARK_" + arg).c_str()); return v && std::string(v) == "1"; }
+            return fileTest(op, arg);
+        }
+        // binary test:  L OP R
+        if (t[i].type == DBTok::WORD && i + 2 < t.size() &&
+            t[i+1].type == DBTok::WORD && !t[i+1].quoted && isBinOp(t[i+1].raw)) {
+            std::string lhs = dbExpand(t[i].raw, st);
+            std::string op = t[i+1].raw;
+            bool rQuoted = t[i+2].quoted;
+            std::string rhsRaw = t[i+2].raw;
+            std::string rhs = dbExpand(rhsRaw, st);
+            i += 3;
+            if (op == "==" || op == "=")
+                return rQuoted ? (lhs == rhs) : globMatch(rhs, lhs);
+            if (op == "!=")
+                return rQuoted ? (lhs != rhs) : !globMatch(rhs, lhs);
+            if (op == "=~") { try { std::regex re(rhs, std::regex::extended); return std::regex_search(lhs, re); } catch (...) { return false; } }
+            if (op == "<") return lhs < rhs;
+            if (op == ">") return lhs > rhs;
+            long a = std::strtol(lhs.c_str(), nullptr, 10), b = std::strtol(rhs.c_str(), nullptr, 10);
+            if (op == "-eq") return a == b;
+            if (op == "-ne") return a != b;
+            if (op == "-lt") return a < b;
+            if (op == "-le") return a <= b;
+            if (op == "-gt") return a > b;
+            if (op == "-ge") return a >= b;
+            struct stat sa, sb2; bool ea = stat(lhs.c_str(), &sa) == 0, eb = stat(rhs.c_str(), &sb2) == 0;
+            if (op == "-nt") return ea && (!eb || sa.st_mtime > sb2.st_mtime);
+            if (op == "-ot") return eb && (!ea || sa.st_mtime < sb2.st_mtime);
+            if (op == "-ef") return ea && eb && sa.st_dev == sb2.st_dev && sa.st_ino == sb2.st_ino;
+            return false;
+        }
+        // single word: true iff non-empty after expansion
+        std::string v = dbExpand(t[i].raw, st);
+        i++;
+        return !v.empty();
+    }
+};
+} // namespace
+
+static bool evalDBracket(const std::string& inner, ShellState& state) {
+    auto toks = dbTokenize(inner);
+    if (toks.empty()) return false;
+    DBParser p(toks, state);
+    return p.parseOr();
 }
 
 static int runList(Node* list, ShellState& state) {

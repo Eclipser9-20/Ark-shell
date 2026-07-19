@@ -14,13 +14,19 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <poll.h>
+#include <csignal>
 #include <unordered_set>
 
 // Run a command DIRECTLY (fork + execvp) and capture its stdout; stderr is
 // discarded. No shell is involved -- ark is meant to be the only shell on the
 // system, so it never routes helper commands through /bin/sh (which may be ark
 // itself, or absent). argv[0] is looked up on $PATH. Returns "" on any failure.
-static std::string captureCommand(const std::vector<std::string>& argv) {
+// timeoutMs >= 0 bounds how long we'll wait for OUTPUT between reads: if the
+// child produces nothing for that long it's killed and "" is returned. A hung
+// `brew which-formula` on the command-not-found path used to block the shell
+// forever ("periodically ark hangs on command not found"); now it can't.
+static std::string captureCommand(const std::vector<std::string>& argv, int timeoutMs = -1) {
     if (argv.empty()) return "";
     int pipefd[2];
     if (pipe(pipefd) != 0) return "";
@@ -41,8 +47,15 @@ static std::string captureCommand(const std::vector<std::string>& argv) {
     close(pipefd[1]);
     std::string out;
     char buf[4096];
+    bool killed = false;
     for (;;) {
-        ssize_t n = read(pipefd[0], buf, sizeof(buf));
+        if (timeoutMs >= 0) {
+            struct pollfd pfd { pipefd[0], POLLIN, 0 };
+            int pr = poll(&pfd, 1, timeoutMs);
+            if (pr == 0) { kill(pid, SIGKILL); killed = true; break; } // stalled -> never hang
+            if (pr < 0) { if (errno == EINTR) continue; break; }       // (the timeout resets on
+        }                                                              //  each read, so a slow-but-
+        ssize_t n = read(pipefd[0], buf, sizeof(buf));                 //  progressing child is fine)
         if (n > 0) { out.append(buf, (size_t)n); continue; }
         if (n < 0 && errno == EINTR) continue; // ark's 1Hz SIGALRM idle ticker (no
                                                 // SA_RESTART) or SIGCHLD interrupts the
@@ -54,7 +67,7 @@ static std::string captureCommand(const std::vector<std::string>& argv) {
     close(pipefd[0]);
     int status = 0;
     while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {} // don't leak a zombie
-    return out;
+    return killed ? std::string() : out;
 }
 
 // Strip terminal backspace-overstrike (what `col -b` does): a byte followed by
@@ -219,7 +232,34 @@ bool commandExists(const std::string& name) {
     std::call_once(once, [] {
         for (const auto& n : allCommandNames()) set.insert(n);
     });
-    return set.count(name) > 0;
+    if (set.count(name) > 0) return true;
+
+    // A MISS IS NOT PROOF OF ABSENCE. `set` is a snapshot of $PATH taken once,
+    // at the first keystroke of the session -- so anything installed after ark
+    // started (`brew install foo`) stayed "nonexistent" for the rest of that
+    // session: the highlighter painted it red forever, and autocorrect /
+    // auto-path ignored it. `ark-reindex` never helped because it rebuilds the
+    // file index and the completion cache -- different caches from this one.
+    // So verify against the real filesystem before saying no, and memoize the
+    // hit: the snapshot self-heals, and the walk costs a handful of access()
+    // calls only on the miss path.
+    if (name.find('/') != std::string::npos)  // explicit path: just ask the fs
+        return access(name.c_str(), X_OK) == 0;
+    const char* pathEnv = getenv("PATH");
+    if (!pathEnv) return false;
+    std::string p = pathEnv;
+    size_t pos = 0;
+    while (pos <= p.size()) {
+        size_t colon = p.find(':', pos);
+        std::string dir = colon == std::string::npos ? p.substr(pos) : p.substr(pos, colon - pos);
+        if (!dir.empty() && access((dir + "/" + name).c_str(), X_OK) == 0) {
+            set.insert(name);
+            return true;
+        }
+        if (colon == std::string::npos) break;
+        pos = colon + 1;
+    }
+    return false;
 }
 
 std::string suggestCommand(const std::string& typo) {
@@ -258,7 +298,7 @@ std::vector<std::string> parseManFlags(const std::string& cmd) {
         if (!(std::isalnum((unsigned char)c) || c == '-' || c == '_' || c == '.' || c == '+'))
             return flags;
     // Run `man <cmd>` directly (no shell) and strip overstrike in-process.
-    std::string text = stripOverstrike(captureCommand({"man", cmd}));
+    std::string text = stripOverstrike(captureCommand({"man", cmd}, 4000));
     std::unordered_set<std::string> seen;
 
     // Accept a flag only where an option is DEFINED, not merely mentioned. In a
@@ -334,7 +374,7 @@ const std::unordered_set<std::string>& brewFormulaeSet(const std::string& brew) 
         std::ifstream in(cachePath);
         out.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     } else {
-        out = captureCommand({brew, "formulae"});
+        out = captureCommand({brew, "formulae"}, 20000);
         if (!out.empty()) { // atomic write so a concurrent reader never sees a half file
             std::string tmp = cachePath + ".tmp";
             { std::ofstream o(tmp); o << out; }
@@ -376,7 +416,7 @@ std::string brewFormulaFor(const std::string& cmd) {
             // Only on a miss do we pay the slow `brew which-formula` subprocess
             // (handles cmd != formula, e.g. rg -> ripgrep). This is what made a
             // not-found line feel laggy before the next prompt.
-            std::string wf = firstToken(captureCommand({brew, "which-formula", cmd}));
+            std::string wf = firstToken(captureCommand({brew, "which-formula", cmd}, 3000));
             if (!wf.empty()) result = wf;
         }
     }
