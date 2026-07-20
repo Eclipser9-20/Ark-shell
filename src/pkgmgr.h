@@ -50,3 +50,13 @@ std::string installCmdline(const PackageManager& pm, const std::string& pkg);
 //     return false (silent when stderr isn't a TTY, e.g. inside a script).
 // Safe and a no-op (returns false) when disabled or nothing provides `cmd`.
 bool offerInstall(const std::string& cmd, bool allowPrompt);
+
+// Display label for a canonical manager name ("brew" -> "Homebrew").
+std::string packageManagerDisplayName(const std::string& canonical);
+
+// The manager whose install offer was shown for the command just run, as a
+// display name ("Homebrew"), or "" if no offer appeared. Powers the segment in
+// the transient failed-command prompt. Call clearLastOffer() before each
+// command so a previous command's offer can't leak onto a later failure.
+std::string lastOfferDisplayName();
+void clearLastOffer();

@@ -5,10 +5,12 @@
 #include "exec.h"
 #include "expand.h"
 #include "arkfeatures.h"
+#include "highlight.h"
 #include "history.h"
 #include "jobs.h"
 #include "lexer.h"
 #include "parser.h"
+#include "pkgmgr.h"
 #include "shell_state.h"
 #include "version.h"
 #include <atomic>
@@ -35,9 +37,63 @@ constexpr const char* R = "\x1b[0m";
 constexpr const char* GREEN = "\x1b[38;2;158;206;106m";
 constexpr const char* RED = "\x1b[38;2;247;118;142m";
 constexpr const char* COMMENT = "\x1b[38;2;86;95;137m";
+constexpr const char* YELLOW = "\x1b[38;2;224;175;104m"; // TokyoNight orange/yellow
 } // namespace tn
 
-static std::string buildPrompt(const ShellState& state, const std::string& home) {
+static std::string currentClock() {
+    time_t now = time(nullptr);
+    struct tm lt;
+    localtime_r(&now, &lt);
+    char c[8];
+    strftime(c, sizeof(c), "%H:%M", &lt);
+    return std::string(c);
+}
+// Chrome-mode prompt. Success is just "HH:MM ❯ ". A failure repaints that line
+// with the status ahead of the arrow, plus -- when ark offered to install the
+// missing command -- the offering package manager:
+//   16:02 Homebrew x127 ❯ vcpkg     (offer fired)
+//   16:02 x1 ❯ false                (no offer)
+// `code` < 0 means success: no status, no segment.
+static std::string chromePrompt(const std::string& clock, const char* arrowColor, int code,
+                                const std::string& offerName = "") {
+    std::string s = std::string(tn::COMMENT) + clock + " ";
+    if (code >= 0) {
+        if (!offerName.empty()) { s += tn::YELLOW; s += offerName; s += " "; }
+        s += tn::RED;
+        s += "x";
+        s += std::to_string(code);
+        s += " ";
+    }
+    s += arrowColor;
+    s += "\xe2\x9d\xaf";
+    s += tn::R;
+    s += " ";
+    return s;
+}
+// Visible width of the above (escapes occupy no columns): clock + space
+// [+ offer + space] + "x" + digits + space + arrow + space.
+static int chromePromptWidth(const std::string& clock, int code, const std::string& offerName) {
+    int w = (int)clock.size() + 1 + 2; // clock, space, arrow + trailing space
+    if (code >= 0) {
+        w += 1 + (int)std::to_string(code).size() + 1; // "x" + digits + space
+        if (!offerName.empty()) w += (int)offerName.size() + 1;
+    }
+    return w;
+}
+// True when the interactive prompt is the chrome ❯ prompt (not the plain
+// user@host:cwd$ or bare $/# prompts) -- the only mode the transient recolor
+// applies to.
+static bool arrowPromptMode() {
+    if (const char* v = getenv("ARK_DEFAULT_TERMINAL"); v && std::string(v) == "1") return false;
+    if (const char* p = getenv("ARK_PLAIN_CHROME"); p && std::string(p) == "1") return false;
+    return true;
+}
+
+// `clock` lets the caller pin the HH:MM shown, so the transient failed-command
+// reprint reproduces the ORIGINAL prompt byte-for-byte even if the minute rolled
+// over while the command was running. Empty = use the current time.
+static std::string buildPrompt(const ShellState& state, const std::string& home,
+                               const std::string& clock = "") {
     // Default-terminal mode (ARK_DEFAULT_TERMINAL=1): a plain, classic bash-style
     // prompt -- user@host:cwd$ -- with $HOME shown as ~ and no color. Paired with
     // the chrome/banner/visual toggles forced off in main(), ark looks like a
@@ -57,18 +113,29 @@ static std::string buildPrompt(const ShellState& state, const std::string& home)
     if (const char* p = getenv("ARK_PLAIN_CHROME"); p && std::string(p) == "1")
         return geteuid() == 0 ? "# " : "$ ";
     // cwd now lives in the pinned top bar (chrome.h's paintChrome), so the
-    // per-command prompt simplifies to just the time and the status arrow.
-    time_t now = time(nullptr);
-    struct tm local;
-    localtime_r(&now, &local);
-    char clock[8];
-    strftime(clock, sizeof(clock), "%H:%M", &local);
-    std::string arrowColor = state.lastStatus == 0 ? tn::GREEN : tn::RED;
-    return std::string(tn::COMMENT) + clock + " " + arrowColor + "\xe2\x9d\xaf" + tn::R + " ";
+    // per-command prompt simplifies to just the time and the ❯ arrow. The arrow
+    // is drawn NEUTRAL (green) here regardless of the last status -- a failure is
+    // shown by recoloring THIS command's own arrow red (with the exit code behind
+    // it) once it finishes, not by reddening the NEXT prompt (see the transient
+    // reprint in the REPL loop).
+    return chromePrompt(clock.empty() ? currentClock() : clock, tn::GREEN, -1);
 }
 
 static std::string continuationPrompt() {
     return std::string(tn::COMMENT) + "\xe2\x80\xba" + tn::R + " "; // "\xe2\x80\xba" = UTF-8 for ›
+}
+
+// Set the terminal window/tab title via OSC 2. Without this, Ghostty (and other
+// terminals) fall back to a generic name derived from the process ("ghost"),
+// which is not what ark should be called. Leads with the brand, then the cwd
+// ($HOME shown as ~) so the tab is also useful. Cheap; emitted once per prompt.
+static void emitWindowTitle(const ShellState& state, const std::string& home) {
+    if (!isatty(STDOUT_FILENO)) return;
+    std::string cwd = state.cwd;
+    if (!home.empty() && cwd.compare(0, home.size(), home) == 0)
+        cwd = "~" + cwd.substr(home.size());
+    printf("\x1b]2;Ark  %s\x07", cwd.c_str());
+    fflush(stdout);
 }
 
 // Direct-syscall equivalent of `mkdir -p`: creates each path component that
@@ -492,6 +559,13 @@ int main(int argc, char** argv) {
     // next prompt draw.
     auto doReassertChromeAfterCommand = [&]() {
         RawMode guard;
+        // A child that enabled mouse reporting and then died abnormally (signal,
+        // SIGKILL, its volume yanked) never restored it -- see chrome.h. Clear it
+        // before we take input again, or every mouse move becomes typed garbage.
+        disableMouseReporting();
+        // The command just run may have changed the branch (checkout/cd) -- this is
+        // the ONE place the git-branch cache is refreshed; idle repaints reuse it.
+        invalidateGitBranchCache();
         reassertChrome(state.cwd, findGitBranch(state.cwd), sessionSeconds(), getHwStats(),
                         CursorPolicy::VerifyAndCorrect);
     };
@@ -615,7 +689,24 @@ int main(int argc, char** argv) {
                 }
             }
         }
-        std::string prompt = continuing ? continuationPrompt() : buildPrompt(state, home);
+        emitWindowTitle(state, home);
+        // Transient failed-command prompt: remember WHERE this prompt was drawn
+        // and the clock it showed, so that if the command fails we can go back
+        // and repaint that exact line with a red arrow + its exit code. Only
+        // meaningful for the arrow prompt on a real, non-continuation line.
+        int promptRow = 0, promptCol = 0;
+        std::string promptClock;
+        if (!continuing && arrowPromptMode() && isatty(STDOUT_FILENO)) {
+            promptClock = currentClock();
+            // RawMode is REQUIRED around queryCursorPos: it reads the terminal's
+            // reply byte-by-byte, but in cooked mode the line discipline holds
+            // those bytes until a newline, so the query always times out and
+            // reports failure. Every other call site wraps it for this reason.
+            RawMode guard;
+            if (!queryCursorPos(promptRow, promptCol)) promptRow = 0;
+        }
+        std::string prompt = continuing ? continuationPrompt()
+                                        : buildPrompt(state, home, promptClock);
         auto got = readLine(prompt, history, doReassertChrome, cmdValidator);
         if (!got) break; // Ctrl-D / EOF
         if (!continuing) {
@@ -633,25 +724,86 @@ int main(int argc, char** argv) {
                                 // command runs -- readLine() already left
                                 // the cursor at a fresh, valid line after
                                 // Enter, so plain preserve is correct here
+            clearLastOffer(); // so a PREVIOUS command's install offer can't leak
+                              // into this command's failed-prompt segment
             execNode(ast.get(), state);
             doReassertChromeAfterCommand(); // precmd-equivalent: reassert
                                 // after, verifying+correcting the cursor in
                                 // case THIS command (clear/vim/etc) left it
                                 // somewhere invalid -- e.g. `clear`'s own
                                 // \x1b[H parks it at row 1, on the pinned bar
-            // Exit code belongs to the command you JUST RAN, not the next prompt:
-            // a red ✘<code> right-aligned on the (fresh) line under its output.
-            // ARK_EXIT_CODE=0 disables. The reassert above already left the cursor
-            // on a clean line (freshline), so \r + column-move lands it cleanly.
-            if (state.lastStatus != 0 &&
+            // TRANSIENT FAILED-COMMAND PROMPT. The exit code belongs to the command
+            // you JUST RAN, not to the next prompt -- so on failure we go back and
+            // repaint THAT command's own prompt line with a red ❯ and the code
+            // tucked in behind it ("12:11 ❯127 cowsay"). The next prompt stays
+            // green. ARK_EXIT_CODE=0 disables.
+            //
+            // The whole line is reprinted rather than just the arrow: inserting the
+            // code widens the prompt, so a targeted arrow-only repaint would shove
+            // (or overwrite) the command text beside it.
+            //
+            // SCROLL SAFETY: promptRow is an ABSOLUTE row captured before readLine,
+            // so it's only still valid if nothing scrolled since. A terminal scrolls
+            // only when something is written AT the bottom row, so re-querying the
+            // cursor and requiring r1 < rows proves no scroll occurred and the saved
+            // row still points at the prompt. Anything taller than the screen, a
+            // multi-line entry, or a prompt that would no longer fit -> skip the
+            // repaint entirely rather than corrupt the scrollback.
+            if (state.lastStatus != 0 && promptRow > 0 &&
+                pending.find('\n') == std::string::npos &&
                 !(getenv("ARK_EXIT_CODE") && std::string(getenv("ARK_EXIT_CODE")) == "0")) {
                 struct winsize ws;
-                int cols = (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0) ? ws.ws_col : 80;
-                std::string num = std::to_string(state.lastStatus);
-                int col = cols - (1 + (int)num.size()) + 1; // ✘ is 1 display col + digits
-                if (col < 1) col = 1;
-                std::cout << "\r\x1b[" << col << "G" << tn::RED << "\xe2\x9c\x98" << num
-                          << tn::R << "\r\n" << std::flush;
+                int rows = 24, cols = 80;
+                if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_row > 0 && ws.ws_col > 0) {
+                    rows = ws.ws_row;
+                    cols = ws.ws_col;
+                }
+                // Non-empty only when ark offered to install the missing command,
+                // in which case the manager is named ahead of the status:
+                // "16:02 Homebrew x127 ❯ vcpkg".
+                std::string offerName = lastOfferDisplayName();
+                std::string line = chromePrompt(promptClock, tn::RED, state.lastStatus, offerName);
+                int width = chromePromptWidth(promptClock, state.lastStatus, offerName) +
+                            (int)pending.size();
+                // Repaint the command text SYNTAX-HIGHLIGHTED, exactly as
+                // readLine drew it. Writing raw `pending` here stripped the
+                // colour off every failed command's line -- the recolor visibly
+                // ate the highlighting it was supposed to leave alone.
+                const char* hlOff = getenv("ARK_SYNTAX_HIGHLIGHT");
+                std::string shown = (hlOff && std::string(hlOff) == "0")
+                                        ? pending
+                                        : highlightLine(pending);
+
+                int r1 = 0, c1 = 0;
+                RawMode guard; // required for queryCursorPos -- see the capture above
+                // SCROLL SAFETY. promptRow is an ABSOLUTE row captured before the
+                // command ran, so the repaint is only safe if the screen has not
+                // scrolled since. The previous guard (r1 < rows) was unsound: it
+                // reasoned that a terminal scrolls only when writing at the bottom
+                // row, and concluded that a cursor above the bottom means no
+                // scrolling -- but that only describes where the cursor ENDED, not
+                // what happened DURING the command. A long `brew install` scrolls
+                // many times and can still finish with the cursor mid-screen, so
+                // the stale promptRow got repainted over unrelated output: the old
+                // command appeared to be "pasted back" into the prompt, and typing
+                // afterwards was out of sync with what was on screen.
+                //
+                // Two conditions that TOGETHER prove the row is still good:
+                //   r1 > promptRow    -- the cursor moved strictly DOWN from the
+                //                        prompt, so nothing scrolled it off the top
+                //                        and no `clear` homed the cursor above it.
+                //   r1 < rows - 1     -- output never reached the scroll region's
+                //                        bottom margin, which is the only place a
+                //                        scroll can be triggered.
+                // When either fails we simply skip the recolor. Losing the recolor
+                // on a screen-filling command is a far better outcome than painting
+                // a phantom prompt into the middle of real output.
+                bool rowStillValid = queryCursorPos(r1, c1) && r1 > promptRow && r1 < rows - 1;
+                if (width < cols && rowStillValid) {
+                    std::cout << "\x1b[" << promptRow << ";1H\x1b[K"
+                              << line << shown
+                              << "\x1b[" << r1 << ";" << c1 << "H" << std::flush;
+                }
             }
             // Private Mode: while on, write NOTHING to history/disk. Otherwise
             // record the command tagged with the cwd it ran in (context-aware

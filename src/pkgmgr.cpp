@@ -123,7 +123,12 @@ int readKey() {
     raw.c_cc[VTIME] = 0;
     tcsetattr(STDIN_FILENO, TCSANOW, &raw);
     unsigned char ch = 0;
-    ssize_t n = read(STDIN_FILENO, &ch, 1);
+    // ark arms a 1s SIGALRM idle-ticker in interactive mode; without retrying on
+    // EINTR the very next tick interrupts this read() and returns -1, which the
+    // caller reads as "not y" -- so the [y/N] prompt appeared to instantly answer
+    // "no" and drop back to the shell without waiting for a keypress.
+    ssize_t n;
+    do { n = read(STDIN_FILENO, &ch, 1); } while (n < 0 && errno == EINTR);
     tcsetattr(STDIN_FILENO, TCSANOW, &old);
     return n == 1 ? (int)ch : -1;
 }
@@ -217,6 +222,34 @@ std::string installCmdline(const PackageManager& pm, const std::string& pkg) {
     return s;
 }
 
+// ── Last-offer state, for the transient failed-command prompt ────────────────
+// When ark offers an install for a failed command, that command's own prompt
+// line is repainted with a segment naming the manager:
+//   16:02 Homebrew x127 ❯ vcpkg
+// The repaint happens AFTER the command (and after the offer) has finished, so
+// the offer records itself here and main.cpp reads it back. Cleared before each
+// command so a stale name can't leak onto a later, unrelated failure.
+static std::string g_lastOfferDisplay;
+
+void clearLastOffer() { g_lastOfferDisplay.clear(); }
+std::string lastOfferDisplayName() { return g_lastOfferDisplay; }
+
+// pm.name is the canonical TYPE ("brew"); this is the label users know the tool
+// by. Anything unmapped falls back to the canonical name.
+std::string packageManagerDisplayName(const std::string& canonical) {
+    if (canonical == "brew")   return "Homebrew";
+    if (canonical == "port")   return "MacPorts";
+    if (canonical == "apt" || canonical == "apt-get") return "APT";
+    if (canonical == "dnf")    return "DNF";
+    if (canonical == "yum")    return "YUM";
+    if (canonical == "pacman") return "Pacman";
+    if (canonical == "zypper") return "Zypper";
+    if (canonical == "apk")    return "apk";
+    if (canonical == "winget") return "winget";
+    if (canonical == "scoop")  return "Scoop";
+    return canonical;
+}
+
 bool offerInstall(const std::string& cmd, bool allowPrompt) {
     PackageManager pm = activePackageManager();
     if (!pm.valid()) return false;
@@ -232,6 +265,7 @@ bool offerInstall(const std::string& cmd, bool allowPrompt) {
         return false;
     }
 
+    g_lastOfferDisplay = packageManagerDisplayName(pm.name);
     std::cerr << "ark: '" << cmd << "' not found. install with " << pm.name
               << "?  \x1b[2m" << how << "\x1b[0m  [y/N] " << std::flush;
     int c = readKey();

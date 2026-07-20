@@ -114,6 +114,43 @@ static void test_complete_in_search_dirs() {
     system("rm -rf /tmp/ark_sd_a /tmp/ark_sd_b");
 }
 
+
+static void test_unquote_word() {
+    assert(unquoteWord("plain") == "plain");
+    assert(unquoteWord("'My Docs'") == "My Docs");
+    assert(unquoteWord("\"it's\"") == "it's");
+    assert(unquoteWord("'My Doc") == "My Doc");          // unterminated: normal mid-typing
+    assert(unquoteWord("'My Docs/'Inn") == "My Docs/Inn"); // typed past a closing quote
+}
+
+static void test_quote_completion() {
+    // nothing special -> untouched
+    assert(quoteCompletion("plain.txt") == "plain.txt");
+    // a space -> single quotes
+    assert(quoteCompletion("My Documents") == "'My Documents'");
+    // a literal ' can't live in single quotes -> double, with escapes
+    assert(quoteCompletion("it's weird.txt") == "\"it's weird.txt\"");
+    // a double quote needs no escaping inside SINGLE quotes
+    assert(quoteCompletion("a\"b c") == "'a\"b c'");
+    // both quote styles present -> double quotes, escaping the double
+    assert(quoteCompletion("it's \"x\"") == "\"it's \\\"x\\\"\"");
+    assert(quoteCompletion("cost $5 x") == "'cost $5 x'");
+    // leading ~/ stays OUTSIDE the quotes so tilde expansion still happens
+    assert(quoteCompletion("~/My Docs") == "~/'My Docs'");
+    assert(quoteCompletion("~/plain") == "~/plain");
+}
+
+static void test_word_under_cursor_quoted() {
+    // whitespace inside quotes does NOT start a new word
+    std::string b = "ls 'My Doc";
+    auto [start, w] = wordUnderCursor(b, b.size());
+    assert(start == 3);
+    assert(w == "'My Doc");
+    std::string b2 = "cat \"a b\" c";
+    auto [s2, w2] = wordUnderCursor(b2, b2.size());
+    assert(w2 == "c");
+}
+
 int main() {
     test_word_under_cursor_simple();
     test_word_under_cursor_mid_word();
@@ -128,5 +165,8 @@ int main() {
     test_complete_command_finds_builtins();
     test_is_directory();
     test_complete_in_search_dirs();
+    test_unquote_word();
+    test_quote_completion();
+    test_word_under_cursor_quoted();
     std::cout << "all complete word/position tests passed\n";
 }

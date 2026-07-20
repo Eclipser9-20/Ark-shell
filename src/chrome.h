@@ -29,7 +29,14 @@ HwStats getHwStats();
 // `.git/HEAD` directly rather than shelling out to `git symbolic-ref`, so
 // this has no subprocess cost either. Returns "" if no repo is found, HEAD
 // is unreadable, or the repo is bare.
+// Result is CACHED per-cwd so that idle prompt repaints (~1/sec) do no filesystem
+// I/O at all -- see the cache comment in chrome.cpp for why that matters on
+// removable/network volumes. Call invalidateGitBranchCache() after anything that
+// could have changed the branch (i.e. after each command).
 std::string findGitBranch(const std::string& cwd);
+
+// Drops findGitBranch()'s cached answer, forcing the next call to walk the disk.
+void invalidateGitBranchCache();
 
 // Sets the DECSTBM scroll region to exclude row 1 and the last row (so
 // pinned chrome painted there is never touched by normal scrolling). Skips
@@ -51,6 +58,18 @@ void setScrollRegion();
 // region after the child exits, so this only lends the full screen for the
 // duration of the child.
 void releaseScrollRegionForChild();
+
+// Turns OFF every xterm mouse-reporting mode. ark never enables mouse reporting
+// itself -- this exists purely to clean up after a CHILD that did and then died
+// without restoring it. A program killed by a signal (or by the volume it was
+// running from being unplugged) never runs its own cleanup, so the terminal is
+// left reporting; ark then receives every mouse move as an escape sequence,
+// strips the ESC[ it doesn't recognize, and types the remaining bytes into the
+// line buffer -- which is how runs of "M3M5M7M..." ended up recorded in the
+// history file. Called on the way back from every foreground command, for the
+// same reason reassertChrome() is: a child can trash terminal state, and
+// restoring it is the shell's job.
+void disableMouseReporting();
 
 // The top-bar content (rounded [dir][branch] pills) as a STRING. Printed inline
 // as a header above each prompt (main.cpp) rather than pinned to row 1 -- so it
@@ -102,6 +121,12 @@ enum class CursorPolicy {
 void reassertChrome(const std::string& cwd, const std::string& gitBranch,
                      double sessionSeconds, const HwStats& hw,
                      CursorPolicy policy = CursorPolicy::Preserve);
+
+// Queries the terminal's real cursor position via DSR (\x1b[6n). Returns false
+// if the terminal doesn't answer in time; any stray user input read during the
+// query is handed back to the line editor in order. Used by the transient
+// failed-command prompt to find the row it needs to recolor.
+bool queryCursorPos(int& outRow, int& outCol);
 
 // One-shot neofetch-style startup panel: an ASCII ⚡ bolt (ark's mark) beside
 // system facts gathered purely from sysctl (OS/kernel/host/CPU/mem/uptime) --

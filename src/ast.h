@@ -4,7 +4,11 @@
 #include <utility>
 #include <vector>
 
-enum class NodeKind { Command, Pipeline, If, While, For, Case, FunctionDef, List, Subshell };
+// Group is `{ list; }` -- a brace group. Same grouping/redirect behaviour as
+// Subshell, but it runs in the CURRENT shell (no fork), so `cd`, variable
+// assignments and `return` inside it affect the caller. That difference is the
+// whole reason both kinds exist.
+enum class NodeKind { Command, Pipeline, If, While, For, Case, FunctionDef, List, Subshell, Group };
 enum class JoinOp { None, And, Or, Seq };
 
 struct Redirect {

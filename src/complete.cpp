@@ -12,9 +12,67 @@
 #include <unordered_set>
 
 std::pair<size_t, std::string> wordUnderCursor(const std::string& buf, size_t cursor) {
-    size_t start = cursor;
-    while (start > 0 && buf[start - 1] != ' ' && buf[start - 1] != '\t') start--;
+    // Quote-aware: whitespace INSIDE quotes doesn't start a new word, so
+    // `ls 'My Doc` is one word ("'My Doc") rather than just "Doc". Without this,
+    // completing a path with a space in it worked exactly once -- the next Tab
+    // saw only the fragment after the space and looked up the wrong thing.
+    size_t start = 0;
+    bool inS = false, inD = false;
+    for (size_t i = 0; i < cursor && i < buf.size(); i++) {
+        char c = buf[i];
+        if (c == '\\' && !inS && i + 1 < cursor) { i++; continue; } // escaped char
+        if (c == '\'' && !inD) inS = !inS;
+        else if (c == '"' && !inS) inD = !inD;
+        else if ((c == ' ' || c == '\t') && !inS && !inD) start = i + 1;
+    }
     return {start, buf.substr(start, cursor - start)};
+}
+
+// Strip shell quoting to recover the literal text, so a partially-typed
+// `'My Doc` looks up the real filename "My Doc". Unterminated quotes are
+// normal mid-typing and are handled the same as closed ones.
+std::string unquoteWord(const std::string& w) {
+    std::string out;
+    bool inS = false, inD = false;
+    for (size_t i = 0; i < w.size(); i++) {
+        char c = w[i];
+        if (c == '\'' && !inD) { inS = !inS; continue; }
+        if (c == '"' && !inS) { inD = !inD; continue; }
+        if (c == '\\' && !inS && i + 1 < w.size()) { out += w[++i]; continue; }
+        out += c;
+    }
+    return out;
+}
+
+// Does this text need quoting to survive as a single shell word?
+static bool needsQuoting(const std::string& s) {
+    static const std::string special = " \t\n|&;<>()$`\\\"'*?[]{}#!";
+    for (char c : s)
+        if (special.find(c) != std::string::npos) return true;
+    return false;
+}
+
+std::string quoteCompletion(const std::string& path) {
+    // A leading ~/ must stay OUTSIDE the quotes -- '~/x' is a literal path
+    // starting with a tilde character, not $HOME.
+    std::string prefix, rest = path;
+    if (path.size() >= 2 && path[0] == '~' && path[1] == '/') {
+        prefix = "~/";
+        rest = path.substr(2);
+    }
+    if (!needsQuoting(rest)) return path;
+
+    // Single quotes are the safe default: everything inside is literal. Their
+    // one blind spot is a literal ' (no escape exists inside single quotes), so
+    // fall back to double quotes there and escape what stays special in them.
+    if (rest.find('\'') == std::string::npos) return prefix + "'" + rest + "'";
+    std::string out = prefix + "\"";
+    for (char c : rest) {
+        if (c == '"' || c == '\\' || c == '$' || c == '`') out += '\\';
+        out += c;
+    }
+    out += '"';
+    return out;
 }
 
 static const std::unordered_set<std::string>& completionKeywords() {
@@ -249,6 +307,13 @@ bool isDirectory(const std::string& path) {
 }
 
 std::vector<std::string> completePath(const std::string& partial) {
+    // Bare `~` completes to `~/`. Without this it hits the no-slash branch below,
+    // which scans the CWD for entries literally named "~" and finds nothing, so
+    // Tab appeared dead -- even though `~/Doc` completed fine (that path has a
+    // slash, so it looks up $HOME as the directory). Returning the slashed form
+    // also means the caller's separator step sees a value already ending in '/'
+    // and doesn't tack a space on.
+    if (partial == "~") return {"~/"};
     std::string dir, prefix;
     auto slash = partial.find_last_of('/');
     if (slash == std::string::npos) {

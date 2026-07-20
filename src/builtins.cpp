@@ -136,7 +136,10 @@ const char* arkDefaultConfig() {
 #            private uvar history  ark-settings ark-reload ark-reindex
 #  ark-py  in-shell Python IDE: syntax highlight + Tab autocomplete, ^R run,
 #          ^B build, ^S save.  ark-py -o app.py            edit/save source
-#          ark-py -oc app.pyc   compile to bytecode        ark-py -ocb app  native ($ARK_PY_NATIVE_CC)
+#          ark-py -oc app.pyc   compile to bytecode        ark-py -ocb app  native compile
+#          native compile command: ARK_PY_NATIVE_CMD="cc {src} -o {out} <flags…>"
+#          (placeholders {src}{out}{dir}{stem}); or ARK_PY_NATIVE_CC + ARK_PY_NATIVE_FLAGS
+#          ark-py live: ● errors + status msg, Tab complete, ^K hover, ^] go-to-def
 #  LINE EDITING  Ctrl-A/E  Ctrl-K/U kill  Ctrl-W word  Ctrl-Y yank  Alt-</>  Ctrl-R
 #            Tab complete   ->/Ctrl-F accept suggestion   Up/Down history
 )CFG";

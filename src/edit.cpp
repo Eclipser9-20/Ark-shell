@@ -518,7 +518,11 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
             }
             auto [wordStart, word] = wordUnderCursor(buf, cursor);
             bool cmdPos = isCommandPosition(buf, wordStart);
-            auto candidates = cmdPos ? completeCommand(word) : completePath(word);
+            // Look up the UNQUOTED text: the user may already be inside quotes
+            // from a previous completion (`ls 'My Doc`), and the filesystem
+            // knows the name without them.
+            std::string lookup = unquoteWord(word);
+            auto candidates = cmdPos ? completeCommand(lookup) : completePath(lookup);
             // Also pull from the whole-filesystem index (if built) so Tab
             // finds a file/program anywhere, not just cwd/$PATH. Deduped.
             for (auto& hit : completeFromIndex(word, cmdPos)) candidates.push_back(hit);
@@ -534,14 +538,41 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
             if (candidates.empty()) { continue; }
 
             std::string prefix = longestCommonPrefix(candidates);
-            if (prefix.size() > word.size()) {
-                buf.replace(wordStart, word.size(), prefix);
-                cursor = wordStart + prefix.size();
-                if (candidates.size() == 1) {
-                    char sep = (!cmdPos && isDirectory(prefix)) ? '/' : ' ';
-                    buf.insert(cursor, 1, sep);
+            bool changed = false;
+            // Compare against the UNQUOTED text -- `prefix` is a bare filesystem
+            // name, so measuring it against the still-quoted `word` would think
+            // nothing grew (or grew by the width of the quotes).
+            if (prefix.size() > lookup.size()) {
+                // Re-quote if the completed path needs it (spaces, metacharacters).
+                std::string ins = cmdPos ? prefix : quoteCompletion(prefix);
+                buf.replace(wordStart, word.size(), ins);
+                // For a still-ambiguous prefix, park the cursor INSIDE the closing
+                // quote so continued typing stays within the quoted word.
+                bool quoted = ins.size() >= 2 && (ins.back() == '\'' || ins.back() == '"');
+                cursor = wordStart + ins.size() - ((quoted && candidates.size() > 1) ? 1 : 0);
+                changed = true;
+            }
+            // Append the separator on a UNIQUE match -- '/' for a directory so the
+            // next Tab descends straight into it, ' ' otherwise. This deliberately
+            // runs even when the word did NOT grow (prefix == word): typing a
+            // directory name out in full and pressing Tab used to do nothing at
+            // all, because the whole separator step sat inside the "it grew"
+            // branch. Only for a single candidate -- with several, "src" among
+            // {src, src2} is a real directory but slashing it would lock out src2.
+            if (candidates.size() == 1 && !prefix.empty() && prefix.back() != '/') {
+                char sep = (!cmdPos && isDirectory(prefix)) ? '/' : ' ';
+                size_t at = cursor;
+                // A directory's '/' belongs INSIDE the closing quote --
+                // 'My Docs/' rather than 'My Docs'/ -- so the path stays one
+                // tidy quoted token as you keep descending.
+                if (sep == '/' && at > 0 && (buf[at - 1] == '\'' || buf[at - 1] == '"')) at--;
+                if (at >= buf.size() || buf[at] != sep) {
+                    buf.insert(at, 1, sep);
                     cursor++;
+                    changed = true;
                 }
+            }
+            if (changed) {
                 redraw();
             } else if (candidates.size() > 1) {
                 std::cout << "\n";
@@ -587,12 +618,33 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
             // part of this one. Read until a letter (or ~) terminates it.
             std::string params;
             char final = 0;
+            bool sgrMouse = false;
             for (;;) {
                 char b;
                 if (readByte(b) <= 0) break;
+                // SGR mouse report: ESC [ < btn ; col ; row (M|m). The '<' can only
+                // appear as the FIRST parameter byte, and only for a mouse report.
+                // It has to be recognized here because such a report easily exceeds
+                // the 8-byte sanity guard below ("<35;70;15" is 9) -- which is the
+                // bug that produced garbage input: the guard aborted mid-sequence,
+                // leaving the tail (digits and the terminating 'M') unconsumed, so
+                // it fell through and got typed into the line as literal text. Runs
+                // of "M3M5M7M..." in the history file are exactly that.
+                if (params.empty() && b == '<') { sgrMouse = true; params += b; continue; }
                 if ((b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || b == '~') { final = b; break; }
                 params += b;
-                if (params.size() > 8) break; // sanity guard against a malformed/runaway sequence
+                // Mouse reports are legitimately longer than any key sequence.
+                if (params.size() > (sgrMouse ? 32u : 8u)) break; // guard vs a malformed/runaway sequence
+            }
+
+            // ark never enables mouse reporting, so any report we see is fallout
+            // from a child that turned it on and died without restoring it (see
+            // chrome.h's disableMouseReporting). Discard rather than type it.
+            if (sgrMouse) continue;                    // SGR form, fully consumed above
+            if (final == 'M' && params.empty()) {      // X10 form: 3 raw bytes follow
+                char ignore;
+                for (int i = 0; i < 3; i++) if (readByte(ignore) <= 0) break;
+                continue;
             }
 
             if (final == 'C' && params.empty()) { // Right: forward char, or accept ONE WORD of the suggestion

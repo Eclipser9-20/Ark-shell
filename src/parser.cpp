@@ -80,6 +80,24 @@ std::unique_ptr<Node> Parser::parsePipelineElement() {
         node->kind = NodeKind::Subshell;
         node->children.push_back(parseStatementList({TokKind::RParen}));
         expect(TokKind::RParen, ")");
+    } else if (check(TokKind::Word) && peek().text == "{") {
+        // Brace group `{ list; }`. The text must be EXACTLY "{" -- i.e. the brace
+        // was its own word. That is what separates a group from brace EXPANSION:
+        // `{a,b,c}` lexes as one Word "{a,b,c}" and must keep flowing through to
+        // expansion untouched. Same rule bash uses ('{' is only a reserved word
+        // when it stands alone).
+        //
+        // Before this existed, `{` fell through to parseCommand() and was treated
+        // as a command NAME: inside a function the group silently did nothing,
+        // and at top level autocorrect "fixed" it to '.' and ran that.
+        advance(); // '{'
+        node = std::make_unique<Node>();
+        node->kind = NodeKind::Group;
+        node->children.push_back(parseStatementList({}));  // stops at Word "}"
+        if (check(TokKind::Word) && peek().text == "}") advance();
+        else throw ParseError(peek().line, peek().col,
+                              "syntax error: expected '}' to close brace group",
+                              peek().kind == TokKind::End);
     } else if (check(TokKind::If)) {
         node = parseIf();
     } else if (check(TokKind::While)) {

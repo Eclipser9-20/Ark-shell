@@ -125,7 +125,28 @@ HwStats getHwStats() {
     return hw;
 }
 
+// Cache for findGitBranch(). This walk does a blocking stat() at EVERY level from
+// cwd up to "/", and it runs from the idle ticker -- i.e. roughly once a second,
+// forever, while you just sit at the prompt doing nothing. On a healthy local disk
+// that's free; on a network mount or a removable volume it is a steady stream of
+// filesystem calls at a device that may not be able to answer, and if the volume
+// wedges the stat() blocks in uninterruptible I/O and takes the whole shell down
+// with it (observed: cwd on an external volume that got unplugged).
+//
+// The branch can only change as the result of a COMMAND, so idle repaints have no
+// reason to look at the disk at all. Cache the answer and let exec invalidate it.
+// (A checkout performed in ANOTHER window won't be picked up until the next
+// command here -- an acceptable trade for making the idle path do zero I/O.)
+static std::string gitBranchCache;
+static std::string gitBranchCacheCwd;
+static bool       gitBranchCacheValid = false;
+
+void invalidateGitBranchCache() { gitBranchCacheValid = false; }
+
 std::string findGitBranch(const std::string& cwd) {
+    if (gitBranchCacheValid && gitBranchCacheCwd == cwd) return gitBranchCache;
+
+    std::string result;
     std::string dir = cwd;
     for (;;) {
         std::string gitDir = dir + "/.git";
@@ -133,15 +154,22 @@ std::string findGitBranch(const std::string& cwd) {
         if (stat(gitDir.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
             std::ifstream headFile(gitDir + "/HEAD");
             std::string headLine;
-            if (!headFile.is_open() || !std::getline(headFile, headLine)) return "";
-            const std::string prefix = "ref: refs/heads/";
-            if (headLine.rfind(prefix, 0) == 0) return headLine.substr(prefix.size());
-            return headLine.size() >= 7 ? headLine.substr(0, 7) : headLine; // detached HEAD short SHA
+            if (headFile.is_open() && std::getline(headFile, headLine)) {
+                const std::string prefix = "ref: refs/heads/";
+                if (headLine.rfind(prefix, 0) == 0) result = headLine.substr(prefix.size());
+                else result = headLine.size() >= 7 ? headLine.substr(0, 7) : headLine; // detached HEAD
+            }
+            break;
         }
-        if (dir == "/") return "";
+        if (dir == "/") break;
         auto slash = dir.find_last_of('/');
         dir = (slash == std::string::npos || slash == 0) ? "/" : dir.substr(0, slash);
     }
+
+    gitBranchCache = result;
+    gitBranchCacheCwd = cwd;
+    gitBranchCacheValid = true;
+    return result;
 }
 
 static bool getTerminalSize(int& rows, int& cols) {
@@ -196,6 +224,18 @@ void setScrollRegion() {
     // they scroll off row 1 -- or row 2 when a pinned top bar sits on row 1
     // (ARK_CHROME_TOP=pinned), which trades scrollback for the fixed header.
     printf("\x1b[%d;%dr", chromeHomeRow(), rows - 1);
+    fflush(stdout);
+}
+
+void disableMouseReporting() {
+    // Same isatty() reasoning as releaseScrollRegionForChild(): never write
+    // escape bytes into a pipe (command substitution captures them).
+    if (!isatty(STDOUT_FILENO)) return;
+    // All five tracking modes, oldest to newest -- a child could have enabled
+    // any combination and we don't know which, so clear the lot. Disabling a
+    // mode that was never on is a no-op on every terminal.
+    //   1000 click  1002 drag  1003 any-motion  1006 SGR  1015 urxvt
+    fputs("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l", stdout);
     fflush(stdout);
 }
 
@@ -268,7 +308,7 @@ constexpr const char* BG_DEFAULT = "\x1b[49m";
 // FontAwesome-classic + Powerline codepoints -- the most universally-patched
 // Nerd Font ranges (present even in minimal patched fonts), to minimize the
 // risk of a missing glyph rendering as a tofu box.
-constexpr const char* ICON_FOLDER = "\xef\x81\xbc"; // nf-fa-folder_open (U+F07C)
+constexpr const char* ICON_FOLDER = "\xef\x81\xbb"; // nf-fa-folder, CLOSED (U+F07B)
 constexpr const char* ICON_BRANCH = "\xef\x84\xa6"; // nf-fa-code_fork, git-branch stand-in (U+F126)
 constexpr const char* ICON_CLOCK = "\xef\x80\x97";  // nf-fa-clock_o (U+F017)
 constexpr const char* ICON_USER = "\xef\x80\x87";   // nf-fa-user (U+F007)
@@ -686,7 +726,7 @@ void printStartupBanner() {
 // (terminals answer DSR essentially instantly, far faster than a human can
 // type a next keystroke) -- the same tradeoff tools like fzf/tmux/zsh prompt
 // frameworks already make when they query cursor position this way.
-static bool queryCursorPos(int& outRow, int& outCol) {
+bool queryCursorPos(int& outRow, int& outCol) {
     printf("\x1b[6n");
     fflush(stdout);
 
@@ -869,7 +909,22 @@ void reassertChrome(const std::string& cwd, const std::string& gitBranch,
         int rows, cols, row = -1, col = -1;
         bool got = getTerminalSize(rows, cols) && queryCursorPos(row, col);
         if (got && row >= rows) {
-            printf("\x1b[%d;1H", rows - 1); // cursor on the bottom bar -> pull up one row
+            // The child ran with the scroll region RELEASED (see
+            // releaseScrollRegionForChild), so a long help message is free to
+            // scroll all the way into the pinned bottom bar's row. Coming back,
+            // the cursor sits on (or below) that bar.
+            //
+            // Simply pulling the cursor up one row -- what this used to do --
+            // lands it on the LAST LINE OF REAL OUTPUT, which the prompt then
+            // paints over: `yt-dlp --help` ended up rendering as
+            // "15:48 ❯  documentation at https://..." with that final line
+            // destroyed rather than merely crowded.
+            //
+            // Instead, scroll the region up by one so the output survives (it
+            // moves up a line) and the prompt gets a genuinely blank line to
+            // land on. Position at the region's bottom row first, because LF
+            // only scrolls when the cursor is AT the bottom margin.
+            printf("\x1b[%d;1H\n", rows - 1);
             fflush(stdout);
         } else if (got && row < chromeHomeRow()) {
             // `clear` homed the cursor to (1,1), which is ON the pinned top bar

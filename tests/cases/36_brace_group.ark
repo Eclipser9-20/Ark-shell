@@ -1,0 +1,20 @@
+{ echo inner; }
+false || { echo fallback; }
+f() { false || { echo fb; return 2; }; echo unreachable; }
+f
+echo "rc=$?"
+cd /tmp
+{ cd /usr; }
+pwd
+x=1
+{ x=2; }
+echo "x=$x"
+{ echo a; echo b; } > /tmp/ark_bg_test.txt
+tr '\n' ',' < /tmp/ark_bg_test.txt
+echo
+{ echo one; echo two; } | wc -l | tr -d ' '
+echo {a,b,c}
+{ { echo deep; }; }
+{ false; }
+echo "status=$?"
+{ true; } && echo chained

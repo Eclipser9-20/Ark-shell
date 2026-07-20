@@ -29,6 +29,17 @@ std::string longestCommonPrefix(const std::vector<std::string>& items);
 // directory portion `partial` itself had), not just suffixes.
 std::vector<std::string> completePath(const std::string& partial);
 
+// Removes shell quoting/escapes from a (possibly half-typed, possibly
+// unterminated) word, recovering the literal text to look up.
+std::string unquoteWord(const std::string& w);
+
+// Quotes a completed path so it survives as ONE shell word. Single quotes are
+// used by default (fully literal); double quotes only when the text contains a
+// literal ' -- which single quotes cannot express -- with $ ` \ " escaped
+// inside. A leading `~/` is deliberately left unquoted so tilde expansion still
+// happens. Text that needs no quoting is returned unchanged.
+std::string quoteCompletion(const std::string& path);
+
 // Command-name completion: builtin names (from builtinRegistry()) plus $PATH
 // executables. Backed by a cache built once and filtered by prefix, so it's
 // cheap enough to call per-keystroke (ghost text does). No subprocess.

@@ -282,7 +282,7 @@ static int runPipelineStage(Node* cmd, ShellState& state, int inFd, int outFd, i
     // child. This is what makes `for ..; done | wc` and `cmd | while read` work.
     if (cmd->kind == NodeKind::Subshell || cmd->kind == NodeKind::If ||
         cmd->kind == NodeKind::While || cmd->kind == NodeKind::For ||
-        cmd->kind == NodeKind::Case) {
+        cmd->kind == NodeKind::Case || cmd->kind == NodeKind::Group) {
         std::cout.flush();
         fflush(stdout);
         pid_t pid = fork();
@@ -695,8 +695,34 @@ static int runCommand(Node* cmd, ShellState& state) {
         return rc;
     }
 
+    const std::string beforeFixups = argv[0];
     maybeAutocorrect(argv); // ARK_AUTOCORRECT=1: fix a typo'd command before spawning
     maybeAutoPath(argv);    // ARK_AUTO_PATH=1: resolve a non-$PATH program via the file index
+
+    // A correction can land on a BUILTIN or a FUNCTION -- `exi` -> `exit`. The
+    // registry/function lookups above ran against the PRE-correction word, so
+    // without re-checking here the corrected name goes straight to the external
+    // spawn path and dies as "exit: command not found" -- then, adding insult,
+    // the command-not-found hook offered to `brew install execline` to provide
+    // it. Re-resolve whenever a fixup actually rewrote argv[0].
+    if (argv[0] != beforeFixups) {
+        auto fnIt2 = state.functions.find(argv[0]);
+        if (fnIt2 != state.functions.end()) return callFunction(fnIt2->second, argv, state);
+        auto it2 = reg.find(argv[0]);
+        if (it2 != reg.end()) {
+            if (cmd->redirects.empty()) return it2->second(argv, state);
+            // Same in-process save/restore path as the builtin-with-redirects
+            // case above: forking would discard cd/read/export state changes.
+            std::cout.flush();
+            fflush(stdout);
+            auto saved = applyRedirectsSaving(cmd->redirects, state);
+            int rc = it2->second(argv, state);
+            std::cout.flush();
+            fflush(stdout);
+            restoreRedirects(saved);
+            return rc;
+        }
+    }
 
     // Overlay compositor (ARK_OVERLAY=1, experimental): run the command through
     // ark's own PTY so its output can be mirrored into the pinned "deadzone" AND
@@ -1305,6 +1331,10 @@ static int execNodeDispatch(Node* node, ShellState& state) {
             return runPipeline(node, state);
         case NodeKind::Subshell:
             return runSubshell(node, state);
+        case NodeKind::Group:
+            // No fork, unlike Subshell: a brace group runs in the CURRENT shell,
+            // so `cd`, assignments and `return` inside it are visible to the caller.
+            return execNode(node->children[0].get(), state);
         case NodeKind::If:
             return runIf(node, state);
         case NodeKind::While:
@@ -1327,7 +1357,7 @@ static int execNodeDispatch(Node* node, ShellState& state) {
 // duplicating background logic in runCommand AND runPipeline separately.
 static int execNodeNoRedir(Node* node, ShellState& state) {
     if (node->background && (node->kind == NodeKind::Command || node->kind == NodeKind::Pipeline ||
-                             node->kind == NodeKind::Subshell)) {
+                             node->kind == NodeKind::Subshell || node->kind == NodeKind::Group)) {
         std::cout.flush(); // flush BEFORE forking -- see captureCommandOutput()
         fflush(stdout);     // for why (stale buffered output would otherwise
                             // get duplicated by the child's own flush)
@@ -1363,8 +1393,17 @@ static int execNodeNoRedir(Node* node, ShellState& state) {
 int execNode(Node* node, ShellState& state) {
     bool wrap = !node->redirects.empty() &&
                 (node->kind == NodeKind::If || node->kind == NodeKind::While ||
-                 node->kind == NodeKind::For || node->kind == NodeKind::Case);
+                 node->kind == NodeKind::For || node->kind == NodeKind::Case ||
+                 node->kind == NodeKind::Group);
     if (!wrap) return execNodeNoRedir(node, state);
+    // Flush BEFORE swapping fd 1, not just after. stdout is fully buffered when
+    // it isn't a tty, so any EARLIER statement's output can still be sitting in
+    // this process's stdio buffer -- redirecting first and flushing later drains
+    // that backlog into the redirect target. `echo BEFORE; if true; then echo
+    // inside; fi > f` put BOTH lines in f (and printed neither) instead of just
+    // "inside". Same hazard captureCommandOutput() documents around fork().
+    std::cout.flush();
+    fflush(stdout);
     auto saved = applyRedirectsSaving(node->redirects, state);
     int rc = execNodeNoRedir(node, state);
     std::cout.flush();
