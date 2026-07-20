@@ -9,3 +9,7 @@ docs/superpowers/
 .config/
 ark-asan
 ark-asan.dSYM/
+
+# Python bytecode from tests/ (embeds absolute build paths)
+__pycache__/
+*.pyc

@@ -522,7 +522,16 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
             // from a previous completion (`ls 'My Doc`), and the filesystem
             // knows the name without them.
             std::string lookup = unquoteWord(word);
-            auto candidates = cmdPos ? completeCommand(lookup) : completePath(lookup);
+            // A command-position word that LOOKS like a path is completed as a
+            // path, not as a command name. `/usr/local/b`, `./build`, `~/bin/x`
+            // are all invocations by path, and searching $PATH/builtins for them
+            // can never match -- so Tab did nothing at all there, while the same
+            // word after `ls ` completed fine. Matches bash, which switches to
+            // filename completion as soon as the word contains a '/'.
+            bool pathLike = lookup.find('/') != std::string::npos ||
+                            (!lookup.empty() && (lookup[0] == '~' || lookup[0] == '.'));
+            bool asPath = !cmdPos || pathLike;
+            auto candidates = asPath ? completePath(lookup) : completeCommand(lookup);
             // Also pull from the whole-filesystem index (if built) so Tab
             // finds a file/program anywhere, not just cwd/$PATH. Deduped.
             for (auto& hit : completeFromIndex(word, cmdPos)) candidates.push_back(hit);
@@ -544,7 +553,7 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
             // nothing grew (or grew by the width of the quotes).
             if (prefix.size() > lookup.size()) {
                 // Re-quote if the completed path needs it (spaces, metacharacters).
-                std::string ins = cmdPos ? prefix : quoteCompletion(prefix);
+                std::string ins = asPath ? quoteCompletion(prefix) : prefix;
                 buf.replace(wordStart, word.size(), ins);
                 // For a still-ambiguous prefix, park the cursor INSIDE the closing
                 // quote so continued typing stays within the quoted word.
@@ -560,7 +569,7 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
             // branch. Only for a single candidate -- with several, "src" among
             // {src, src2} is a real directory but slashing it would lock out src2.
             if (candidates.size() == 1 && !prefix.empty() && prefix.back() != '/') {
-                char sep = (!cmdPos && isDirectory(prefix)) ? '/' : ' ';
+                char sep = (asPath && isDirectory(prefix)) ? '/' : ' ';
                 size_t at = cursor;
                 // A directory's '/' belongs INSIDE the closing quote --
                 // 'My Docs/' rather than 'My Docs'/ -- so the path stays one
