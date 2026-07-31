@@ -42,4 +42,5 @@ void installIdleTicker();
 // $PATH / slash-paths -- readLine treats it as opaque. Empty = no validation.
 std::optional<std::string> readLine(const std::string& prompt, History& history,
                                      const std::function<void()>& onIdleTick = {},
-                                     const std::function<bool(const std::string&)>& isValidCommand = {});
+                                     const std::function<bool(const std::string&)>& isValidCommand = {},
+                                     const std::function<void()>& onJobsPanel = {});

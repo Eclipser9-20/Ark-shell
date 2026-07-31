@@ -11,20 +11,14 @@ CXX := clang++
 # allocated" / "__next_prime overflow" aborts). Learned the hard way, twice.
 CXXFLAGS := -std=c++20 -O2 -Wall -Wextra -Isrc -MMD -MP
 
-# `make` builds ark AND the bundled pistin editor -- ark-settings opens pistin,
-# so shipping them together means a clean install has an editor out of the box.
+# `make` builds ark alone. The editor is no longer a separate binary: arky is
+# built INTO ark (`arky` is a builtin, and an argv[0] symlink runs it directly),
+# so a clean install has an editor out of the box with nothing extra to ship.
 .DEFAULT_GOAL := all
-all: $(BIN) pistin
+all: $(BIN)
 
 $(BIN): $(OBJ)
 	$(CXX) $(CXXFLAGS) -o $@ $^
-
-# Bundled editor: pistin -- a single-translation-unit terminal IDE, vendored
-# from its own repo (refreshed by scripts/arkbrewbuild at release time) into
-# vendor/ (a dir named 'pistin' would collide with this binary target). Built
-# with the same toolchain/standard as ark.
-pistin: vendor/pistin.cpp
-	$(CXX) -std=c++20 -O2 -Wall -Wextra -o $@ vendor/pistin.cpp
 
 build/%.o: src/%.cpp
 	@mkdir -p build
@@ -34,7 +28,7 @@ build/%.o: src/%.cpp
 
 .PHONY: clean test unittest check install
 clean:
-	rm -rf build $(BIN) pistin
+	rm -rf build $(BIN)
 
 # Install to a stable path so it can be a login shell that survives rebuilds.
 # Re-run after `make` to update the installed copy.
@@ -51,15 +45,14 @@ install: all
 	@cp $(BIN) $(PREFIX)/bin/ark
 	@chmod u+rwx,go+rx $(PREFIX)/bin/ark
 	@codesign --force --sign - $(PREFIX)/bin/ark 2>/dev/null || true
-	@# pistin: the bundled editor, same fresh-inode + ad-hoc re-sign dance as ark.
-	@rm -f $(PREFIX)/bin/pistin
-	@cp pistin $(PREFIX)/bin/pistin
-	@chmod u+rwx,go+rx $(PREFIX)/bin/pistin
-	@codesign --force --sign - $(PREFIX)/bin/pistin 2>/dev/null || true
+	@# arky: the editor. Not a second binary -- a symlink to ark, which checks
+	@# argv[0] and goes straight into the IDE. Nothing extra to build or sign.
+	@rm -f $(PREFIX)/bin/arky
+	@ln -s ark $(PREFIX)/bin/arky
 	@# assh: the "ark over SSH" companion (a plain script, no signing needed).
 	@rm -f $(PREFIX)/bin/assh
 	@cp assh $(PREFIX)/bin/assh && chmod u+rwx,go+rx $(PREFIX)/bin/assh
-	@echo "installed ark -> $(PREFIX)/bin/ark (signed)  +  pistin (signed)  +  assh -> $(PREFIX)/bin/assh"
+	@echo "installed ark -> $(PREFIX)/bin/ark (signed)  +  arky (symlink)  +  assh -> $(PREFIX)/bin/assh"
 
 test: $(BIN)
 	bash tests/run_tests.sh

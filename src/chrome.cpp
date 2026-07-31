@@ -314,6 +314,9 @@ constexpr const char* ICON_CLOCK = "\xef\x80\x97";  // nf-fa-clock_o (U+F017)
 constexpr const char* ICON_USER = "\xef\x80\x87";   // nf-fa-user (U+F007)
 constexpr const char* ICON_CPU = "\xef\x83\xa7";    // nf-fa-bolt (U+F0E7)
 constexpr const char* ICON_SSH = "\xef\x88\xb3";    // nf-fa-server (U+F233) -- remote/SSH session
+constexpr const char* FG_PURPLE = "\x1b[38;2;157;107;255m"; // Vape accent #9D6BFF
+constexpr const char* ICON_GEAR = "\xef\x80\x93";   // nf-fa-gear (U+F013) -- running bg job
+constexpr const char* ICON_PAUSE = "\xef\x81\x8c";  // nf-fa-pause (U+F04C) -- stopped job
 // Rounded powerline dividers (as opposed to the hard-triangle E0B0/E0B2 used
 // in the first pass) -- these render as a solid semicircle bump, giving each
 // chip a pill/capsule shape instead of a sharp-cornered block.
@@ -348,6 +351,37 @@ Chip makePill(const char* accentFg, const std::string& text, int visibleWidth) {
 }
 
 } // namespace
+
+// Job-count source, installed by main() so chrome can render the top-right
+// jobs widget without depending on jobs.h. Fills running/stopped by reference.
+static std::function<void(int&, int&)> g_jobCounter;
+void chromeSetJobCounter(std::function<void(int&, int&)> fn) { g_jobCounter = std::move(fn); }
+
+// Right-aligned top-bar jobs widget: "⚙ N  ⏸ M". Always shown (even at zero) so
+// there's a persistent handle -- Ctrl+Shift+J opens the panel from here.
+static Chip jobPill() {
+    if (!g_jobCounter) return {"", 0};
+    int running = 0, stopped = 0;
+    g_jobCounter(running, stopped);
+    // Gear + running count always; pause + stopped count only when nonzero.
+    std::string rn = std::to_string(running);
+    std::string text = std::string(ICON_GEAR) + " " + rn;
+    int vis = 1 + 1 + (int)rn.size();
+    if (stopped > 0) {
+        std::string sn = std::to_string(stopped);
+        text += "  " + std::string(ICON_PAUSE) + " " + sn;
+        vis += 2 + 1 + 1 + (int)sn.size();
+    }
+    return makePill(FG_PURPLE, text, vis);
+}
+
+// Paint the jobs widget flush-right on row 1 (over the empty tail of the top
+// bar, which was just cleared+redrawn by the caller).
+static void paintJobPill(int cols) {
+    Chip jobs = jobPill();
+    if (jobs.width > 0 && jobs.width < cols)
+        printf("\x1b[1;%dH%s", cols - jobs.width + 1, jobs.ansi.c_str());
+}
 
 // True when ark is running inside an SSH session: sshd exports SSH_CONNECTION /
 // SSH_TTY / SSH_CLIENT into the login environment. When ark is the shell you
@@ -422,8 +456,10 @@ void paintChrome(const std::string& cwd, const std::string& gitBranch,
         char hb[80];
         snprintf(hb, sizeof(hb), "cpu %.0f%%  mem %.1f/%.1fG", hw.cpuPercent, hw.memUsedGB, hw.memTotalGB);
         std::string line = std::string(FG_INFO) + " " + userHost + "  " + sessionStr + "  " + hb + RESET;
-        if (chromeTopPinned())
+        if (chromeTopPinned()) {
             printf("\x1b[1;1H\x1b[2K%s", topBar(cwd, gitBranch).c_str());
+            paintJobPill(cols);
+        }
         printf("\x1b[%d;1H\x1b[2K%s", rows, line.c_str());
         fflush(stdout);
         return;
@@ -460,8 +496,10 @@ void paintChrome(const std::string& cwd, const std::string& gitBranch,
     // at row 1, which sits OUTSIDE the 2..N-1 scroll region so output never
     // disturbs it. In the default "inline" mode this is skipped -- the header is
     // printed by main.cpp above each prompt so it scrolls into scrollback.
-    if (chromeTopPinned())
+    if (chromeTopPinned()) {
         printf("\x1b[1;1H\x1b[2K%s", topBar(cwd, gitBranch).c_str());
+        paintJobPill(cols);
+    }
 
     // The pinned BOTTOM bar, absolute-positioned to the last row (outside the
     // scroll region, so ordinary output never disturbs it). Cursor safety around
@@ -727,6 +765,12 @@ void printStartupBanner() {
 // type a next keystroke) -- the same tradeoff tools like fzf/tmux/zsh prompt
 // frameworks already make when they query cursor position this way.
 bool queryCursorPos(int& outRow, int& outCol) {
+    // Some terminals (notably JetBrains' JediTerm, the IDE-embedded one) answer
+    // DSR slowly and unreliably, and can leak the reply back as input -- which is
+    // the on-screen garbage that made ark "feel weird / laggy / like a kid made
+    // it" inside IntelliJ. When compat mode is on we never query; every caller
+    // already has a graceful "couldn't read the cursor" path.
+    if (const char* c = getenv("ARK_NO_DSR"); c && std::string(c) == "1") return false;
     printf("\x1b[6n");
     fflush(stdout);
 

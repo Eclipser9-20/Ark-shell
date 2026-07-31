@@ -40,6 +40,13 @@ std::string unquoteWord(const std::string& w);
 // happens. Text that needs no quoting is returned unchanged.
 std::string quoteCompletion(const std::string& path);
 
+// Same, but keeps the quote style the user already opened with ('\'' or '"'),
+// even when the text wouldn't strictly need quoting -- completing inside `ls 'al`
+// must stay quoted rather than silently dropping the quote the user typed.
+// Falls back to double quotes if single can't express the text (a literal ').
+// style of 0 (or anything else) defers to quoteCompletion().
+std::string quoteCompletionAs(const std::string& path, char style);
+
 // Command-name completion: builtin names (from builtinRegistry()) plus $PATH
 // executables. Backed by a cache built once and filtered by prefix, so it's
 // cheap enough to call per-keystroke (ghost text does). No subprocess.
@@ -52,6 +59,10 @@ void rebuildCommandCache();
 // True if `path` (after expanding a leading '~' via $HOME) is a directory.
 // Used to decide whether a completed path should get a trailing '/' or ' '.
 bool isDirectory(const std::string& path);
+// Expand a leading `~` to $HOME. Exported so callers that need to touch the real
+// filesystem (resolving a completion candidate, for instance) agree with the
+// completion engine on what a tilde path means.
+std::string expandHome(const std::string& path);
 
 // Cross-directory completion: searches each dir in $ARK_SEARCH_DIRS (colon-
 // separated, ~ expanded) for entries starting with `prefix`, returning their

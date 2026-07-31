@@ -5,6 +5,7 @@
 #include "pkgmgr.h"
 #include "complete.h"
 #include "overlay.h"
+#include "scrollback_session.h"
 #include "nucapture.h"
 #include "chrome.h"
 #include "jobs.h"
@@ -63,15 +64,48 @@ static void reportCommandNotFound(const std::string& name, int err, bool allowPr
 // running a different command than typed must be near-certain, so this is a
 // deliberate opt-in beyond the always-on "did you mean?" suggestion. Only the
 // command (argv[0]) is corrected, never arguments; slash-paths are left alone.
-static void maybeAutocorrect(std::vector<std::string>& argv) {
+// When a shell function/alias AND a $PATH binary are both one edit away, the
+// function wins by default: you wrote it, in this shell, on purpose -- it is far
+// more likely to be what you meant than a binary that merely happens to have a
+// similar name. ARK_AUTOCORRECT_PREFER=binary flips it.
+static void maybeAutocorrect(std::vector<std::string>& argv, ShellState& state) {
     const char* on = getenv("ARK_AUTOCORRECT");
     if (!on || std::string(on) != "1" || argv.empty()) return;
     const std::string cmd = argv[0];
     if (cmd.empty() || cmd.find('/') != std::string::npos) return; // explicit path: leave it
     if (commandExists(cmd)) return;                                // already runnable
-    std::string guess = suggestCommand(cmd);
-    if (guess.empty() || levenshtein(cmd, guess) > 1) return;      // not confident enough
-    std::cerr << "ark: correcting '" << cmd << "' → '" << guess << "'\n";
+    if (state.functions.count(cmd) || state.aliases.count(cmd)) return;  // already resolvable
+
+    // Nearest shell-defined name (functions and aliases).
+    std::string localGuess;
+    int localD = 1 << 30;
+    const char* localKind = "function";
+    for (const auto& kv : state.functions) {
+        int d = levenshtein(cmd, kv.first);
+        if (d < localD) { localD = d; localGuess = kv.first; localKind = "function"; }
+    }
+    for (const auto& kv : state.aliases) {
+        int d = levenshtein(cmd, kv.first);
+        if (d < localD) { localD = d; localGuess = kv.first; localKind = "alias"; }
+    }
+    std::string binGuess = suggestCommand(cmd);
+    int binD = binGuess.empty() ? (1 << 30) : levenshtein(cmd, binGuess);
+
+    // Same confidence bar as before for either source: edit distance 1.
+    bool localOk = !localGuess.empty() && localD <= 1;
+    bool binOk   = !binGuess.empty()   && binD   <= 1;
+    if (!localOk && !binOk) return;
+
+    const char* pref = getenv("ARK_AUTOCORRECT_PREFER");
+    bool preferBinary = pref && std::string(pref) == "binary";
+    bool useLocal;
+    if (localOk != binOk) useLocal = localOk;              // only one candidate
+    else if (localD != binD) useLocal = (localD < binD);   // strictly closer wins
+    else useLocal = !preferBinary;                          // tie -> the preference
+
+    std::string guess = useLocal ? localGuess : binGuess;
+    std::cerr << "ark: correcting '" << cmd << "' → '" << guess << "'"
+              << (useLocal ? std::string(" (your ") + localKind + ")" : "") << "\n";
     argv[0] = guess;
 }
 
@@ -156,7 +190,7 @@ static void applyRedirectsFileActions(const std::vector<Redirect>& redirects, po
         // work. addopen copies the path, so a per-iteration temporary is fine.
         std::string t = (r.kind == Redirect::Kind::In || r.kind == Redirect::Kind::Out ||
                          r.kind == Redirect::Kind::Append || r.kind == Redirect::Kind::ErrOut)
-                            ? expandWord(r.target, state) : std::string();
+                            ? expandNoSplit(r.target, state) : std::string();
         switch (r.kind) {
             case Redirect::Kind::In:
                 posix_spawn_file_actions_addopen(&actions, r.fd >= 0 ? r.fd : STDIN_FILENO, t.c_str(), O_RDONLY, 0);
@@ -201,7 +235,7 @@ static void applyRedirectsInChild(const std::vector<Redirect>& redirects, ShellS
             else close(r.fd);
             continue;
         }
-        std::string t = expandWord(r.target, state); // expand $VAR / ~ / $(cmd), no split
+        std::string t = expandNoSplit(r.target, state); // expand $VAR / ~ / $(cmd), no split
         int fd = -1, target = -1;
         switch (r.kind) {
             case Redirect::Kind::In: fd = open(t.c_str(), O_RDONLY); target = r.fd >= 0 ? r.fd : STDIN_FILENO; break;
@@ -696,7 +730,7 @@ static int runCommand(Node* cmd, ShellState& state) {
     }
 
     const std::string beforeFixups = argv[0];
-    maybeAutocorrect(argv); // ARK_AUTOCORRECT=1: fix a typo'd command before spawning
+    maybeAutocorrect(argv, state); // ARK_AUTOCORRECT=1: fix a typo'd command before spawning
     maybeAutoPath(argv);    // ARK_AUTO_PATH=1: resolve a non-$PATH program via the file index
 
     // A correction can land on a BUILTIN or a FUNCTION -- `exi` -> `exit`. The
@@ -722,6 +756,22 @@ static int runCommand(Node* cmd, ShellState& state) {
             restoreRedirects(saved);
             return rc;
         }
+    }
+
+    // Owned scrollback (ARK_SCROLLBACK=1): run a plain foreground external
+    // command on a session-owned PTY so its output is captured into the
+    // persistent scrollback ring (wheel up to scroll back after it finishes).
+    // Skipped for redirects (they need the posix_spawn file-actions path), when
+    // ark doesn't own the tty, for missing commands (so command-not-found
+    // suggestions still fire), and for interactive/TUI programs (real job
+    // control / Ctrl-Z). Falls through to the normal spawn on PTY failure.
+    if (scrollback::enabled() && cmd->redirects.empty()
+        && tcgetpgrp(STDIN_FILENO) == getpgrp()
+        && commandExists(argv[0])
+        && !nucapture::isInteractiveCommand(argv[0])) {
+        std::cout.flush(); fflush(stdout);
+        int st = scrollback::runForeground(argv, *state.jobs);
+        if (st >= 0) return st;
     }
 
     // Overlay compositor (ARK_OVERLAY=1, experimental): run the command through
@@ -787,7 +837,15 @@ static int runCommand(Node* cmd, ShellState& state) {
     // 2..N-1 band and renders correctly. Only when WE currently own the terminal
     // (a `cmd &` background wrapper must not touch the real foreground's screen).
     // reassertChrome() at the next command boundary re-establishes the region.
-    if (tcgetpgrp(STDIN_FILENO) == getpgrp()) releaseScrollRegionForChild();
+    // ...but ONLY when there's actually something to exec. Releasing ERASES the
+    // pinned bottom bar (see releaseScrollRegionForChild) on the assumption a
+    // child is about to take the screen. For a command that doesn't exist, no
+    // child ever runs -- yet the bar was wiped anyway, so a typo made the stats
+    // bar blink out and back, and an install offer sat at its `[y/N]` prompt
+    // with the bar missing for as long as it waited. Checking first costs one
+    // PATH lookup that posix_spawnp would do regardless.
+    if (tcgetpgrp(STDIN_FILENO) == getpgrp() && commandExists(argv[0]))
+        releaseScrollRegionForChild();
 
     // Same SIGCHLD race as above, guarded the same way.
     BlockSigchld guard;
@@ -797,7 +855,13 @@ static int runCommand(Node* cmd, ShellState& state) {
     posix_spawn_file_actions_destroy(&actions);
     for (int fd : heredocFds) close(fd); // parent-side here-doc temp fds
     if (rc != 0) {
-        reportCommandNotFound(argv[0], rc, /*allowPrompt=*/true); // plain foreground command
+        // If the command itself exists, the spawn failed on something else --
+        // almost always a redirect target that couldn't be opened. Don't
+        // misreport that as "command not found".
+        if (!cmd->redirects.empty() && commandExists(argv[0]))
+            std::cerr << "ark: " << argv[0] << ": cannot apply redirect: " << std::strerror(rc) << "\n";
+        else
+            reportCommandNotFound(argv[0], rc, /*allowPrompt=*/true); // plain foreground command
         return 127;
     }
 

@@ -151,6 +151,21 @@ static void test_word_under_cursor_quoted() {
     assert(w2 == "c");
 }
 
+
+static void test_quote_completion_as() {
+    // keeps the style the user opened with, even when not strictly needed
+    assert(quoteCompletionAs("alpha.txt", '\'') == "'alpha.txt'");
+    assert(quoteCompletionAs("alpha.txt", '"')  == "\"alpha.txt\"");
+    // still quotes correctly when the text DOES need it
+    assert(quoteCompletionAs("gamma file.txt", '\'') == "'gamma file.txt'");
+    // single quotes can't hold a literal ' -> falls back to double
+    assert(quoteCompletionAs("it's", '\'') == "\"it's\"");
+    // ~/ stays outside the quotes
+    assert(quoteCompletionAs("~/alpha.txt", '\'') == "~/'alpha.txt'");
+    // unknown style defers to the automatic chooser
+    assert(quoteCompletionAs("alpha.txt", 0) == "alpha.txt");
+}
+
 int main() {
     test_word_under_cursor_simple();
     test_word_under_cursor_mid_word();
@@ -167,6 +182,7 @@ int main() {
     test_complete_in_search_dirs();
     test_unquote_word();
     test_quote_completion();
+    test_quote_completion_as();
     test_word_under_cursor_quoted();
     std::cout << "all complete word/position tests passed\n";
 }

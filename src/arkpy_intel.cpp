@@ -1,4 +1,5 @@
 #include "arkpy_intel.h"
+#include "arkpy_libindex.h"
 
 #include <algorithm>
 #include <cctype>
@@ -114,6 +115,48 @@ int leadingIndent(const std::string& s) {
 }
 
 } // namespace
+
+// Infer a type name from the right-hand side of an assignment. Deliberately
+// syntactic and conservative -- it recognises the shapes that carry a type on
+// their face (a literal, a constructor call) and returns "" for everything else,
+// because a wrong type is worse than none: it would offer the wrong members.
+//   x = pygame.Rect(...)  -> "pygame.Rect"     (dotted constructor)
+//   r = Rect(...)         -> "Rect"            (bare constructor / class)
+//   s = "hi"              -> "str"             (literals map to builtin types)
+static std::string inferType(const std::string& rhsRaw) {
+    std::string r = rhsRaw;
+    size_t a = r.find_first_not_of(" \t");
+    if (a == std::string::npos) return "";
+    r = r.substr(a);
+    if (r.empty()) return "";
+
+    switch (r[0]) {
+        case '"': case '\'': return "str";
+        case '[': return "list";
+        case '{': return "dict";      // (or set; dict is the useful guess)
+        case '(': return "tuple";
+    }
+    if (std::isdigit((unsigned char)r[0])) return r.find('.') != std::string::npos ? "float" : "int";
+    if (r.compare(0, 5, "True") == 0 || r.compare(0, 5, "False") == 0) return "bool";
+    if (r.compare(0, 2, "f\"") == 0 || r.compare(0, 2, "f'") == 0) return "str";
+
+    // A dotted or bare name followed by '(' is a constructor call. Read the
+    // callee up to the paren; a Capitalised final component is treated as a
+    // class (its type is itself), lowercase is a function whose return type we
+    // can't know syntactically -- so we skip it rather than guess wrong.
+    size_t p = 0;
+    while (p < r.size() && (isIdChar(r[p]) || r[p] == '.')) p++;
+    if (p == 0 || p >= r.size() || r[p] != '(') return "";
+    std::string callee = r.substr(0, p);
+    size_t dot = callee.rfind('.');
+    std::string last = (dot == std::string::npos) ? callee : callee.substr(dot + 1);
+    if (last.empty()) return "";
+    // A ctor's result type IS the callee for a class. We can't cheaply tell a
+    // class from a factory function here, so use the Capitalised convention:
+    // right the overwhelming majority of the time in real Python.
+    if (std::isupper((unsigned char)last[0])) return callee;
+    return "";
+}
 
 Analysis analyze(const std::vector<std::string>& lines) {
     Analysis out;
@@ -278,7 +321,23 @@ Analysis analyze(const std::vector<std::string>& lines) {
                 size_t lp = t.find('(', p);
                 if (lp != std::string::npos) {
                     size_t rp = t.find(')', lp);
-                    if (rp != std::string::npos) detail = "def " + name + t.substr(lp, rp - lp + 1);
+                    if (rp != std::string::npos) {
+                        // Prefer the RAW source line for the signature: `t` has
+                        // string literals blanked out for safe scanning, which
+                        // turned `def greet(name, punct='!')` into
+                        // `def greet(name, punct=   )` in hover/completion.
+                        // Only when the whole signature sits on one physical line.
+                        std::string sig = t.substr(lp, rp - lp + 1);
+                        if (lineNo >= 0 && lineNo < (int)lines.size()) {
+                            const std::string& raw = lines[lineNo];
+                            size_t rlp = raw.find('(');
+                            size_t rrp = raw.rfind(')');
+                            if (rlp != std::string::npos && rrp != std::string::npos && rrp > rlp &&
+                                raw.find("def ") != std::string::npos)
+                                sig = raw.substr(rlp, rrp - rlp + 1);
+                        }
+                        detail = "def " + name + sig;
+                    }
                     // parameters as Param symbols
                     if (rp != std::string::npos) {
                         std::string params = t.substr(lp + 1, rp - lp - 1);
@@ -328,10 +387,21 @@ Analysis analyze(const std::vector<std::string>& lines) {
             continue;
         }
         if (w == "from") {
-            // from m import a, b as c
+            // from m import a, b as c   -- and the parenthesized list form,
+            //   from m import (
+            //       a as a,
+            //       b as b,
+            //   )
+            // which the logical-line joiner has already flattened into one
+            // string. Only the '(' itself was in the way: readName stops on it,
+            // so the whole list read as empty and every name a package
+            // re-exports that way went unindexed. pygame puts `init` in exactly
+            // such a block, which is why `pygame.` never offered `init()`.
             size_t p = t.find(" import", f);
             if (p != std::string::npos) {
                 p += 7;
+                while (p < t.size() && (t[p] == ' ' || t[p] == '\t')) p++;
+                if (p < t.size() && t[p] == '(') p++;
                 while (p < t.size()) {
                     std::string nm = readName(p);
                     if (nm.empty()) break;
@@ -374,10 +444,39 @@ Analysis analyze(const std::vector<std::string>& lines) {
         if (isIdStart(t[f]) && !keywords().count(w)) {
             size_t p = f; std::string name = readName(p);
             while (p < t.size() && (t[p] == ' ' || t[p] == '\t')) p++;
-            // skip a type annotation `: type`
-            if (p < t.size() && t[p] == ':') { size_t eq = t.find('=', p); if (eq != std::string::npos) p = eq; }
+            // A type annotation is itself the best type source: `x: Foo = ...`.
+            std::string annot;
+            if (p < t.size() && t[p] == ':') {
+                size_t ap = p + 1;
+                while (ap < t.size() && (t[ap] == ' ' || t[ap] == '\t')) ap++;
+                size_t as = ap;
+                while (ap < t.size() && (isIdChar(t[ap]) || t[ap] == '.')) ap++;
+                annot = t.substr(as, ap - as);
+                size_t eq = t.find('=', p); if (eq != std::string::npos) p = eq;
+            }
             if (p < t.size() && t[p] == '=' && (p + 1 >= t.size() || t[p + 1] != '=')) {
-                addSym(name, Symbol::Var, lineNo, (int)f, "");
+                // Infer the variable's TYPE from the right-hand side, so a later
+                // `name.` can offer that type's members -- the core of feeling
+                // like a real IDE rather than a word list. The type is stashed in
+                // detail as "type:<T>"; hover strips it back off.
+                //
+                // Use the RAW line, not the structural text: analyze() blanks
+                // string bodies for structure detection, which would erase a
+                // string literal's quotes and make `s = 'hi'` infer nothing.
+                std::string rhs;
+                if (ll.line >= 0 && ll.line < (int)lines.size()) {
+                    const std::string& rawL = lines[ll.line];
+                    size_t eqr = rawL.find('=', f);
+                    while (eqr != std::string::npos &&
+                           ((eqr + 1 < rawL.size() && rawL[eqr + 1] == '=') ||
+                            (eqr > 0 && (rawL[eqr-1]=='!'||rawL[eqr-1]=='<'||rawL[eqr-1]=='>'))))
+                        eqr = rawL.find('=', eqr + 2);
+                    if (eqr != std::string::npos) rhs = rawL.substr(eqr + 1);
+                } else {
+                    rhs = t.substr(p + 1);
+                }
+                std::string ty = annot.empty() ? inferType(rhs) : annot;
+                addSym(name, Symbol::Var, lineNo, (int)f, ty.empty() ? "" : ("type:" + ty));
             }
         }
     }
@@ -409,17 +508,109 @@ std::vector<Completion> complete(const std::vector<std::string>& lines,
         out.push_back(Completion{text, k, detail});
     };
 
+    // `import <name>` / `from <name>` -- complete the MODULE NAME against what's
+    // importable on the search path (stdlib, site-packages, local modules). Must
+    // run BEFORE the member-access branch: `import os.pa` has a '.' before the
+    // partial, which would otherwise be misread as attribute access on `os`.
+    {
+        size_t fs = line.find_first_not_of(" \t");
+        if (fs != std::string::npos) {
+            bool isImport = line.compare(fs, 7, "import ") == 0;
+            bool isFrom   = line.compare(fs, 5, "from ")   == 0;
+            size_t impKw  = isFrom ? line.find(" import", fs) : std::string::npos;
+            // In the module-name zone: anywhere after `import ` on an import line,
+            // or after `from ` but before its ` import` keyword. Past ` import`,
+            // the `from MODULE import <sym>` block below owns completion instead.
+            bool inModuleZone =
+                (isImport && col > (int)(fs + 6)) ||
+                (isFrom   && (impKw == std::string::npos || col <= (int)impKw));
+            if ((isImport || isFrom) && inModuleZone) {
+                // The full dotted token under the cursor -- its parent package
+                // decides which submodules to list; `prefix` (the leaf partial,
+                // stopping at the last '.') is what push() filters and inserts.
+                int ds = s;
+                while (ds > 0 && (isIdChar(line[ds - 1]) || line[ds - 1] == '.')) ds--;
+                std::string dotted = line.substr(ds, col - ds);
+                for (const std::string& name : pylib::moduleNames(dotted)) {
+                    std::string leaf = name.substr(name.rfind('.') + 1);
+                    push(leaf, Symbol::Module, name);   // insert the leaf, show full path
+                }
+                std::sort(out.begin(), out.end(),
+                          [](const Completion& x, const Completion& y){ return x.text < y.text; });
+                return out;
+            }
+        }
+    }
+
     if (member) {
         // resolve the receiver word before the '.'
         int r = s - 1;                 // at the '.'
         int e = r; r--;                // char before '.'
-        while (r >= 0 && isIdChar(line[r])) r--;
-        std::string recv = line.substr(r + 1, e - (r + 1));
+        // Take the whole DOTTED chain, not one identifier: `pygame.key.get_pres`
+        // has receiver `pygame.key`, and stopping at the first '.' read it as
+        // plain `key` -- a name bound nowhere, so a submodule attribute could
+        // never complete. Only the first component has to be a known import.
+        while (r >= 0 && (isIdChar(line[r]) || line[r] == '.')) r--;
+        std::string chain = line.substr(r + 1, e - (r + 1));
         (void)e;
+        // The last component is the simple receiver, still what `self` and the
+        // builtin-type table are keyed by.
+        size_t lastDot = chain.rfind('.');
+        std::string recv = (lastDot == std::string::npos) ? chain : chain.substr(lastDot + 1);
+        std::string head = (lastDot == std::string::npos) ? chain : chain.substr(0, chain.find('.'));
         // Map the receiver to a type: an imported module name, or a builtin type.
         std::string typeKey = recv;
-        for (const auto& sym : a.symbols)
-            if (sym.name == recv && sym.kind == Symbol::Module) { typeKey = sym.detail.substr(sym.detail.find(' ') + 1); break; }
+        std::string modKey;                       // the dotted module path, if any
+        for (const auto& sym : a.symbols) {
+            if (sym.name != head || sym.kind != Symbol::Module) continue;
+            std::string real = sym.detail.substr(sym.detail.find(' ') + 1);
+            modKey = real + chain.substr(head.size());   // `pygame` + `.key`
+            if (lastDot == std::string::npos) typeKey = real;
+            break;
+        }
+
+        // A plain variable with an INFERRED type: resolve its members. This is
+        // the step that turns `r = pygame.Rect(...)` then `r.` into Rect's real
+        // methods instead of nothing. Only for a bare receiver (`r`), not a
+        // dotted chain, which is already a module path handled above.
+        if (modKey.empty() && lastDot == std::string::npos) {
+            std::string inferred;
+            for (const auto& sym : a.symbols) {
+                if (sym.name != recv || sym.kind != Symbol::Var) continue;
+                if (sym.line >= row) continue;            // must be assigned above
+                if (sym.detail.compare(0, 5, "type:") == 0) inferred = sym.detail.substr(5);
+            }
+            if (!inferred.empty()) {
+                // Builtin type? Use the curated table.
+                if (memberDB().count(inferred))
+                    for (const auto& m : memberDB().at(inferred)) push(m, Symbol::Attr, inferred + "." + m);
+                // A class defined in the buffer: its methods and fields.
+                for (const auto& sym : a.symbols) {
+                    if (sym.kind != Symbol::Class || sym.name != inferred) continue;
+                    for (const auto& m : a.symbols)
+                        if (m.line > sym.line && m.line < sym.scopeEnd &&
+                            m.col > sym.col && m.kind != Symbol::Param &&
+                            !m.name.empty() && m.name[0] != '_')
+                            push(m.name, m.kind, m.detail);
+                    break;
+                }
+                // A class from an imported module: `pygame.Rect` -> Rect's methods.
+                size_t d = inferred.rfind('.');
+                if (d != std::string::npos) {
+                    std::string modPart = inferred.substr(0, d);
+                    std::string clsPart = inferred.substr(d + 1);
+                    // Resolve the module head through imports (`pygame` alias etc.).
+                    std::string modHead = modPart.substr(0, modPart.find('.'));
+                    std::string realMod = modPart;
+                    for (const auto& sym : a.symbols)
+                        if (sym.name == modHead && sym.kind == Symbol::Module) {
+                            realMod = sym.detail.substr(sym.detail.find(' ') + 1) + modPart.substr(modHead.size());
+                            break;
+                        }
+                    for (const auto& m : pylib::classMembers(realMod, clsPart)) push(m.text, m.kind, m.detail);
+                }
+            }
+        }
         auto it = memberDB().find(typeKey);
         if (it == memberDB().end() && recv == "self") {
             // members assigned as self.NAME = ... anywhere in the buffer
@@ -435,8 +626,37 @@ std::vector<Completion> complete(const std::vector<std::string>& lines,
         }
         if (it != memberDB().end())
             for (const auto& m : it->second) push(m, Symbol::Attr, typeKey + "." + m);
+        // Beyond the curated table: if the receiver is an imported module, index
+        // the real file on disk and offer what it actually exports. This is what
+        // makes completion work for site-packages and the user's own modules,
+        // which no built-in table could ever cover.
+        if (!modKey.empty()) {
+            const pylib::Module& m = pylib::module(modKey);
+            for (const auto& mem : m.members) push(mem.text, mem.kind, mem.detail);
+        }
         std::sort(out.begin(), out.end(), [](const Completion& x, const Completion& y){ return x.text < y.text; });
         return out;
+    }
+
+    // `from MODULE import <prefix>` -- complete against what MODULE exports
+    // rather than against the buffer, which is never what you want here.
+    {
+        size_t fs = line.find_first_not_of(" \t");
+        if (fs != std::string::npos && line.compare(fs, 5, "from ") == 0) {
+            size_t ms = fs + 5;
+            while (ms < line.size() && (line[ms] == ' ' || line[ms] == '\t')) ms++;
+            size_t me = ms;
+            while (me < line.size() && (isIdChar(line[me]) || line[me] == '.')) me++;
+            std::string mod = line.substr(ms, me - ms);
+            size_t imp = line.find(" import ", me);
+            if (!mod.empty() && imp != std::string::npos && col > (int)(imp + 8)) {
+                const pylib::Module& m = pylib::module(mod);
+                for (const auto& mem : m.members) push(mem.text, mem.kind, mem.detail);
+                std::sort(out.begin(), out.end(),
+                          [](const Completion& x, const Completion& y){ return x.text < y.text; });
+                return out;
+            }
+        }
     }
 
     // plain identifier: buffer symbols, then builtins, then keywords
@@ -446,9 +666,48 @@ std::vector<Completion> complete(const std::vector<std::string>& lines,
         push(kv.first, Symbol::Func, kv.second);
     for (const auto& k : keywords())
         push(k, Symbol::Var, "keyword");
-    std::sort(out.begin(), out.end(), [](const Completion& x, const Completion& y){
-        return x.text < y.text;
-    });
+
+    // Rank, don't alphabetise. What you want floats up: a name defined CLOSE to
+    // the cursor beats one from across the file, a name you've USED already beats
+    // one you haven't, and code beats keywords. This is most of what makes a good
+    // completer feel like it's reading your mind rather than a dictionary.
+    {
+        // How often each name appears in the buffer, and where nearest.
+        std::unordered_map<std::string, int> freq, nearest;
+        for (int r = 0; r < (int)lines.size(); r++) {
+            const std::string& L = lines[r];
+            size_t i = 0;
+            while (i < L.size()) {
+                if (!isIdStart(L[i])) { i++; continue; }
+                size_t st = i;
+                while (i < L.size() && isIdChar(L[i])) i++;
+                std::string w = L.substr(st, i - st);
+                freq[w]++;
+                int dist = std::abs(r - row);
+                auto it = nearest.find(w);
+                if (it == nearest.end() || dist < it->second) nearest[w] = dist;
+            }
+        }
+        auto rank = [&](const Completion& c) {
+            int score = 0;
+            score += freq.count(c.text) ? std::min(freq[c.text], 8) * 4 : 0;   // used a lot
+            auto n = nearest.find(c.text);
+            if (n != nearest.end()) score += std::max(0, 40 - n->second);       // used nearby
+            switch (c.kind) {                                                    // kind bias
+                case Symbol::Var: case Symbol::Param: score += 6; break;
+                case Symbol::Func: case Symbol::Class: score += 4; break;
+                case Symbol::Attr: score += 3; break;
+                default: break;                                                  // keyword: 0
+            }
+            if (c.detail == "keyword") score -= 4;
+            return score;
+        };
+        std::stable_sort(out.begin(), out.end(), [&](const Completion& x, const Completion& y){
+            int sx = rank(x), sy = rank(y);
+            if (sx != sy) return sx > sy;
+            return x.text < y.text;             // ties: alphabetical, so it's stable to read
+        });
+    }
     return out;
 }
 
@@ -467,7 +726,11 @@ std::string hover(const std::vector<std::string>& lines, int row, int col, const
     std::string w = wordAt(lines, row, col);
     if (w.empty()) return "";
     for (const auto& s : a.symbols)
-        if (s.name == w && !s.detail.empty()) return s.detail;
+        if (s.name == w && !s.detail.empty()) {
+            // An inferred-type var stores "type:T"; show it as "w: T".
+            if (s.detail.compare(0, 5, "type:") == 0) return w + ": " + s.detail.substr(5);
+            return s.detail;
+        }
     auto it = builtinDocs().find(w);
     if (it != builtinDocs().end()) return it->second;
     if (keywords().count(w)) return w + " — Python keyword";

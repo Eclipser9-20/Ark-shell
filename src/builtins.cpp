@@ -1,4 +1,5 @@
 #include "builtins.h"
+#include "scrollback_session.h"
 #include "complete.h"
 #include "exec.h"
 #include "arkfeatures.h"
@@ -56,10 +57,14 @@ const char* arkDefaultConfig() {
 # export ARK_FRESHLINE=0           # auto-add a newline when output lacks a final one
 # export ARK_LS_COLOR=0            # colorized `ls` (dirs / symlinks / executables)
 # export ARK_EXIT_CODE=0           # show a failed command's exit code (red X N)
+# export ARK_CLEAR_ON_ENTER=0      # clear the screen when switching INTO ark
+# export ARK_CLEAR_ON_EXIT=0       # clear the screen when switching OUT of ark
 
 # --- FEATURES OFF BY DEFAULT (set to 1 to turn ON) ---------------------------
 # export ARK_NU_MODE=1             # nushell-style: `ls` prints a bordered table
 # export ARK_AUTOCORRECT=1         # auto-fix a typo'd command and run it (gti->git)
+# export ARK_AUTOCORRECT_PREFER=binary  # tie-break autocorrect toward $PATH binaries
+#                                  #   (default: your own functions/aliases win)
 # export ARK_LIVE_AUTOCORRECT=1    # fix a typo AS YOU TYPE (space commits; one Backspace undoes)
 # export ARK_AUTO_PATH=1           # run a program found only in the index, not $PATH
 # export ARK_PRIVATE=1             # start in private mode (nothing saved to history)
@@ -75,6 +80,11 @@ const char* arkDefaultConfig() {
 # export ARK_BANNER_INFO=os,cpu,mem  # ssh,os,kernel,shell,host,cpu,mem,uptime (or 'all')
 # export ARK_BANNER_SUBTITLE="heaven"  # a tagline under the logo
 # export ARK_CTRLC=append          # Ctrl-C shows ^C after the line (default: its own line)
+# export ARK_SCROLLBACK=1          # EXPERIMENTAL owned scrollback (opt-in): wheel up
+#                                  #   to scroll back through output, pinned bars stay
+# export ARK_SCROLLBACK_LINES=10000  # lines the owned scrollback retains
+# export ARK_JOBS_KEY=7            # raw control byte (0-31) that opens the jobs panel,
+#                                  #   for terminals that can't send a distinct Ctrl+Shift+J
 
 # --- COMMAND-NOT-FOUND: OFFER TO INSTALL IT ----------------------------------
 # On an unknown command (not a close typo) ark offers to install it -- press y
@@ -89,6 +99,15 @@ const char* arkDefaultConfig() {
 # (ARK_INDEX) lets Tab find any file/program by name; `ark-reindex` rebuilds it.
 # export ARK_INDEX_ROOTS="$HOME:/opt"                # index roots (default: $HOME)
 # export ARK_SEARCH_DIRS="$HOME/bin:$HOME/scripts"   # extra dirs completed by FULL path
+# export ARK_TAB_LIST_THRESHOLD=15  # >N matches: ask "Tab again to list" before dumping them
+
+# --- ark-py (the in-shell Python IDE) ----------------------------------------
+# export ARK_PY_BIN=python3.14     # interpreter for ^R run and library indexing
+# ark-py can also take inline suggestions from a completion server you run
+# yourself. ark's own analyzer always answers first; the server is only asked
+# when nothing local matches, so the editor never waits on it.
+# export ARK_PY_MODEL=8765         # host:port, or a bare port for 127.0.0.1
+# export ARK_PY_MODEL_TIMEOUT_MS=150   # per-request budget
 
 # --- ADVANCED / PERFORMANCE --------------------------------------------------
 # export ARK_DSR_MS=60             # cursor-position query timeout, ms (lower = snappier)
@@ -497,6 +516,20 @@ static int b_ark_reindex(const std::vector<std::string>&, ShellState&) {
     return 0;
 }
 
+// `arky-settings`: open arky's OWN config in arky. Deliberately not routed
+// through $EDITOR like ark-settings -- the file documents arky, so the sensible
+// place to read and edit it is arky itself, where every setting in it is live.
+static int b_arky_settings(const std::vector<std::string>&, ShellState& state) {
+    const char* home = getenv("HOME");
+    std::string dir = std::string(home ? home : "") + "/.config/ark";
+    std::string cfg = dir + "/arkpy.config";
+    ::mkdir((std::string(home ? home : "") + "/.config").c_str(), 0755);
+    ::mkdir(dir.c_str(), 0755);
+    // arkPyMain writes the fully-commented template itself when the file is
+    // absent, so there is nothing to pre-create here.
+    return arkPyMain({"arky", cfg}, state);
+}
+
 static int b_ark_settings(const std::vector<std::string>&, ShellState&) {
     const char* home = getenv("HOME");
     std::string dir = std::string(home ? home : "") + "/.config/ark";
@@ -806,6 +839,9 @@ static int b_fg(const std::vector<std::string>& argv, ShellState& state) {
     if (!state.jobs || argv.size() < 2) return 1;
     Job* j = state.jobs->find(std::atoi(argv[1].c_str()));
     if (!j) { std::cerr << "fg: no such job\n"; return 1; }
+    // A suspended session-mux job lives on its own PTY -- resume it through the
+    // mux relay, not the real-tty tcsetpgrp path below.
+    if (scrollback::isSuspendedJob(j->id)) return scrollback::resume(*state.jobs, j->id);
     BlockSigchld guard; // same reap-race guard as exec.cpp's foreground waits
     pid_t shellPgid = getpgrp();
     tcsetpgrp(STDIN_FILENO, j->pgid);
@@ -1051,14 +1087,14 @@ const std::unordered_map<std::string, BuiltinFn>& builtinRegistry() {
         {"jobs", b_jobs}, {"fg", b_fg}, {"bg", b_bg},
         {"alias", b_alias}, {"unalias", b_unalias},
         {"pushd", b_pushd}, {"popd", b_popd}, {"dirs", b_dirs},
-        {"ark-settings", b_ark_settings}, {"ark-reindex", b_ark_reindex}, {"ark-reload", b_ark_reload},
+        {"ark-settings", b_ark_settings}, {"arky-settings", b_arky_settings}, {"ark-reindex", b_ark_reindex}, {"ark-reload", b_ark_reload},
         {"source", b_source}, {".", b_source},
         {"return", b_return}, {"local", b_local},
         {"break", b_break}, {"continue", b_continue},
         {"ls", b_ls}, {"test", b_test}, {"[", b_test},
         {"private", b_private}, {"uvar", b_uvar}, {"history", b_history},
         {"from", b_from}, {"to", b_to},
-        {"ark-py", arkPyMain}, {"let", builtinLet},
+        {"ark-py", arkPyMain}, {"arky", arkPyMain}, {"let", builtinLet},
     };
     return reg;
 }

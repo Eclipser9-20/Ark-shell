@@ -84,6 +84,66 @@ Most "modern shells" are a config layer on top of zsh. **ark isn't.** It's a rea
 - **Spelling correction & install hints** — `gti` → "did you mean `git`?"; an unknown-but-real tool offers to install it via your package manager (brew/apt/dnf/pacman…), one keypress.
 - **nushell mode** — `ls` as a bordered, colorized table (`ARK_NU_MODE=1`).
 - **Colorized `ls`**, spelling autocorrect, an embedded startup banner, and a fully-commented config where **every** feature is one uncomment away.
+- **`arky` — an IDE inside the shell.** Tabs, file explorer, mouse, Python + C/C++ (clangd when you have it). See below.
+
+## arky
+
+`arky [file]` is ark's editor as a full IDE: a menu bar, tabs, a file explorer, and the mouse — all in the terminal, all built into the one binary. `arky` is a symlink to `ark`, so it works from any shell, not just from inside ark. `arky-settings` opens its own config.
+
+- **Explorer** — `^E` focuses it: `↑↓` move, `Enter` opens, `←`/`Backspace` go up, letters jump by first character, `[` and `]` resize it, `^E` returns to the editor.
+- **Tabs** — `^T` next, `^Y` previous, `Ctrl+PageUp`/`Ctrl+PageDown` either way. Opening a file from the explorer opens a tab.
+- **Command palette** — `^P`. Everything reachable by key is reachable here by name, so nothing hides behind a chord you have to already know.
+- **Mouse** — click to place the cursor, click a tab to switch, click a file to open, wheel to scroll.
+
+### C and C++
+
+The file extension picks the toolchain. `^R` compiles and runs; `^B` builds — and if the file sits anywhere inside a CMake project, `^B` builds the *project*, not the one file.
+
+If `clangd` is installed, arky speaks LSP to it: real diagnostics from a real compiler front end, and semantic colour that knows your own types from your functions. Without clangd you still get a full C/C++ lexer, so nothing looks broken while it indexes — or if you never install it.
+
+```ini
+cc     = cc          # your compilers; cc/c++ are the defaults
+cxx    = c++
+cflags = -O2 -Wall -Wextra -std=c++20
+cmake  = on          # a buffer inside a CMake project builds the project
+clangd = on          # keep build/compile_commands.json fresh
+
+menu = on            # arky chrome — each of these can be turned off,
+tabs = on            # or turned ON for plain ark-py
+explorer = on
+explorer_width = 24
+mouse = on
+dialog = off         # prompts as a centered box with the page dimmed
+```
+
+## ark-py
+
+`ark-py [file.py]` is the same editor with none of the chrome — just the buffer. It opens a full editor in the terminal — no language server, no Node, no plugins. The Python intelligence is a from-scratch analyzer built into ark.
+
+- **Live diagnostics** — errors appear inline, to the right of the offending line, as you type.
+- **Completion** — scope-aware, with signatures. It indexes what you actually `import`: the stdlib, site-packages, and your own modules sitting next to the file. Nothing is executed, only parsed.
+- **Inline suggestions** — dim ghost text ahead of the cursor. **Tab** takes the whole thing, **shift+Tab** one word, **^N** opens the list instead.
+- **Run and build** — `^R` runs the buffer (`^G` sets `sys.argv`); `^B` compiles, to bytecode or natively via your own toolchain.
+- `^O` open · `^S` save · `^A` select all · `^X`/`^C`/`^V` cut/copy/paste via the system clipboard · `^K` hover · `^]` go to definition · `^Q` quit.
+
+Settings live in `~/.config/ark/arkpy.config`, written fully commented on first run:
+
+```ini
+ghost      = on     # inline suggestions
+min_prefix = 2      # characters before one appears
+args       = --verbose in.txt    # passed to your program as sys.argv[1:]
+python     = python3
+model_port = 1234   # optional completion server, see below
+```
+
+**Optional completion server.** Point `model_port` at anything that speaks one JSON line each way, and ark-py will ask it for a suggestion — but *only* when its own analyzer has nothing, so the editor never waits on it:
+
+```
+->  {"prefix":"pri","path":"x.py","line":3,"col":4,"before":"...","after":"..."}
+<-  {"completion":"nt()"}
+```
+
+A bare line of text works as a reply too, so a useful server can be a dozen lines of Python. Requests run on a worker thread and are matched back to the prefix that asked, so a slow server degrades to *no suggestion* — never a wrong one.
 
 ## ark vs. the field
 
@@ -107,6 +167,8 @@ chsh -s "$(brew --prefix)/bin/ark"
 ## Configuration
 
 On first run ark writes `~/.config/ark/ark.config` — a fully commented catalogue of every setting, ready to uncomment. Edit it with `ark-settings`, reload live with `ark-reload`. Every feature is an `ARK_*` toggle documented there. Want it to look like a stock shell? `export ARK_DEFAULT_TERMINAL=1`.
+
+When a new ark release adds settings, they're **appended** to your existing config — your own aliases and functions are never rewritten, even when a shipped example shares their name. A backup is written first, and deleting a suggestion you don't want makes it stay gone. Anything you actively set that ark no longer understands is reported at startup, with a nearest-match hint if it looks like a typo.
 
 ## Building
 

@@ -52,6 +52,25 @@ static bool needsQuoting(const std::string& s) {
     return false;
 }
 
+std::string quoteCompletionAs(const std::string& path, char style) {
+    if (style != '\'' && style != '"') return quoteCompletion(path);
+    // Keep a leading ~/ outside the quotes, same as quoteCompletion().
+    std::string prefix, rest = path;
+    if (path.size() >= 2 && path[0] == '~' && path[1] == '/') { prefix = "~/"; rest = path.substr(2); }
+
+    // Honour the style the user opened with, UNLESS it can't express the text:
+    // single quotes have no escape for a literal ', so fall back to double.
+    if (style == '\'' && rest.find('\'') != std::string::npos) style = '"';
+    if (style == '\'') return prefix + "'" + rest + "'";
+    std::string out = prefix + "\"";
+    for (char c : rest) {
+        if (c == '"' || c == '\\' || c == '$' || c == '`') out += '\\';
+        out += c;
+    }
+    out += '"';
+    return out;
+}
+
 std::string quoteCompletion(const std::string& path) {
     // A leading ~/ must stay OUTSIDE the quotes -- '~/x' is a literal path
     // starting with a tilde character, not $HOME.
@@ -120,7 +139,7 @@ std::string longestCommonPrefix(const std::vector<std::string>& items) {
     return prefix;
 }
 
-static std::string expandHome(const std::string& path) {
+std::string expandHome(const std::string& path) {
     if (!path.empty() && path[0] == '~') {
         const char* home = getenv("HOME");
         if (home) return std::string(home) + path.substr(1);

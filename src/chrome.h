@@ -1,5 +1,10 @@
 #pragma once
 #include <string>
+#include <functional>
+
+// Install a source for the top-bar jobs widget. `fn` fills (running, stopped)
+// job counts by reference; called on each chrome repaint. Set by main().
+void chromeSetJobCounter(std::function<void(int&, int&)> fn);
 
 struct HwStats {
     double load1 = 0.0;
@@ -12,7 +17,7 @@ struct HwStats {
 // NO subprocess calls. This is called on every command boundary AND roughly
 // once per second while idle at the prompt in interactive mode, so any
 // fork/exec here reintroduces the exact latency regression already found and
-// fixed once this session (a `top -l 1` call added ~0.2s per call). Never
+// fixed once (a `top -l 1` call added ~0.2s per call). Never
 // throws -- a failed syscall just leaves the corresponding field at its
 // zero-initialized default.
 //

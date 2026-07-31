@@ -1,7 +1,11 @@
+#include "arkpy.h"
 #include "builtins.h"
+#include "config_sync.h"
 #include "chrome.h"
 #include "complete.h"
 #include "edit.h"
+#include "jobspanel.h"
+#include "scrollback_session.h"
 #include "exec.h"
 #include "expand.h"
 #include "arkfeatures.h"
@@ -27,10 +31,10 @@
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <thread>
 #include <vector>
 
-// TokyoNight Night palette, matching the zsh/Ghostty/vim theming from
-// earlier this session -- comment-gray for the time/continuation prompt,
+// TokyoNight Night palette -- comment-gray for the time/continuation prompt,
 // green/red arrow tracking the last exit status.
 namespace tn {
 constexpr const char* R = "\x1b[0m";
@@ -135,6 +139,38 @@ static void emitWindowTitle(const ShellState& state, const std::string& home) {
     if (!home.empty() && cwd.compare(0, home.size(), home) == 0)
         cwd = "~" + cwd.substr(home.size());
     printf("\x1b]2;Ark  %s\x07", cwd.c_str());
+    fflush(stdout);
+}
+
+// Report the working directory to the terminal via OSC 7 --
+// ESC ] 7 ; file://<host>/<url-encoded-path> ST. This is the standard, out-of-band
+// way a shell tells its emulator "here is where I am now," and it is exactly what
+// JetBrains' terminal (IntelliJ, PyCharm) reads to keep the IDE in sync with the
+// shell: without it, "open a new tab here", the path breadcrumb, and clicked
+// file-link resolution all fall back to wherever the shell was first launched, no
+// matter how much you `cd`. Emitted once per prompt, right after the window title,
+// so IDEA always knows the current directory. Only reserved URL bytes are escaped;
+// '/' is left intact so the path stays a path.
+static void emitCwdOsc7(const ShellState& state) {
+    if (!isatty(STDOUT_FILENO)) return;
+    char host[256] = {0};
+    gethostname(host, sizeof(host) - 1);
+    std::string out = "\x1b]7;file://";
+    out += host;
+    for (unsigned char c : state.cwd) {
+        bool unreserved = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                          (c >= '0' && c <= '9') ||
+                          c == '/' || c == '-' || c == '_' || c == '.' || c == '~';
+        if (unreserved) out += static_cast<char>(c);
+        else {
+            static const char hex[] = "0123456789ABCDEF";
+            out += '%';
+            out += hex[c >> 4];
+            out += hex[c & 0xF];
+        }
+    }
+    out += "\x1b\\";                 // ST (string terminator)
+    fwrite(out.data(), 1, out.size(), stdout);
     fflush(stdout);
 }
 
@@ -344,7 +380,29 @@ int main(int argc, char** argv) {
     ShellState state;
     JobTable jobTable;
     state.jobs = &jobTable;
+    // Feed the top-bar jobs widget: count running (backgrounded) vs stopped jobs.
+    chromeSetJobCounter([&jobTable](int& running, int& stopped) {
+        running = 0; stopped = 0;
+        for (Job* j : jobTable.all()) {
+            if (j->state == Job::State::Running) running++;
+            else if (j->state == Job::State::Stopped) stopped++;
+        }
+    });
     ensureStandardPath();      // brew / /usr/local/bin tools resolve even under a bare login PATH
+
+    // `arky` is this same binary under a different name (install drops a symlink).
+    // Launched that way it IS the editor -- no shell, no prompt -- so `arky file.c`
+    // from bash/zsh works exactly like any other editor on the system.
+    {
+        const char* base = argv[0] ? strrchr(argv[0], '/') : nullptr;
+        base = base ? base + 1 : (argv[0] ? argv[0] : "");
+        if (std::string(base) == "arky") {
+            importEnvironment(state);
+            std::vector<std::string> a{"arky"};
+            for (int i = 1; i < argc; i++) a.push_back(argv[i]);
+            return arkPyMain(a, state);
+        }
+    }
     // Stop ark's command-not-found brew lookups (brew which-formula / formulae)
     // from kicking off Homebrew's auto-update -- that spawns a git/curl/ruby storm
     // that showed up as "running a ton of stuff" on an unknown command. Only set
@@ -370,6 +428,24 @@ int main(int argc, char** argv) {
     if (!getenv("ARK_DEFAULT_TERMINAL") &&
         (getenv(aiMarker) || getenv("CI") || getenv("ARK_NONINTERACTIVE"))) {
         setenv("ARK_DEFAULT_TERMINAL", "1", 1);
+    }
+
+    // JetBrains' embedded terminal (IntelliJ, PyCharm, ...) is a distinct
+    // emulator, JediTerm, and it sets TERMINAL_EMULATOR=JetBrains-JediTerm. It
+    // does not do DSR cursor queries or DECSTBM scroll regions cleanly, so ark's
+    // pinned-bar chrome flickers and its per-command cursor query leaks bytes
+    // onto the screen -- "laggy, like a kid made it." Detect it and drop into a
+    // clean, robust mode: no pinned bars, no DSR, but keep the things JediTerm
+    // renders perfectly well (syntax highlighting, ghost text, colours). An
+    // explicit choice in the environment or config still wins over this.
+    if (const char* te = getenv("TERMINAL_EMULATOR");
+        te && std::string(te).find("JetBrains") != std::string::npos) {
+        if (!getenv("ARK_NO_DSR"))  setenv("ARK_NO_DSR", "1", 1);   // no cursor queries
+        if (!getenv("ARK_CHROME"))  setenv("ARK_CHROME", "0", 1);   // no pinned bars
+        if (!getenv("ARK_OVERLAY")) setenv("ARK_OVERLAY", "0", 1);  // no alt-screen overlays
+        // Banner stays ON in JediTerm: it's a plain printf of block art + text,
+        // no DSR/scroll-region/alt-screen, so it renders cleanly here. (DSR,
+        // pinned bars and overlays are what actually break in JediTerm.)
     }
 
     // Default-terminal mode: make ark look like a stock bash shell -- strip the
@@ -431,6 +507,12 @@ int main(int argc, char** argv) {
     // accepted and ignored -- ark's config sourcing already covers login setup.
     int ai = 1;
     if (ai < argc && (std::string(argv[ai]) == "-l" || std::string(argv[ai]) == "--login")) ai++;
+    // `-i` / `--interactive`: IntelliJ's terminal launches its shell this way. ark
+    // is interactive whenever stdin is a TTY regardless, so the flag is a no-op --
+    // but it MUST be consumed here, or it falls through to the "script file" branch
+    // below (argv[ai][0] != '-' is false, so actually it lands nowhere and the real
+    // bug was the emulator seeing an unhandled arg). Accept and skip, like -l.
+    if (ai < argc && (std::string(argv[ai]) == "-i" || std::string(argv[ai]) == "--interactive")) ai++;
 
     // `ark --version` / `-v`: print the version and exit.
     if (ai < argc && (std::string(argv[ai]) == "--version" || std::string(argv[ai]) == "-v")) {
@@ -562,7 +644,9 @@ int main(int argc, char** argv) {
         // A child that enabled mouse reporting and then died abnormally (signal,
         // SIGKILL, its volume yanked) never restored it -- see chrome.h. Clear it
         // before we take input again, or every mouse move becomes typed garbage.
-        disableMouseReporting();
+        // ...but when the session mux is on, it OWNS mouse reporting (the wheel
+        // drives scroll-back), so re-assert it instead of clearing it.
+        if (scrollback::enabled()) scrollback::init(); else disableMouseReporting();
         // The command just run may have changed the branch (checkout/cd) -- this is
         // the ONE place the git-branch cache is refreshed; idle repaints reuse it.
         invalidateGitBranchCache();
@@ -586,6 +670,17 @@ int main(int argc, char** argv) {
     // input starves it indefinitely).
     installIdleTicker();
 
+    // Clear the screen when switching OUT of ark (Ctrl-D, `exit`, or return).
+    // Registered only on the interactive path so a `-c`/script run never wipes
+    // its own output. Toggle off with ARK_CLEAR_ON_EXIT=0.
+    atexit([] {
+        if (getenv("ARK_CLEAR_ON_EXIT") && std::string(getenv("ARK_CLEAR_ON_EXIT")) == "0") return;
+        if (isatty(STDOUT_FILENO)) {
+            const char* s = "\x1b[3J\x1b[2J\x1b[H";
+            (void)!write(STDOUT_FILENO, s, std::strlen(s));
+        }
+    });
+
     {
         // One guard around the entire startup sequence -- not just the
         // chrome repaint -- since mkdir/history-load/getHwStats all run
@@ -604,7 +699,13 @@ int main(int argc, char** argv) {
             mkdirRecursive(histDir);
             history.load(histPath);
         }
+        // Clear the screen when switching INTO ark so it opens on a clean
+        // slate (the atexit handler clears again when you switch back out).
+        // \x1b[3J drops scrollback too. Toggle off with ARK_CLEAR_ON_ENTER=0.
+        if (!(getenv("ARK_CLEAR_ON_ENTER") && std::string(getenv("ARK_CLEAR_ON_ENTER")) == "0"))
+            printf("\x1b[3J\x1b[2J\x1b[H");
         doReassertChromeStartup(); // initial paint before the REPL loop starts
+        scrollback::init();               // session scrollback ring (ARK_SCROLLBACK=1)
     }
 
     std::vector<std::unique_ptr<Node>> astRoots; // keeps FunctionDef bodies alive --
@@ -615,6 +716,21 @@ int main(int argc, char** argv) {
     // Source the user config now that state/history/chrome are set up but
     // before the first prompt -- so its aliases/exports/functions are live for
     // the very first command typed.
+    // Bring an older config up to date BEFORE sourcing it: append any settings
+    // this build documents that the file predates, and report any setting the
+    // user actively sets that ark no longer understands. Strictly additive --
+    // aliases and functions the user wrote or edited are never rewritten.
+    {
+        arkcfg::Report cs = arkcfg::syncConfig(histDir + "/ark.config", /*dryRun=*/false);
+        for (const std::string& w : cs.warnings)
+            std::cerr << "ark: " << w << "\n";
+        if (cs.wrote) {
+            std::cerr << "ark: added " << cs.added.size()
+                      << " new setting(s) to ark.config (all off; backup: "
+                      << cs.backupPath << ")\n";
+        }
+    }
+
     sourceConfig(histDir + "/ark.config", state, astRoots);
 
     // Universal variables: load the cross-window/cross-reboot store into the
@@ -639,6 +755,11 @@ int main(int argc, char** argv) {
     // tree on a worker thread so it never blocks the prompt.
     if (!(getenv("ARK_INDEX") && std::string(getenv("ARK_INDEX")) == "0")) startFileIndex();
 
+    // Warm the command-name cache (a full PATH scan with access(X_OK) per file)
+    // on a background thread so the FIRST "command not found -> did you mean?"
+    // doesn't pay that one-time cost synchronously and lag.
+    std::thread([] { (void)suggestCommand("\x01warmup\x01"); }).detach();
+
     std::string pending;
     bool continuing = false;
 
@@ -659,6 +780,22 @@ int main(int argc, char** argv) {
 
     for (;;) {
         jobTable.drainSignalQueue();
+        // A vanished working directory -- an unmounted volume (external drive,
+        // sparsebundle) or a deleted dir -- leaves the shell operating in a path
+        // that no longer exists. Every command that touches "." then fails with a
+        // confusing cascade ("git: Unable to read current working directory",
+        // "ls: .: No such file or directory"). Detect it at each fresh prompt and
+        // self-heal to $HOME with one clear line, instead of stranding the user.
+        if (!continuing && ::access(state.cwd.c_str(), F_OK) != 0) {
+            std::string dest = home.empty() ? "/" : home;
+            if (::chdir(dest.c_str()) == 0) {
+                state.cwd = dest;
+                setenv("PWD", dest.c_str(), 1);
+                std::cout << "\x1b[38;2;224;108;117m⚠ working directory "
+                             "disappeared (volume unmounted?) — moved to "
+                          << dest << "\x1b[0m\r\n" << std::flush;
+            }
+        }
         if (!continuing) {
             // Cross-window live sync at each fresh prompt (cheap: a stat + a
             // tail read only when the files actually changed). Shared Command
@@ -690,6 +827,7 @@ int main(int argc, char** argv) {
             }
         }
         emitWindowTitle(state, home);
+        emitCwdOsc7(state);   // tell IntelliJ/JediTerm where we are, every prompt
         // Transient failed-command prompt: remember WHERE this prompt was drawn
         // and the clock it showed, so that if the command fails we can go back
         // and repaint that exact line with a red arrow + its exit code. Only
@@ -707,8 +845,13 @@ int main(int argc, char** argv) {
         }
         std::string prompt = continuing ? continuationPrompt()
                                         : buildPrompt(state, home, promptClock);
-        auto got = readLine(prompt, history, doReassertChrome, cmdValidator);
+        auto got = readLine(prompt, history, doReassertChrome, cmdValidator,
+                            [&jobTable] { jobspanel::show(jobTable); });
         if (!got) break; // Ctrl-D / EOF
+        // Session mux (ARK_SCROLLBACK=1): record the completed prompt+command
+        // line into the scrollback ring so it survives scroll-back. (Phase 1:
+        // command output isn't captured yet -- see the session-mux spec.)
+        if (scrollback::enabled() && !got->empty()) scrollback::record(prompt + *got);
         if (!continuing) {
             if (got->empty()) continue;
             pending = *got;
@@ -727,6 +870,20 @@ int main(int argc, char** argv) {
             clearLastOffer(); // so a PREVIOUS command's install offer can't leak
                               // into this command's failed-prompt segment
             execNode(ast.get(), state);
+            // Capture the cursor RIGHT HERE, before doReassertChromeAfterCommand
+            // parks it at the scroll-region bottom. This is the command's own
+            // resting row -- the honest signal for whether its output scrolled the
+            // screen (and thus whether promptRow still points at the command line).
+            // Querying only AFTER the chrome reassert was the old bug: the reassert
+            // leaves the cursor at the bottom margin, so the "did it scroll?" check
+            // always looked scrolled and the in-place recolor never ran.
+            int execRow = 0, execCol = 0;
+            bool execRowOk = false;
+            if (state.lastStatus != 0 && promptRow > 0 && arrowPromptMode() &&
+                isatty(STDOUT_FILENO) && pending.find('\n') == std::string::npos) {
+                RawMode g;
+                execRowOk = queryCursorPos(execRow, execCol);
+            }
             doReassertChromeAfterCommand(); // precmd-equivalent: reassert
                                 // after, verifying+correcting the cursor in
                                 // case THIS command (clear/vim/etc) left it
@@ -774,36 +931,42 @@ int main(int argc, char** argv) {
                                         ? pending
                                         : highlightLine(pending);
 
-                int r1 = 0, c1 = 0;
-                RawMode guard; // required for queryCursorPos -- see the capture above
-                // SCROLL SAFETY. promptRow is an ABSOLUTE row captured before the
-                // command ran, so the repaint is only safe if the screen has not
-                // scrolled since. The previous guard (r1 < rows) was unsound: it
-                // reasoned that a terminal scrolls only when writing at the bottom
-                // row, and concluded that a cursor above the bottom means no
-                // scrolling -- but that only describes where the cursor ENDED, not
-                // what happened DURING the command. A long `brew install` scrolls
-                // many times and can still finish with the cursor mid-screen, so
-                // the stale promptRow got repainted over unrelated output: the old
-                // command appeared to be "pasted back" into the prompt, and typing
-                // afterwards was out of sync with what was on screen.
-                //
-                // Two conditions that TOGETHER prove the row is still good:
-                //   r1 > promptRow    -- the cursor moved strictly DOWN from the
-                //                        prompt, so nothing scrolled it off the top
-                //                        and no `clear` homed the cursor above it.
-                //   r1 < rows - 1     -- output never reached the scroll region's
-                //                        bottom margin, which is the only place a
-                //                        scroll can be triggered.
-                // When either fails we simply skip the recolor. Losing the recolor
-                // on a screen-filling command is a far better outcome than painting
-                // a phantom prompt into the middle of real output.
-                bool rowStillValid = queryCursorPos(r1, c1) && r1 > promptRow && r1 < rows - 1;
+                RawMode guard; // required for queryCursorPos below
+
+                // SCROLL SAFETY, done right. `execRow` was captured the instant the
+                // command finished -- BEFORE the chrome reassert parks the cursor at
+                // the scroll-region bottom -- so it honestly reflects where the
+                // command's own output left off. The command line at promptRow is
+                // still valid iff the output did NOT reach the scroll region's bottom
+                // margin (rows-1 with a pinned bottom bar), because that margin is the
+                // only place a scroll can be triggered:
+                //   execRow > promptRow  -- cursor moved strictly DOWN from the prompt
+                //                           (nothing homed it above, e.g. `clear`).
+                //   execRow < rows - 1   -- output never hit the bottom margin, so
+                //                           nothing scrolled and promptRow still points
+                //                           at the command's line.
+                // When it DID scroll (or DSR failed), we draw NOTHING -- no badge on
+                // the next prompt, no reprint on a fresh line (which duplicated the
+                // command). The recolor belongs on the failing command's own line or
+                // nowhere; it never migrates elsewhere.
+                // execRow < rows-1 proves no scroll (output never hit the bottom
+                // margin). execRow == promptRow+1 also proves it: the cursor sits
+                // exactly one line below the prompt, so the command produced no
+                // output to scroll -- true even when the prompt is on the bottom
+                // row itself (a failed `false`/`cd` there still recolors).
+                bool rowStillValid = execRowOk && execRow > promptRow &&
+                                     (execRow < rows - 1 || execRow == promptRow + 1);
                 if (width < cols && rowStillValid) {
+                    // Re-query the CURRENT cursor (the chrome reassert moved it) so we
+                    // can restore it after painting over the prompt line.
+                    int r1 = 0, c1 = 0;
+                    if (!queryCursorPos(r1, c1)) { r1 = execRow; c1 = 1; }
                     std::cout << "\x1b[" << promptRow << ";1H\x1b[K"
                               << line << shown
                               << "\x1b[" << r1 << ";" << c1 << "H" << std::flush;
                 }
+                // else: the command scrolled off its own prompt line -- leave the
+                // screen untouched. No badge, no duplicate.
             }
             // Private Mode: while on, write NOTHING to history/disk. Otherwise
             // record the command tagged with the cwd it ran in (context-aware

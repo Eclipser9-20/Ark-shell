@@ -17,11 +17,12 @@ So this models only what ark actually exercises, but models it honestly:
   * DECSC/DECRC save/restore (chrome brackets its repaints with these)
   * erase-in-line / erase-in-display
   * DSR, answered with the TRUE cursor position
+  * the alternate screen buffer (?1049h/l), saved and restored
 
 Deliberately NOT modelled: colours/attributes (SGR is parsed and dropped),
-character sets, tabs stops, mouse encoding, the alternate screen buffer's
-separate grid. Anything unrecognised is consumed and ignored rather than being
-printed as text, so an unhandled sequence can't masquerade as output.
+character sets, tab stops, mouse encoding. Anything unrecognised is consumed and
+ignored rather than being printed as text, so an unhandled sequence can't
+masquerade as output.
 """
 
 
@@ -33,6 +34,7 @@ class VT:
         self.top, self.bot = 0, rows - 1  # scroll region, 0-indexed inclusive
         self.saved = (0, 0)
         self.pending_dsr = 0           # how many ESC[6n replies are owed
+        self.alt = None                # saved primary buffer while on the alt screen
         self._buf = b""
 
     # ---------- screen primitives ----------
@@ -143,7 +145,21 @@ class VT:
             return params[idx] if idx < len(params) and params[idx] != 0 else default
 
         if priv:
-            return consumed, None       # ?25h/l, ?1049h/l, ?1000l, ?2026h/l ... ignored
+            # ?1049h/l -- alternate screen buffer. Full-screen programs (ark-py,
+            # vim, less) switch to it and expect the primary buffer restored
+            # untouched on exit. Ignoring it made every post-exit assertion
+            # meaningless: the editor's painted rows stayed on the grid and the
+            # shell's output landed on top of them.
+            if params and params[0] == 1049:
+                if final == 0x68 and self.alt is None:        # 'h' -> enter
+                    self.alt = ([row[:] for row in self.grid], self.cy, self.cx,
+                                self.top, self.bot)
+                    self.grid = [[" "] * self.cols for _ in range(self.rows)]
+                    self.cy = self.cx = 0
+                elif final == 0x6C and self.alt is not None:  # 'l' -> leave
+                    self.grid, self.cy, self.cx, self.top, self.bot = self.alt
+                    self.alt = None
+            return consumed, None       # ?25h/l, ?1000l, ?2026h/l ... ignored
 
         if final == 0x48 or final == 0x66:      # H / f  cursor position
             self.cy = min(self.rows - 1, max(0, p(0) - 1))

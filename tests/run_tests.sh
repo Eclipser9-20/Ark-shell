@@ -17,4 +17,9 @@ for ark_file in tests/cases/*.ark; do
         fail=1
     fi
 done
+
+# Source-level check: the settings list that backs ark's "unrecognised setting"
+# warning must match the settings the code actually reads.
+bash tests/settings_coverage.sh || fail=1
+
 exit $fail

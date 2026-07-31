@@ -13,3 +13,10 @@ ark-asan.dSYM/
 # Python bytecode from tests/ (embeds absolute build paths)
 __pycache__/
 *.pyc
+arky
+
+# macOS AppleDouble sidecars (exFAT), SDD scratch, personal build script
+._*
+.DS_Store
+.superpowers/
+/ark-build.sh

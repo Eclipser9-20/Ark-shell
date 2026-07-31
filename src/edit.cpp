@@ -1,10 +1,13 @@
 #include "edit.h"
+#include "scrollback_session.h"
 #include "chrome.h"
 #include "complete.h"
 #include "arkfeatures.h"
 #include "highlight.h"
 #include "input.h"
 #include <algorithm>
+#include <climits>
+#include <cstdlib>
 #include <atomic>
 #include <cctype>
 #include <cerrno>
@@ -141,8 +144,14 @@ static int searchHistoryBackward(const std::vector<std::string>& lines, const st
 
 std::optional<std::string> readLine(const std::string& prompt, History& history,
                                      const std::function<void()>& onIdleTick,
-                                     const std::function<bool(const std::string&)>& isValidCommand) {
+                                     const std::function<bool(const std::string&)>& isValidCommand,
+                                     const std::function<void()>& onJobsPanel) {
     RawMode raw;
+    // Optional raw-byte trigger for the jobs panel on terminals that can't send
+    // a distinct Ctrl+Shift+J: ARK_JOBS_KEY=<decimal control code> (e.g. 0 for
+    // Ctrl+Space, 7 for Ctrl+G). 0..31 only; ignored otherwise.
+    int jobsKeyByte = -1;
+    if (const char* jk = getenv("ARK_JOBS_KEY")) { int v = atoi(jk); if (v >= 0 && v < 32) jobsKeyByte = v; }
     std::string buf;
     size_t cursor = 0;
     int histIndex = (int)history.lines().size(); // one-past-the-end = "not browsing history"
@@ -157,6 +166,12 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
     size_t acEnd = 0;              // cursor position right after a just-applied fix
     std::string acOriginal;       // the typo, for one-backspace undo
     std::string acSuppressed;     // a word you rejected; don't auto-fix it again
+
+    // Double-tab-to-list: when a Tab produces many candidates, the first Tab
+    // shows "N completions -- Tab again to list" instead of dumping them all;
+    // a second, consecutive Tab actually lists them. Any other key retracts it.
+    bool tabListArmed = false;
+    std::string tabHint;   // transient completion hint shown after the buffer
 
     // Context-Aware Autosuggestions: prefer history entries that were run in
     // THIS directory. Captured once at readLine entry (cwd can't change mid-
@@ -250,6 +265,9 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
         // wrapped rows (a huge history match with trailing spaces used to balloon
         // the redraw). It fills at most to the end of the current visual row.
         std::string sug = (cursor == buf.size()) ? currentSuggestion() : "";
+        if (!tabHint.empty()) sug = tabHint;   // transient "Tab again to list"
+                                               // hint, drawn like the dim ghost so
+                                               // the next keystroke's redraw wipes it
         int bw = dispWidth(buf);
         if (!sug.empty()) {
             int room = cols - ((plen + bw) % cols) - 1; // cols left on the cursor's row
@@ -331,12 +349,17 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
         // -- can't starve the tick indefinitely; it fires within one
         // keystroke of the SIGALRM that set it.
         if (onIdleTick && g_tick.exchange(false, std::memory_order_relaxed)) {
+            bool muxScrolled = scrollback::enabled() && !scrollback::atLive();
             onIdleTick();
             // If that tick's chrome repaint was a resize-driven full screen
             // clear, our prompt+buffer got wiped along with everything else --
             // reprint it (chrome left the cursor at row 2, col 1, ready for it)
             // so the input line doesn't vanish until the next keystroke.
             if (chromeConsumeResizeRepaint()) redraw();
+            // While scrolled back in the mux, the bars stay live ("come along for
+            // the ride") but chrome just repainted over the history region --
+            // restore the scrolled view underneath the fresh bars.
+            if (muxScrolled) scrollback::scrollBy(0);
         }
 
         char c;
@@ -354,6 +377,21 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
         // A just-applied live-autocorrect is undoable for exactly ONE keystroke.
         bool justCorrectedNow = justCorrected;
         justCorrected = false;
+
+        // Any key other than Tab retracts a pending "Tab again to list" hint and
+        // redraws so the full prompt comes back.
+        if (c != 9) {
+            tabListArmed = false;
+            if (!tabHint.empty()) { tabHint.clear(); redraw(); }
+        }
+
+        // Raw-byte jobs-panel trigger (ARK_JOBS_KEY) for terminals without
+        // distinct Ctrl+Shift+J reporting.
+        if (onJobsPanel && jobsKeyByte >= 0 && (unsigned char)c == (unsigned char)jobsKeyByte) {
+            onJobsPanel();
+            redraw();
+            continue;
+        }
 
         if (c == '\r' || c == '\n') { endLine(); return buf; }
         if (c == 3) {
@@ -438,14 +476,13 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
             };
             redrawSearch();
 
-            bool cancelled = false;
             bool accepted = false;
             bool runIt = false; // Enter accepts AND runs; other accept-keys just populate
             for (;;) {
                 char sc;
                 ssize_t sn = (ssize_t)arkinput::readByte(sc, /*retryEINTR=*/true);
                 if (sn < 0 && errno == EINTR) continue;
-                if (sn <= 0) { cancelled = true; break; }
+                if (sn <= 0) break;
 
                 if (sc == 18) { // Ctrl-R again: find the next (older) match
                     int searchFrom = matchIdx >= 0 ? matchIdx : (int)history.lines().size();
@@ -454,7 +491,7 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
                     redrawSearch();
                     continue;
                 }
-                if (sc == 7) { cancelled = true; break; } // Ctrl-G: cancel
+                if (sc == 7) break;                      // Ctrl-G: cancel
                 if (sc == '\x1b') {
                     // Standalone Escape cancels. An escape SEQUENCE (arrow / Home /
                     // End / ...) ends the search accepting the current match -- and
@@ -469,7 +506,7 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
                         }
                         accepted = true; break; // populate the match, don't run
                     }
-                    cancelled = true; break;
+                    break;
                 }
                 if (sc == '\r' || sc == '\n') { accepted = true; runIt = true; break; } // Enter: accept AND run
                 if (sc == 127 || sc == 8) { // Backspace: shrink the query, re-search from the top
@@ -514,7 +551,23 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
             // completion of the word under the cursor.
             if (cursor == buf.size()) {
                 std::string s = currentSuggestion();
-                if (!s.empty()) { buf += s; cursor = buf.size(); redraw(); continue; }
+                if (!s.empty()) {
+                    buf += s;
+                    cursor = buf.size();
+                    // If accepting the ghost completed a directory path, append
+                    // the trailing '/' too -- otherwise a ghost-accepted folder
+                    // (e.g. "cd Down" -> "Downloads") lands without the slash the
+                    // real Tab-completion path would have added.
+                    auto [gws, gword] = wordUnderCursor(buf, cursor);
+                    (void)gws;
+                    std::string glk = unquoteWord(gword);
+                    if (!glk.empty() && glk.back() != '/' && isDirectory(glk)) {
+                        buf += '/';
+                        cursor = buf.size();
+                    }
+                    redraw();
+                    continue;
+                }
             }
             auto [wordStart, word] = wordUnderCursor(buf, cursor);
             bool cmdPos = isCommandPosition(buf, wordStart);
@@ -531,10 +584,20 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
             bool pathLike = lookup.find('/') != std::string::npos ||
                             (!lookup.empty() && (lookup[0] == '~' || lookup[0] == '.'));
             bool asPath = !cmdPos || pathLike;
+            // If the word was opened with a quote, completions stay in that
+            // style -- replacing the whole word (quote included) with an
+            // unquoted completion is what silently ate the user's quote.
+            char openQ = (!word.empty() && (word[0] == '\'' || word[0] == '"')) ? word[0] : '\0';
             auto candidates = asPath ? completePath(lookup) : completeCommand(lookup);
-            // Also pull from the whole-filesystem index (if built) so Tab
-            // finds a file/program anywhere, not just cwd/$PATH. Deduped.
-            for (auto& hit : completeFromIndex(word, cmdPos)) candidates.push_back(hit);
+            // Also pull from the whole-filesystem index (if built) so Tab finds
+            // a file/program anywhere. But NOT when a local path completion (e.g.
+            // `cd Docu`) already matched: a same-named directory elsewhere (~/
+            // Documents) would make the local match look ambiguous, killing the
+            // trailing-slash and forcing a spurious list. Fall back to the index
+            // only when the local pass found nothing, or at command position.
+            if (candidates.empty() || cmdPos) {
+                for (auto& hit : completeFromIndex(word, cmdPos)) candidates.push_back(hit);
+            }
             // Dynamic Man-Page Completions: a flag argument (-x/--long, not in
             // command position) gets its options from the command's man page.
             const char* mpOff = getenv("ARK_MANPAGE_COMPLETE");
@@ -544,6 +607,28 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
             }
             std::sort(candidates.begin(), candidates.end());
             candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
+            // Two spellings of the SAME file are one candidate. The filesystem
+            // index answers with absolute paths, so `~/Desk` came back as both
+            // "~/Desktop" and "/Users/you/Desktop" -- textually distinct, so the
+            // unique-match test below failed and the trailing '/' never got
+            // appended. Collapse by what the paths actually resolve to.
+            if (asPath && candidates.size() > 1) {
+                std::vector<std::string> uniq;
+                std::vector<std::string> seenReal;
+                for (const std::string& cand : candidates) {
+                    char rp[PATH_MAX];
+                    std::string key;
+                    if (realpath(expandHome(cand).c_str(), rp)) key = rp;
+                    else key = cand;                       // unresolvable: keep as-is
+                    if (std::find(seenReal.begin(), seenReal.end(), key) != seenReal.end()) continue;
+                    seenReal.push_back(key);
+                    // Prefer the spelling closest to what was typed, so a
+                    // completion of "~/Desk" stays "~/Desktop" rather than
+                    // expanding to the absolute path under the user's cursor.
+                    uniq.push_back(cand);
+                }
+                candidates.swap(uniq);
+            }
             if (candidates.empty()) { continue; }
 
             std::string prefix = longestCommonPrefix(candidates);
@@ -553,12 +638,20 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
             // nothing grew (or grew by the width of the quotes).
             if (prefix.size() > lookup.size()) {
                 // Re-quote if the completed path needs it (spaces, metacharacters).
-                std::string ins = asPath ? quoteCompletion(prefix) : prefix;
+                std::string ins = !asPath ? prefix
+                                  : openQ ? quoteCompletionAs(prefix, openQ)
+                                          : quoteCompletion(prefix);
                 buf.replace(wordStart, word.size(), ins);
                 // For a still-ambiguous prefix, park the cursor INSIDE the closing
                 // quote so continued typing stays within the quoted word.
                 bool quoted = ins.size() >= 2 && (ins.back() == '\'' || ins.back() == '"');
                 cursor = wordStart + ins.size() - ((quoted && candidates.size() > 1) ? 1 : 0);
+                // Our completion carries its own closing quote. If the user had
+                // already typed one just past the cursor (`ls 'al'` with the
+                // cursor before the final quote, or a hand-typed pair), leaving
+                // it there strands a duplicate -- the "ls alpha.txt '" mangling.
+                if (quoted && cursor < buf.size() && buf[cursor] == ins.back())
+                    buf.erase(cursor, 1);
                 changed = true;
             }
             // Append the separator on a UNIQUE match -- '/' for a directory so the
@@ -584,6 +677,22 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
             if (changed) {
                 redraw();
             } else if (candidates.size() > 1) {
+                // Guard against dumping a wall of completions: past a threshold
+                // the first Tab just asks; a second consecutive Tab lists them.
+                const char* thrEnv = getenv("ARK_TAB_LIST_THRESHOLD");
+                size_t threshold = 15;
+                if (thrEnv) { int t = atoi(thrEnv); if (t > 0) threshold = (size_t)t; }
+                if (candidates.size() > threshold && !tabListArmed) {
+                    tabListArmed = true;
+                    // Inline hint after the buffer (drawn like the dim ghost), so
+                    // typing anything wipes it and restores the full prompt.
+                    tabHint = "  " + std::to_string(candidates.size()) +
+                              " completions -- Tab again to list";
+                    redraw();
+                    continue;
+                }
+                tabListArmed = false;
+                tabHint.clear();
                 std::cout << "\n";
                 for (size_t i = 0; i < candidates.size(); i++) {
                     std::cout << candidates[i];
@@ -649,10 +758,38 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
             // ark never enables mouse reporting, so any report we see is fallout
             // from a child that turned it on and died without restoring it (see
             // chrome.h's disableMouseReporting). Discard rather than type it.
-            if (sgrMouse) continue;                    // SGR form, fully consumed above
+            if (sgrMouse) {
+                // Session mux: wheel scrolls the owned scrollback. SGR report is
+                // "<btn;col;row" -- button 64 = wheel up, 65 = wheel down.
+                if (scrollback::enabled()) {
+                    int btn = atoi(params.c_str() + 1);   // skip the '<'
+                    if (btn == 64) { scrollback::scrollBy(+3); if (scrollback::atLive()) redraw(); continue; }
+                    if (btn == 65) { scrollback::scrollBy(-3); if (scrollback::atLive()) redraw(); continue; }
+                }
+                continue;                              // otherwise discard the report
+            }
+            // Session mux: Shift+PgUp / Shift+PgDn page through the scrollback.
+            if (scrollback::enabled()) {
+                if (final == '~' && params == "5;2") { scrollback::scrollBy(scrollback::pageRows()); if (scrollback::atLive()) redraw(); continue; }
+                if (final == '~' && params == "6;2") { scrollback::scrollBy(-scrollback::pageRows()); if (scrollback::atLive()) redraw(); continue; }
+            }
             if (final == 'M' && params.empty()) {      // X10 form: 3 raw bytes follow
                 char ignore;
                 for (int i = 0; i < 3; i++) if (readByte(ignore) <= 0) break;
+                continue;
+            }
+
+            // Ctrl+Shift+J opens the jobs panel. Terminals with enhanced-key
+            // reporting (Kitty protocol / modifyOtherKeys -- Ghostty, iTerm2)
+            // send it as CSI-u "ESC[106;6u" (base 'j') / "ESC[74;6u" ('J'), or
+            // the xterm CSI-27 form "ESC[27;6;106~". Legacy terminals that fold
+            // it to a bare Ctrl+J can't be distinguished here (that's LF); set
+            // ARK_JOBS_KEY to a spare control byte for those.
+            if (onJobsPanel &&
+                ((final == 'u' && (params == "106;6" || params == "74;6")) ||
+                 (final == '~' && (params == "27;6;106" || params == "27;6;74")))) {
+                onJobsPanel();
+                redraw();
                 continue;
             }
 
@@ -723,6 +860,8 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
         // 0x7f, a leaked escape-sequence remnant -- is dropped instead of being
         // embedded as a raw control char into the command that then runs.
         if ((unsigned char)c >= 0x20 && (unsigned char)c != 0x7f) {
+            // Typing while scrolled back in the session mux snaps to live first.
+            if (scrollback::enabled() && !scrollback::atLive()) { scrollback::snapToLive(); redraw(); }
             buf.insert(cursor, 1, c);
             cursor++;
             redraw();

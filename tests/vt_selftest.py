@@ -85,6 +85,16 @@ v = VT(2, 20)
 v.feed(b"\x1b]0;title\x1b\\OK")
 check("OSC ST form", v.display[0].rstrip(), "OK")
 
+print("alternate screen buffer save/restore")
+v = VT(3, 10)
+v.feed(b"primary")
+v.feed(b"\x1b[?1049h")
+check("alt starts blank", v.display[0].strip(), "")
+v.feed(b"altcontent")
+check("alt has its own grid", v.display[0].rstrip(), "altcontent")
+v.feed(b"\x1b[?1049l")
+check("primary restored", v.display[0].rstrip(), "primary")
+
 print()
 if fails:
     print(f"SELFTEST FAILED ({len(fails)})")

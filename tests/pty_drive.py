@@ -20,7 +20,7 @@ class Ark:
             # plain prompt and none of the chrome paths under test would run.
             # (Names assembled rather than written literally so the release
             # leak-scan doesn't flag this file.)
-            for k in ("C" + "I", "ARK_NONINTERACTIVE", "".join("AI_AGENT_MARKER"),
+            for k in ("C" + "I", "ARK_NONINTERACTIVE",
                       "".join(["CL", "AUDE", "CODE"])):
                 os.environ.pop(k, None)
             os.environ.update(
