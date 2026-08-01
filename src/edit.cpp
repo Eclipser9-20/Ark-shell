@@ -776,8 +776,11 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
             }
             // Session mux: Shift+PgUp / Shift+PgDn page through the scrollback.
             if (scrollback::enabled()) {
-                if (final == '~' && params == "5;2") { scrollback::scrollBy(scrollback::pageRows()); if (scrollback::atLive()) { lastRows = 1; lastCurCol = 0; redraw(); } continue; }
-                if (final == '~' && params == "6;2") { scrollback::scrollBy(-scrollback::pageRows()); if (scrollback::atLive()) { lastRows = 1; lastCurCol = 0; redraw(); } continue; }
+                // Page up/down through scrollback -- plain PageUp/PageDown ("5"/"6")
+                // AND the Shift variants ("5;2"/"6;2"), so it works whichever the
+                // terminal sends.
+                if (final == '~' && (params == "5" || params == "5;2")) { scrollback::scrollBy(scrollback::pageRows()); if (scrollback::atLive()) { lastRows = 1; lastCurCol = 0; redraw(); } continue; }
+                if (final == '~' && (params == "6" || params == "6;2")) { scrollback::scrollBy(-scrollback::pageRows()); if (scrollback::atLive()) { lastRows = 1; lastCurCol = 0; redraw(); } continue; }
             }
             if (final == 'M' && params.empty()) {      // X10 form: 3 raw bytes follow
                 char ignore;

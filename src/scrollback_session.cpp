@@ -72,8 +72,12 @@ void paintRegion() {
 } // namespace
 
 bool enabled() {
+    // Default ON -- wheel-scroll through history is table-stakes shell behaviour,
+    // not an experiment. Opt OUT with ARK_SCROLLBACK=0. Still off in automation
+    // (ARK_DEFAULT_TERMINAL, set for CI / AI-CLI drivers) and when either stream
+    // isn't a real terminal (a pipe/script has no scrollback to own).
     const char* v = getenv("ARK_SCROLLBACK");
-    if (!v || std::strcmp(v, "1") != 0) return false;
+    if (v && std::strcmp(v, "0") == 0) return false;   // explicit opt-out
     if (getenv("ARK_DEFAULT_TERMINAL")) return false;
     if (getenv("CI")) return false;
     return isatty(STDOUT_FILENO) && isatty(STDIN_FILENO);

@@ -121,10 +121,16 @@ protected:
     int sync() override { return dst_->pubsync(); }
 };
 void installScrollbackTee() {
-    static ScrollbackTeeBuf* tee = nullptr;
-    if (tee) return;                       // once only
-    tee = new ScrollbackTeeBuf(std::cout.rdbuf());
-    std::cout.rdbuf(tee);                  // never freed -- lives for the process
+    static bool done = false;
+    if (done) return;                      // once only
+    done = true;
+    // stdout AND stderr both feed the ring: a command's error output (e.g.
+    // "cmd: command not found", "did you mean") goes to std::cerr, and if it
+    // weren't captured the failed-command repaint would redraw the ring over it
+    // and the error would vanish ("yeeted"). Both bufs are never freed -- they
+    // live for the process.
+    std::cout.rdbuf(new ScrollbackTeeBuf(std::cout.rdbuf()));
+    std::cerr.rdbuf(new ScrollbackTeeBuf(std::cerr.rdbuf()));
 }
 } // namespace
 
@@ -773,6 +779,14 @@ int main(int argc, char** argv) {
     }
 
     sourceConfig(histDir + "/ark.config", state, astRoots);
+
+    // The config may have just enabled owned scrollback (`export ARK_SCROLLBACK=1`)
+    // -- which wasn't in the environment when the earlier scrollback::init() ran,
+    // so the ring was never created and every command fell to the un-clamped
+    // normal path (bars leaking). Re-init now that the environment is final:
+    // init() is idempotent, and this is the first point where a config-set
+    // ARK_SCROLLBACK is actually visible to getenv().
+    if (scrollback::enabled()) { scrollback::init(); installScrollbackTee(); }
 
     // Universal variables: load the cross-window/cross-reboot store into the
     // shell (and the environment) now that config has run. Primed once here;
