@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdarg>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
@@ -25,8 +26,41 @@
 #include <mach/mach_host.h>
 #include <mach/vm_statistics.h>
 #include <sys/sysctl.h>
+#include <IOKit/IOKitLib.h>            // GPU utilization via IOAccelerator (no root)
+#include <CoreFoundation/CoreFoundation.h>
 #elif defined(__linux__)
 #include <sys/sysinfo.h>
+#endif
+
+// GPU danger threshold (utilization %). At/above WARN the bar's GPU segment goes
+// yellow; at/above DANGER it goes red and the prompt arrow turns into ⚡.
+static constexpr double GPU_WARN = 70.0;
+static constexpr double GPU_DANGER = 90.0;
+static double g_lastGpuPercent = -1.0;   // set by getHwStats(), read by chromeGpuDanger()
+
+bool chromeGpuDanger() { return g_lastGpuPercent >= GPU_DANGER; }
+
+#if defined(__APPLE__)
+// Read GPU "Device Utilization %" from the IOAccelerator IORegistry entry --
+// same source as `powerstat`, no root, no subprocess. Returns -1 if unavailable.
+static double sampleGpuPercent() {
+    io_service_t acc = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOAccelerator"));
+    if (!acc) return -1.0;
+    double pct = -1.0;
+    CFMutableDictionaryRef props = nullptr;
+    if (IORegistryEntryCreateCFProperties(acc, &props, kCFAllocatorDefault, 0) == KERN_SUCCESS && props) {
+        CFDictionaryRef ps = (CFDictionaryRef)CFDictionaryGetValue(props, CFSTR("PerformanceStatistics"));
+        if (ps) {
+            CFNumberRef n = (CFNumberRef)CFDictionaryGetValue(ps, CFSTR("Device Utilization %"));
+            long long v = -1;
+            if (n && CFGetTypeID(n) == CFNumberGetTypeID()) CFNumberGetValue(n, kCFNumberLongLongType, &v);
+            if (v >= 0) pct = (double)v;
+        }
+        CFRelease(props);
+    }
+    IOObjectRelease(acc);
+    return pct;
+}
 #endif
 
 // Read a whole (small, /proc-style) file into a string. "" on failure.
@@ -122,6 +156,10 @@ HwStats getHwStats() {
     hw.memUsedGB = (totalKb - availKb) / (1024.0 * 1024.0);
 #endif
 
+#if defined(__APPLE__)
+    hw.gpuPercent = sampleGpuPercent();
+#endif
+    g_lastGpuPercent = hw.gpuPercent;
     return hw;
 }
 
@@ -216,9 +254,26 @@ static std::string tildeAbbrev(const std::string& path) {
     return path;
 }
 
+// Opt-in diagnostic log (ARK_SCROLLBACK_DEBUG=<path>): append one line per event
+// so an inconsistent, environment-specific bug can be traced from a real session
+// instead of guessed at. No-op unless the env var is set. A monotonic counter
+// stands in for a timestamp (Date/clock isn't needed to order events).
+void arkScrollDebug(const char* fmt, ...) {
+    const char* path = getenv("ARK_SCROLLBACK_DEBUG");
+    if (!path || !*path) return;
+    static int seq = 0;
+    FILE* f = fopen(path, "a");
+    if (!f) return;
+    fprintf(f, "[%04d] ", seq++);
+    va_list ap; va_start(ap, fmt); vfprintf(f, fmt, ap); va_end(ap);
+    fputc('\n', f);
+    fclose(f);
+}
+
 void setScrollRegion() {
     int rows, cols;
     if (!getTerminalSize(rows, cols) || rows <= 2) return;
+    arkScrollDebug("setScrollRegion  top=%d bottom=%d (rows=%d)", chromeHomeRow(), rows - 1, rows);
     // Region = <top> .. N-1. Row N is always excluded so the pinned bottom bar
     // survives. <top> is row 1 by default -- lines only feed SCROLLBACK when
     // they scroll off row 1 -- or row 2 when a pinned top bar sits on row 1
@@ -262,6 +317,7 @@ void releaseScrollRegionForChild() {
     //   \033[r reset region (full)      trailing 7/8/H digits aren't swallowed
     //   \033[<rows>;1H \033[2K erase the (now-unpinned) bottom bar row
     //   \0338  restore cursor (DECRC) to where the prompt left off
+    arkScrollDebug("releaseScrollRegionForChild  -> region DROPPED to full screen (bars unpinned)");
     int rows, cols;
     if (getTerminalSize(rows, cols) && rows > 1)
         printf("\0337\033[r\033[%d;1H\033[2K\0338", rows);
@@ -474,17 +530,26 @@ void paintChrome(const std::string& cwd, const std::string& gitBranch,
     int leftVisible = 1 + 1 + (int)userHost.size() + 2 + 1 + 1 + (int)sessionStr.size();
     Chip leftPill = makePill(ssh ? FG_GREEN : FG_INFO, leftText, leftVisible);
 
-    char hwbuf[64];
-    snprintf(hwbuf, sizeof(hwbuf), "%3.0f%%  mem %.1f/%.1fG", hw.cpuPercent, hw.memUsedGB, hw.memTotalGB);
-    std::string hwStr = hwbuf;
-    // The bolt icon is colored blue specifically, then switches back to
-    // FG_RED (makePill's base accent, applied before this text) for the
-    // stats themselves -- a per-glyph color override embedded directly in
-    // the text, since makePill only takes one accent color for the whole
-    // chip otherwise.
-    std::string rightText = std::string(FG_BLUE) + ICON_CPU + FG_RED + " " + hwStr;
-    int rightVisible = 1 + 1 + (int)hwStr.size();
-    Chip rightPill = makePill(FG_RED, rightText, rightVisible);
+    char cpubuf[16], membuf[48];
+    snprintf(cpubuf, sizeof(cpubuf), "%3.0f%%", hw.cpuPercent);
+    snprintf(membuf, sizeof(membuf), "  mem %.1f/%.1fG", hw.memUsedGB, hw.memTotalGB);
+    // GPU segment (macOS only; -1 = unavailable): "  gpu N%", green under load,
+    // yellow past GPU_WARN, red past GPU_DANGER. The whole pill also flips to a
+    // brighter danger red when the GPU is pinned -- your at-a-glance "watch it".
+    std::string gpuPlain, gpuColored;
+    if (hw.gpuPercent >= 0) {
+        char g[24]; snprintf(g, sizeof g, "gpu %.0f%%", hw.gpuPercent);
+        gpuPlain = std::string("  ") + g;
+        const char* col = hw.gpuPercent >= GPU_DANGER ? FG_RED
+                        : hw.gpuPercent >= GPU_WARN   ? "\x1b[38;2;224;175;104m"   // yellow
+                                                      : FG_GREEN;
+        gpuColored = std::string("  ") + col + g + FG_RED;
+    }
+    // The bolt icon is colored blue specifically, then switches back to FG_RED
+    // (makePill's base accent) for the stats -- a per-glyph color override.
+    std::string rightText = std::string(FG_BLUE) + ICON_CPU + FG_RED + " " + cpubuf + gpuColored + membuf;
+    int rightVisible = 1 + 1 + (int)std::string(cpubuf).size() + (int)gpuPlain.size() + (int)std::string(membuf).size();
+    Chip rightPill = makePill(chromeGpuDanger() ? "\x1b[38;2;255;70;70m" : FG_RED, rightText, rightVisible);
 
     int usedWidth = leftPill.width + rightPill.width;
     int pad = cols - usedWidth;

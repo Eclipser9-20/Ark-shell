@@ -25,9 +25,19 @@ int Scrollback::maxOffset() const {
 void Scrollback::push(const LogicalLine& l) {
     int added = (int)wrapLine(l.bytes, width_).size();
     lines_.push_back(l);
+    pushed_++;
     while (lines_.size() > cap_) lines_.pop_front();
     if (offset_ > 0) offset_ += added;   // keep viewing the same rows as new output arrives
     scrollLines(0);                       // re-clamp to valid range
+}
+
+bool Scrollback::replaceSeq(size_t seq, const LogicalLine& l) {
+    // The oldest still-resident line has sequence pushed_ - lines_.size().
+    size_t first = pushed_ - lines_.size();
+    if (seq < first || seq >= pushed_) return false;   // evicted or never existed
+    lines_[seq - first] = l;
+    scrollLines(0);   // re-clamp: the replacement may wrap to a different height
+    return true;
 }
 
 void Scrollback::scrollLines(int delta) {

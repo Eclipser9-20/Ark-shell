@@ -355,11 +355,17 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
             // clear, our prompt+buffer got wiped along with everything else --
             // reprint it (chrome left the cursor at row 2, col 1, ready for it)
             // so the input line doesn't vanish until the next keystroke.
-            if (chromeConsumeResizeRepaint()) redraw();
+            if (chromeConsumeResizeRepaint()) {
+                // A resize wiped the screen. Re-measure the scrollback region and
+                // repaint its view (live tail or scrolled window) so the output
+                // survives the resize, THEN redraw the prompt/buffer on top.
+                scrollback::onResize();
+                redraw();
+            }
             // While scrolled back in the mux, the bars stay live ("come along for
             // the ride") but chrome just repainted over the history region --
             // restore the scrolled view underneath the fresh bars.
-            if (muxScrolled) scrollback::scrollBy(0);
+            else if (muxScrolled) scrollback::scrollBy(0);
         }
 
         char c;
@@ -763,15 +769,15 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
                 // "<btn;col;row" -- button 64 = wheel up, 65 = wheel down.
                 if (scrollback::enabled()) {
                     int btn = atoi(params.c_str() + 1);   // skip the '<'
-                    if (btn == 64) { scrollback::scrollBy(+3); if (scrollback::atLive()) redraw(); continue; }
-                    if (btn == 65) { scrollback::scrollBy(-3); if (scrollback::atLive()) redraw(); continue; }
+                    if (btn == 64) { scrollback::scrollBy(+3); if (scrollback::atLive()) { lastRows = 1; lastCurCol = 0; redraw(); } continue; }
+                    if (btn == 65) { scrollback::scrollBy(-3); if (scrollback::atLive()) { lastRows = 1; lastCurCol = 0; redraw(); } continue; }
                 }
                 continue;                              // otherwise discard the report
             }
             // Session mux: Shift+PgUp / Shift+PgDn page through the scrollback.
             if (scrollback::enabled()) {
-                if (final == '~' && params == "5;2") { scrollback::scrollBy(scrollback::pageRows()); if (scrollback::atLive()) redraw(); continue; }
-                if (final == '~' && params == "6;2") { scrollback::scrollBy(-scrollback::pageRows()); if (scrollback::atLive()) redraw(); continue; }
+                if (final == '~' && params == "5;2") { scrollback::scrollBy(scrollback::pageRows()); if (scrollback::atLive()) { lastRows = 1; lastCurCol = 0; redraw(); } continue; }
+                if (final == '~' && params == "6;2") { scrollback::scrollBy(-scrollback::pageRows()); if (scrollback::atLive()) { lastRows = 1; lastCurCol = 0; redraw(); } continue; }
             }
             if (final == 'M' && params.empty()) {      // X10 form: 3 raw bytes follow
                 char ignore;
@@ -861,7 +867,7 @@ std::optional<std::string> readLine(const std::string& prompt, History& history,
         // embedded as a raw control char into the command that then runs.
         if ((unsigned char)c >= 0x20 && (unsigned char)c != 0x7f) {
             // Typing while scrolled back in the session mux snaps to live first.
-            if (scrollback::enabled() && !scrollback::atLive()) { scrollback::snapToLive(); redraw(); }
+            if (scrollback::enabled() && !scrollback::atLive()) { scrollback::snapToLive(); lastRows = 1; lastCurCol = 0; redraw(); }
             buf.insert(cursor, 1, c);
             cursor++;
             redraw();

@@ -17,7 +17,14 @@ struct Value {
     double f = 0.0;
     std::string s;
     std::vector<Value> list;                          // Type::List
-    std::vector<std::pair<std::string, Value>> rec;   // Type::Record (ordered)
+    // Ordered record, stored as two PARALLEL vectors (recKeys[i] -> recVals[i])
+    // rather than std::vector<std::pair<std::string, Value>>. Only std::vector<T>
+    // is portably allowed to hold an INCOMPLETE T (C++17, both libc++ and
+    // libstdc++); a vector<pair<string,Value>> makes libstdc++ (Linux) eagerly
+    // instantiate the pair, which needs Value complete at this self-referential
+    // point and fails to build. recVals is a plain vector<Value>, same as list.
+    std::vector<std::string> recKeys;                 // Type::Record keys (ordered)
+    std::vector<Value> recVals;                       // Type::Record values (parallel)
 
     static Value null() { return Value{}; }
     static Value boolean(bool v) { Value x; x.type = Type::Bool; x.b = v; return x; }
@@ -41,6 +48,13 @@ struct Value {
     std::string asString() const;   // human text for any scalar; "" for containers
     double asNumber() const;        // best-effort numeric view (0 if non-numeric)
     bool truthy() const;
+
+    // Record helpers over the parallel recKeys/recVals vectors.
+    size_t recSize() const { return recKeys.size(); }
+    void recPush(std::string key, Value v) {
+        recKeys.push_back(std::move(key));
+        recVals.push_back(std::move(v));
+    }
 };
 
 // ── JSON (the on-the-wire format between two structured commands) ────────────

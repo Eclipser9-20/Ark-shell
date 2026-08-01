@@ -59,7 +59,8 @@ static std::string currentClock() {
 //   16:02 x1 ❯ false                (no offer)
 // `code` < 0 means success: no status, no segment.
 static std::string chromePrompt(const std::string& clock, const char* arrowColor, int code,
-                                const std::string& offerName = "") {
+                                const std::string& offerName = "",
+                                const char* arrowGlyph = "\xe2\x9d\xaf") {
     std::string s = std::string(tn::COMMENT) + clock + " ";
     if (code >= 0) {
         if (!offerName.empty()) { s += tn::YELLOW; s += offerName; s += " "; }
@@ -69,7 +70,7 @@ static std::string chromePrompt(const std::string& clock, const char* arrowColor
         s += " ";
     }
     s += arrowColor;
-    s += "\xe2\x9d\xaf";
+    s += arrowGlyph;
     s += tn::R;
     s += " ";
     return s;
@@ -92,6 +93,40 @@ static bool arrowPromptMode() {
     if (const char* p = getenv("ARK_PLAIN_CHROME"); p && std::string(p) == "1") return false;
     return true;
 }
+
+// Tees std::cout to the scrollback ring: every byte is forwarded to the ORIGINAL
+// stdout buffer first (output is never lost if capture misbehaves), then handed
+// to scrollback::recordOutput so builtin-command output (echo, tables, banners)
+// becomes scrollable. Chrome/prompts use printf/write -- a different buffer --
+// so they are NOT captured here, which is exactly what keeps the bars out of the
+// ring. Installed once at startup when ARK_SCROLLBACK=1.
+namespace {
+class ScrollbackTeeBuf : public std::streambuf {
+    std::streambuf* dst_;
+public:
+    explicit ScrollbackTeeBuf(std::streambuf* d) : dst_(d) {}
+protected:
+    int overflow(int c) override {
+        if (c == std::streambuf::traits_type::eof()) return c;
+        char ch = (char)c;
+        if (dst_->sputc(ch) == std::streambuf::traits_type::eof()) return std::streambuf::traits_type::eof();
+        scrollback::recordOutput(&ch, 1);
+        return c;
+    }
+    std::streamsize xsputn(const char* s, std::streamsize n) override {
+        std::streamsize w = dst_->sputn(s, n);
+        if (w > 0) scrollback::recordOutput(s, (size_t)w);
+        return w;
+    }
+    int sync() override { return dst_->pubsync(); }
+};
+void installScrollbackTee() {
+    static ScrollbackTeeBuf* tee = nullptr;
+    if (tee) return;                       // once only
+    tee = new ScrollbackTeeBuf(std::cout.rdbuf());
+    std::cout.rdbuf(tee);                  // never freed -- lives for the process
+}
+} // namespace
 
 // `clock` lets the caller pin the HH:MM shown, so the transient failed-command
 // reprint reproduces the ORIGINAL prompt byte-for-byte even if the minute rolled
@@ -122,6 +157,11 @@ static std::string buildPrompt(const ShellState& state, const std::string& home,
     // shown by recoloring THIS command's own arrow red (with the exit code behind
     // it) once it finishes, not by reddening the NEXT prompt (see the transient
     // reprint in the REPL loop).
+    // GPU pinned: a red ⚡ arrow instead of the calm green ❯ -- a cool, obvious
+    // "the GPU is cooking" cue (the bottom bar's gpu% goes red to match).
+    if (chromeGpuDanger())
+        return chromePrompt(clock.empty() ? currentClock() : clock,
+                            "\x1b[38;2;255;70;70m", -1, "", "\xe2\x9a\xa1");
     return chromePrompt(clock.empty() ? currentClock() : clock, tn::GREEN, -1);
 }
 
@@ -706,6 +746,7 @@ int main(int argc, char** argv) {
             printf("\x1b[3J\x1b[2J\x1b[H");
         doReassertChromeStartup(); // initial paint before the REPL loop starts
         scrollback::init();               // session scrollback ring (ARK_SCROLLBACK=1)
+        if (scrollback::enabled()) installScrollbackTee();  // capture builtin output
     }
 
     std::vector<std::unique_ptr<Node>> astRoots; // keeps FunctionDef bodies alive --
@@ -833,6 +874,7 @@ int main(int argc, char** argv) {
         // and repaint that exact line with a red arrow + its exit code. Only
         // meaningful for the arrow prompt on a real, non-continuation line.
         int promptRow = 0, promptCol = 0;
+        long promptSeq = -1;   // scrollback ring seq of this prompt+command line
         std::string promptClock;
         if (!continuing && arrowPromptMode() && isatty(STDOUT_FILENO)) {
             promptClock = currentClock();
@@ -851,7 +893,7 @@ int main(int argc, char** argv) {
         // Session mux (ARK_SCROLLBACK=1): record the completed prompt+command
         // line into the scrollback ring so it survives scroll-back. (Phase 1:
         // command output isn't captured yet -- see the session-mux spec.)
-        if (scrollback::enabled() && !got->empty()) scrollback::record(prompt + *got);
+        if (scrollback::enabled() && !got->empty()) promptSeq = scrollback::record(prompt + *got);
         if (!continuing) {
             if (got->empty()) continue;
             pending = *got;
@@ -869,7 +911,12 @@ int main(int argc, char** argv) {
                                 // Enter, so plain preserve is correct here
             clearLastOffer(); // so a PREVIOUS command's install offer can't leak
                               // into this command's failed-prompt segment
+            scrollback::setCapturing(true);   // capture builtin/std::cout output
+                                              // into the ring ONLY while the
+                                              // command runs -- never readLine's
+                                              // prompt/edit redraws
             execNode(ast.get(), state);
+            scrollback::setCapturing(false);
             // Capture the cursor RIGHT HERE, before doReassertChromeAfterCommand
             // parks it at the scroll-region bottom. This is the command's own
             // resting row -- the honest signal for whether its output scrolled the
@@ -931,6 +978,14 @@ int main(int argc, char** argv) {
                                         ? pending
                                         : highlightLine(pending);
 
+                // Under scrollback the command line lives in the ring, not at a
+                // fixed screen row -- recolor it there (red arrow + exit code)
+                // and let the live tail repaint. This keeps the badge ON the
+                // failing command's own line without the stale-row doubling.
+                if (scrollback::enabled()) {
+                    scrollback::recolorLine(promptSeq, line + shown);
+                } else {
+
                 RawMode guard; // required for queryCursorPos below
 
                 // SCROLL SAFETY, done right. `execRow` was captured the instant the
@@ -967,6 +1022,7 @@ int main(int argc, char** argv) {
                 }
                 // else: the command scrolled off its own prompt line -- leave the
                 // screen untouched. No badge, no duplicate.
+                } // end non-scrollback absolute-row repaint
             }
             // Private Mode: while on, write NOTHING to history/disk. Otherwise
             // record the command tagged with the cwd it ran in (context-aware

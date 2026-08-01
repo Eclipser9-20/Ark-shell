@@ -355,6 +355,24 @@ static int b_exit(const std::vector<std::string>& argv, ShellState& state) {
     std::exit(code);
 }
 
+// `exec cmd [args...]` -- REPLACE the ark process with `cmd` (no fork), the
+// standard shell primitive. The classic use here is `exec ark` to hot-reload a
+// freshly-installed ark in place as the login shell. execvp searches PATH and,
+// on success, never returns; on failure the command wasn't run, so we report it
+// and stay (127) rather than killing an interactive shell out from under the
+// user. Bare `exec` (no command) is a no-op -- the redirect-only form isn't
+// supported.
+static int b_exec(const std::vector<std::string>& argv, ShellState& state) {
+    (void)state;
+    if (argv.size() < 2) return 0;
+    std::vector<char*> cargv;
+    for (size_t i = 1; i < argv.size(); i++) cargv.push_back(const_cast<char*>(argv[i].c_str()));
+    cargv.push_back(nullptr);
+    execvp(cargv[0], cargv.data());
+    std::cerr << "exec: " << argv[1] << ": " << std::strerror(errno) << "\n";
+    return 127;
+}
+
 // `set` -- only the positional-parameter forms are supported:
 //   set -- a b c   (replace $1.. with a b c; `set --` clears them)
 //   set a b c      (same, no leading --)
@@ -1082,7 +1100,7 @@ static int b_to(const std::vector<std::string>& argv, ShellState&) {
 
 const std::unordered_map<std::string, BuiltinFn>& builtinRegistry() {
     static const std::unordered_map<std::string, BuiltinFn> reg = {
-        {"cd", b_cd}, {"exit", b_exit}, {"pwd", b_pwd}, {"echo", b_echo}, {"set", b_set},
+        {"cd", b_cd}, {"exit", b_exit}, {"exec", b_exec}, {"pwd", b_pwd}, {"echo", b_echo}, {"set", b_set},
         {"export", b_export}, {"unset", b_unset}, {"type", b_type}, {"read", b_read},
         {"jobs", b_jobs}, {"fg", b_fg}, {"bg", b_bg},
         {"alias", b_alias}, {"unalias", b_unalias},

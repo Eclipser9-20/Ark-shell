@@ -20,3 +20,6 @@ arky
 .DS_Store
 .superpowers/
 /ark-build.sh
+
+# pistin editor build artifacts
+/pistin.d

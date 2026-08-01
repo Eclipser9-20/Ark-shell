@@ -770,8 +770,10 @@ static int runCommand(Node* cmd, ShellState& state) {
         && commandExists(argv[0])
         && !nucapture::isInteractiveCommand(argv[0])) {
         std::cout.flush(); fflush(stdout);
+        arkScrollDebug("CAPTURED PATH  cmd='%s' -> runForeground (region kept, bars pinned)", argv[0].c_str());
         int st = scrollback::runForeground(argv, *state.jobs);
         if (st >= 0) return st;
+        arkScrollDebug("CAPTURED PATH  cmd='%s' -> runForeground FAILED (-1), falling through to normal path", argv[0].c_str());
     }
 
     // Overlay compositor (ARK_OVERLAY=1, experimental): run the command through
@@ -844,7 +846,24 @@ static int runCommand(Node* cmd, ShellState& state) {
     // bar blink out and back, and an install offer sat at its `[y/N]` prompt
     // with the bar missing for as long as it waited. Checking first costs one
     // PATH lookup that posix_spawnp would do regardless.
-    if (tcgetpgrp(STDIN_FILENO) == getpgrp() && commandExists(argv[0]))
+    bool interactive = nucapture::isInteractiveCommand(argv.empty() ? "" : argv[0]);
+    arkScrollDebug("NORMAL PATH  cmd='%s'  redirects=%d  interactive=%d  owntty=%d",
+                   argv.empty() ? "?" : argv[0].c_str(), (int)!cmd->redirects.empty(),
+                   (int)interactive, (int)(tcgetpgrp(STDIN_FILENO) == getpgrp()));
+    // Drop the pinned-bar scroll region ONLY for a genuine full-screen program
+    // (vim/less/man/top -- the interactive set), which needs the whole screen. A
+    // LINE-ORIENTED command (a plain command, a pipe stage like `seq | cat`, a
+    // redirect) must KEEP the region so its output scrolls inside the band and
+    // the pinned bars stay put -- dropping it for every command was the leak
+    // ("sometimes Ghostty takes over"). This is gated on CHROME being on, NOT on
+    // scrollback: the bars are painted (and their region reserved) by chrome
+    // whether or not the owned-scrollback ring is active, so both need the same
+    // protection. When chrome is off there's no region to preserve, so the
+    // original always-release path stands.
+    const char* chromeEnv = getenv("ARK_CHROME");
+    bool chromeOn = !(chromeEnv && std::string(chromeEnv) == "0");
+    bool keepPinned = chromeOn && !interactive;
+    if (!keepPinned && tcgetpgrp(STDIN_FILENO) == getpgrp() && commandExists(argv[0]))
         releaseScrollRegionForChild();
 
     // Same SIGCHLD race as above, guarded the same way.

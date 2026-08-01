@@ -13,7 +13,7 @@
 #if defined(__APPLE__)
 #include <util.h>   // openpty (BSD/macOS)
 #else
-#include <pty.h>    // openpty (glibc)
+#include <pty.h>    // openpty (glibc/Linux)
 #endif
 
 namespace overlay {

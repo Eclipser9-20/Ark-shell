@@ -15,7 +15,7 @@
 #if defined(__APPLE__)
 #include <util.h>   // openpty (BSD/macOS)
 #else
-#include <pty.h>    // openpty (glibc)
+#include <pty.h>    // openpty (glibc/Linux)
 #endif
 
 namespace nucapture {
@@ -65,6 +65,13 @@ bool isInteractiveCommand(const std::string& name) {
         "mutt","neomutt","w3m","lynx","links","irssi","weechat","newsboat",
         "ping","python","python3","node","irb","ipython","psql","mysql","sqlite3",
         "redis-cli","mongo","bc","gdb","lldb","R","julia","ghci","iex","clj",
+        // Password / credential prompts: read stdin with echo off and expect the
+        // real tty. Keep them on the plain direct-tty path. (Package managers like
+        // brew/apt/pip are NOT here on purpose: they're line-oriented and now
+        // capture cleanly -- the scroll-region clamp in the relay keeps ark's
+        // pinned bars intact even when they reset DECSTBM, so their output is
+        // scrollable like any other command.)
+        "sudo","doas","su",
     };
     return kInteractive.count(b) > 0;
 }

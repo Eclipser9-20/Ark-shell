@@ -19,11 +19,19 @@ public:
     void snapToLive() { offset_ = 0; }
     bool atLive() const { return offset_ == 0; }
     bool canScroll() const { return maxOffset() > 0; }   // content overflows the region
+    int physicalRows() const { return (int)allPhysical().size(); }   // total wrapped rows
     int pendingBelow() const { return offset_; }   // physical rows below the window
     std::vector<std::string> visibleRows() const;  // exactly `height` rows
     size_t size() const { return lines_.size(); }
+    // Monotonic count of every line ever pushed (survives eviction). The line
+    // most recently pushed has sequence number pushed()-1.
+    size_t pushed() const { return pushed_; }
+    // Replace the still-resident line with absolute sequence `seq` (as returned
+    // by pushed()-1 at push time). Returns false if that line has been evicted.
+    bool replaceSeq(size_t seq, const LogicalLine& l);
 private:
     size_t cap_;
+    size_t pushed_ = 0;   // cumulative push count, including evicted lines
     std::deque<LogicalLine> lines_;
     int width_ = 80, height_ = 24;
     int offset_ = 0;                       // physical rows scrolled up from live bottom

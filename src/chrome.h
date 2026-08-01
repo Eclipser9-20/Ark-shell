@@ -11,7 +11,12 @@ struct HwStats {
     double memUsedGB = 0.0;
     double memTotalGB = 0.0;
     double cpuPercent = 0.0; // host-wide CPU utilization, see getHwStats()
+    double gpuPercent = -1.0; // GPU utilization %, or -1 if unavailable (macOS IOKit)
 };
+
+// True when the GPU is under heavy load (>= the danger threshold) as of the last
+// getHwStats() call -- drives the bottom-bar recolor and the danger prompt arrow.
+bool chromeGpuDanger();
 
 // Direct syscalls only (getloadavg, Mach host_statistics64, sysctlbyname) --
 // NO subprocess calls. This is called on every command boundary AND roughly
@@ -48,6 +53,11 @@ void invalidateGitBranchCache();
 // entirely if the terminal has 2 or fewer rows (no room for a scrollable
 // area in between).
 void setScrollRegion();
+
+// Opt-in diagnostic log to the file named by ARK_SCROLLBACK_DEBUG (printf-style).
+// No-op unless that env var is set. Traces the pinned-bar scroll-region state
+// across command paths in a real session.
+void arkScrollDebug(const char* fmt, ...);
 
 // Hands the WHOLE screen to a foreground child by dropping the DECSTBM scroll
 // region ark keeps for its pinned bars. Without this, a full-screen program --

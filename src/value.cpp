@@ -28,18 +28,18 @@ bool Value::isTable() const {
 
 const Value* Value::find(const std::string& key) const {
     if (type != Type::Record) return nullptr;
-    for (auto& kv : rec) if (kv.first == key) return &kv.second;
+    for (size_t k = 0; k < recKeys.size(); k++) if (recKeys[k] == key) return &recVals[k];
     return nullptr;
 }
 Value* Value::find(const std::string& key) {
     if (type != Type::Record) return nullptr;
-    for (auto& kv : rec) if (kv.first == key) return &kv.second;
+    for (size_t k = 0; k < recKeys.size(); k++) if (recKeys[k] == key) return &recVals[k];
     return nullptr;
 }
 void Value::set(const std::string& key, Value v) {
-    for (auto& kv : rec) if (kv.first == key) { kv.second = std::move(v); return; }
+    for (size_t k = 0; k < recKeys.size(); k++) if (recKeys[k] == key) { recVals[k] = std::move(v); return; }
     type = Type::Record;
-    rec.emplace_back(key, std::move(v));
+    recPush(key, std::move(v));
 }
 
 std::string Value::asString() const {
@@ -69,7 +69,7 @@ bool Value::truthy() const {
         case Type::Float: return f != 0;
         case Type::Str: return !s.empty();
         case Type::List: return !list.empty();
-        case Type::Record: return !rec.empty();
+        case Type::Record: return !recKeys.empty();
     }
     return false;
 }
@@ -110,14 +110,14 @@ static void toJsonImpl(const Value& v, std::string& out, bool pretty, int depth)
             indent(depth); out += ']';
             break;
         case Value::Type::Record:
-            if (v.rec.empty()) { out += "{}"; break; }
+            if (v.recSize() == 0) { out += "{}"; break; }
             out += '{';
-            for (size_t k = 0; k < v.rec.size(); k++) {
+            for (size_t k = 0; k < v.recSize(); k++) {
                 if (k) out += ',';
                 indent(depth + 1);
-                jsonEscape(v.rec[k].first, out);
+                jsonEscape(v.recKeys[k], out);
                 out += pretty ? ": " : ":";
-                toJsonImpl(v.rec[k].second, out, pretty, depth + 1);
+                toJsonImpl(v.recVals[k], out, pretty, depth + 1);
             }
             indent(depth); out += '}';
             break;
@@ -167,7 +167,7 @@ struct JsonParser {
             if (peek() != ':') { ok = false; return v; }
             i++;
             Value val = value();
-            v.rec.emplace_back(std::move(key), std::move(val));
+            v.recPush(std::move(key), std::move(val));
             ws();
             if (peek() == ',') { i++; continue; }
             if (peek() == '}') { i++; break; }
@@ -261,9 +261,9 @@ namespace {
 std::vector<std::string> tableColumns(const Value& table) {
     std::vector<std::string> cols;
     for (const auto& row : table.list)
-        for (const auto& kv : row.rec)
-            if (std::find(cols.begin(), cols.end(), kv.first) == cols.end())
-                cols.push_back(kv.first);
+        for (const auto& key : row.recKeys)
+            if (std::find(cols.begin(), cols.end(), key) == cols.end())
+                cols.push_back(key);
     return cols;
 }
 // UTF-8 display width (count code points, not bytes) so box borders line up
@@ -325,11 +325,12 @@ std::string renderText(const Value& v) {
     if (v.type == Value::Type::Record) {
         // Two-column key/value table.
         Value asTable = Value::makeList({});
-        for (const auto& kv : v.rec) {
+        for (size_t k = 0; k < v.recSize(); k++) {
+            const Value& val = v.recVals[k];
             Value r = Value::record();
-            r.set("key", Value::str(kv.first));
-            r.set("value", kv.second.type == Value::Type::Record || kv.second.type == Value::Type::List
-                           ? Value::str(toJson(kv.second)) : Value::str(kv.second.asString()));
+            r.set("key", Value::str(v.recKeys[k]));
+            r.set("value", val.type == Value::Type::Record || val.type == Value::Type::List
+                           ? Value::str(toJson(val)) : Value::str(val.asString()));
             asTable.list.push_back(std::move(r));
         }
         return renderTable(asTable);

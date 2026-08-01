@@ -11,14 +11,27 @@ CXX := clang++
 # allocated" / "__next_prime overflow" aborts). Learned the hard way, twice.
 CXXFLAGS := -std=c++20 -O2 -Wall -Wextra -Isrc -MMD -MP
 
+# GPU telemetry (chrome's HwStats) reads IOKit/IOAccelerator on macOS -- link the
+# frameworks there only, so the Linux build is unaffected.
+ifeq ($(shell uname),Darwin)
+LDLIBS += -framework IOKit -framework CoreFoundation
+endif
+
 # `make` builds ark alone. The editor is no longer a separate binary: arky is
 # built INTO ark (`arky` is a builtin, and an argv[0] symlink runs it directly),
 # so a clean install has an editor out of the box with nothing extra to ship.
 .DEFAULT_GOAL := all
-all: $(BIN)
+all: $(BIN) pistin
 
 $(BIN): $(OBJ)
-	$(CXX) $(CXXFLAGS) -o $@ $^
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
+
+# pistin: the bundled from-scratch terminal editor (vendor/pistin.cpp, single
+# self-contained C++20 file, no deps). The Homebrew formula does `bin.install
+# "pistin"`, so `make` MUST produce it -- otherwise `brew install` fails at the
+# install step with "No such file or directory - pistin".
+pistin: vendor/pistin.cpp
+	$(CXX) $(CXXFLAGS) -o $@ vendor/pistin.cpp
 
 build/%.o: src/%.cpp
 	@mkdir -p build
@@ -28,7 +41,7 @@ build/%.o: src/%.cpp
 
 .PHONY: clean test unittest check install
 clean:
-	rm -rf build $(BIN)
+	rm -rf build $(BIN) pistin
 
 # Install to a stable path so it can be a login shell that survives rebuilds.
 # Re-run after `make` to update the installed copy.
@@ -52,7 +65,11 @@ install: all
 	@# assh: the "ark over SSH" companion (a plain script, no signing needed).
 	@rm -f $(PREFIX)/bin/assh
 	@cp assh $(PREFIX)/bin/assh && chmod u+rwx,go+rx $(PREFIX)/bin/assh
-	@echo "installed ark -> $(PREFIX)/bin/ark (signed)  +  arky (symlink)  +  assh -> $(PREFIX)/bin/assh"
+	@# pistin: the bundled terminal editor.
+	@rm -f $(PREFIX)/bin/pistin
+	@cp pistin $(PREFIX)/bin/pistin && chmod u+rwx,go+rx $(PREFIX)/bin/pistin
+	@codesign --force --sign - $(PREFIX)/bin/pistin 2>/dev/null || true
+	@echo "installed ark -> $(PREFIX)/bin/ark (signed)  +  arky (symlink)  +  assh + pistin"
 
 test: $(BIN)
 	bash tests/run_tests.sh

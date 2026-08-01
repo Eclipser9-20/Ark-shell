@@ -29,7 +29,7 @@ int main() {
     // Object field access preserves order + values
     assert(fromJson("{\"name\":\"ark\",\"n\":3}", v));
     assert(v.isRecord());
-    assert(v.rec[0].first == "name" && v.rec[1].first == "n");
+    assert(v.recKeys[0] == "name" && v.recKeys[1] == "n");
     assert(v.find("name")->s == "ark");
     assert(v.find("n")->i == 3);
     assert(v.find("missing") == nullptr);

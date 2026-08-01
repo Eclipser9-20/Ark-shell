@@ -88,17 +88,28 @@ VtEvent VtModel::feed(const char* data, size_t n) {
             }
             continue;
         }
-        if (ch == 0x1b) {                       // gather an escape sequence into pendingSgr_
+        if (ch == 0x1b) {                       // gather an escape sequence
             std::string esc(1, (char)ch);
+            char finalByte = 0;
+            bool isCsi = false;
             i++;
             if (i < n && data[i] == '[') {
+                isCsi = true;
                 esc += '['; i++;
                 while (i < n && !((unsigned char)data[i] >= 0x40 && (unsigned char)data[i] <= 0x7e)) esc += data[i++];
-                if (i < n) esc += data[i];      // final byte; loop i++ advances past it
+                if (i < n) { finalByte = data[i]; esc += data[i]; }   // final byte; loop i++ advances past it
             } else if (i < n) {
                 esc += data[i];
             }
-            pendingSgr_ += esc;
+            // ONLY keep SGR (CSI ... 'm') -- color/style is safe to store and
+            // replay at any cursor position. Cursor-movement, erase, and mode
+            // sequences (H/f/J/K, ?...h/l, etc.) are DROPPED: a program that
+            // redraws in place (powerstat, progress bars, non-alt-screen TUIs)
+            // would otherwise get its \x1b[H / \x1b[K captured into the ring,
+            // and repainting that line at an absolute row moves the cursor and
+            // scrambles the scrollback view ("tangled output"). We paint our
+            // own positioning; captured lines must be pure text + color.
+            if (isCsi && finalByte == 'm') pendingSgr_ += esc;
             continue;
         }
         if ((int)cells_.size() <= col_) cells_.resize(col_ + 1);
