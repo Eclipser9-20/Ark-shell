@@ -404,6 +404,16 @@ int runForeground(const std::vector<std::string>& argv, JobTable& jobs) {
     struct winsize ws{}; ws.ws_row = (unsigned short)g_height; ws.ws_col = (unsigned short)g_cols;
     if (openpty(&master, &slave, nullptr, nullptr, &ws) < 0) return -1;
 
+    // Block SIGCHLD for the command's lifetime so ark's GLOBAL SIGCHLD handler
+    // (waitpid(-1, WNOHANG)) can't reap this PTY child before relay()'s own
+    // waitpid does. Without this the handler wins the race, relay's waitpid
+    // returns ECHILD with an UNINITIALIZED status word, and that garbage is
+    // misread as "killed by signal" -> every captured command reported exit 129
+    // (128+SIGHUP), making success look like failure (badge on every prompt,
+    // failed-command recolor firing, output "thrown to the top"). nucapture's
+    // capture path guards the same way.
+    BlockSigchld sigchldGuard;
+
     pid_t pid = fork();
     if (pid < 0) { close(master); close(slave); return -1; }
     if (pid == 0) {
