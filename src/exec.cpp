@@ -866,6 +866,14 @@ static int runCommand(Node* cmd, ShellState& state) {
     if (!keepPinned && tcgetpgrp(STDIN_FILENO) == getpgrp() && commandExists(argv[0]))
         releaseScrollRegionForChild();
 
+    // Silence ark's scroll-back mouse reporting for the child's lifetime (the
+    // next prompt re-enables it). Without this, moving/clicking the mouse while a
+    // foreground command runs emits "<b;x;yM" SGR reports that leak as raw text
+    // and into the child's stdin -- same fix as scrollback::relay does for the
+    // captured path. Only when WE own the tty (not a `cmd &` background wrapper).
+    if (scrollback::enabled() && tcgetpgrp(STDIN_FILENO) == getpgrp())
+        std::cout << "\x1b[?1000l\x1b[?1006l" << std::flush;
+
     // Same SIGCHLD race as above, guarded the same way.
     BlockSigchld guard;
     pid_t pid;

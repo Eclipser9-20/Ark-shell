@@ -292,17 +292,34 @@ static int b_ls(const std::vector<std::string>& argv, ShellState& state) {
     // takes --color=auto -- so pick the right mechanism per platform. Any explicit
     // color flag the user passes comes AFTER and wins.
     bool lsColor = !(getenv("ARK_LS_COLOR") && std::string(getenv("ARK_LS_COLOR")) == "0");
+
+    // Build the real-ls argv once so BOTH the owned-scrollback capture path and
+    // the direct-spawn fallback use identical arguments.
+    std::vector<std::string> lsArgv;
+    lsArgv.push_back("ls");
+#if defined(__APPLE__)
+    if (lsColor) setenv("CLICOLOR", "1", 1);   // BSD ls reads this from the env
+#else
+    if (lsColor) lsArgv.push_back("--color=auto");
+#endif
+    for (size_t i = 1; i < argv.size(); i++) lsArgv.push_back(argv[i]);
+
+    // Under owned-scrollback, route the real ls through runForeground so its
+    // output lands in the scrollback RING (wheel-scrollable) exactly like every
+    // other external command. Without this, `ls` -- being an ark builtin that
+    // just execs /bin/ls -- wrote straight to the tty, bypassing the ring, so
+    // its output could never be scrolled back (the "can't scroll ls" bug). Any
+    // builtin-with-passthrough (not just ls) needs this to stay scrollable.
+    if (scrollback::enabled() && state.jobs) {
+        int st = scrollback::runForeground(lsArgv, *state.jobs);
+        if (st >= 0) return st;   // -1 == PTY setup failed; fall through to spawn
+    }
+
     BlockSigchld guard;
     pid_t pid = fork();
     if (pid == 0) {
         std::vector<char*> av;
-        av.push_back(const_cast<char*>("ls"));
-#if defined(__APPLE__)
-        if (lsColor) setenv("CLICOLOR", "1", 1);
-#else
-        if (lsColor) av.push_back(const_cast<char*>("--color=auto"));
-#endif
-        for (size_t i = 1; i < argv.size(); i++) av.push_back(const_cast<char*>(argv[i].c_str()));
+        for (auto& a : lsArgv) av.push_back(const_cast<char*>(a.c_str()));
         av.push_back(nullptr);
         execvp("ls", av.data());
         _exit(127);

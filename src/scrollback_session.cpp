@@ -55,15 +55,25 @@ int ringCap() {
 // last region row while scrolled up.
 void paintRegion() {
     if (!g_ring) return;
+    bool scrolled = !g_ring->atLive();
+    // While scrolled, reserve the LAST region row for the "N below" hint. We do
+    // NOT shrink the ring's viewport to do it: the viewport height also drives
+    // maxOffset (how far up you can scroll), so shrinking it here while scrollBy
+    // clamps against the FULL height desynced the two -- the reachable top landed
+    // one row short, permanently clipping the OLDEST line (a command's own prompt
+    // line, e.g. "ls /usr/bin/"). Instead keep the full-height window and simply
+    // paint one fewer content row, dropping the NEWEST row of the window (it's
+    // below the fold anyway, counted in "N below") to make room for the hint.
+    auto rows = g_ring->visibleRows();                         // g_height rows
+    int contentH = (scrolled && g_height > 1) ? g_height - 1 : g_height;
     std::string out = "\x1b[?2026h";      // synchronized update
-    auto rows = g_ring->visibleRows();
-    for (int i = 0; i < g_height; i++) {
+    for (int i = 0; i < contentH; i++) {
         out += "\x1b[" + std::to_string(g_top + i) + ";1H\x1b[2K";
         out += rows[(size_t)i];
     }
-    if (!g_ring->atLive()) {
-        out += "\x1b[" + std::to_string(g_bottom) + ";1H";
-        out += "\x1b[7m \xe2\x96\xbc " + std::to_string(g_ring->pendingBelow()) + " below \x1b[0m";
+    if (scrolled) {
+        out += "\x1b[" + std::to_string(g_bottom) + ";1H\x1b[2K";   // clear the reserved row
+        out += "\x1b[7m \xe2\x96\xbc " + std::to_string(g_ring->pendingBelow() + 1) + " below \x1b[0m";
     }
     out += "\x1b[?2026l";
     (void)!write(STDOUT_FILENO, out.data(), out.size());
@@ -72,12 +82,10 @@ void paintRegion() {
 } // namespace
 
 bool enabled() {
-    // Default ON -- wheel-scroll through history is table-stakes shell behaviour,
-    // not an experiment. Opt OUT with ARK_SCROLLBACK=0. Still off in automation
-    // (ARK_DEFAULT_TERMINAL, set for CI / AI-CLI drivers) and when either stream
-    // isn't a real terminal (a pipe/script has no scrollback to own).
+    // Default ON (opt out with ARK_SCROLLBACK=0). Off in automation
+    // (ARK_DEFAULT_TERMINAL / CI) and when either stream isn't a real terminal.
     const char* v = getenv("ARK_SCROLLBACK");
-    if (v && std::strcmp(v, "0") == 0) return false;   // explicit opt-out
+    if (v && std::strcmp(v, "0") == 0) return false;
     if (getenv("ARK_DEFAULT_TERMINAL")) return false;
     if (getenv("CI")) return false;
     return isatty(STDOUT_FILENO) && isatty(STDIN_FILENO);
@@ -127,23 +135,50 @@ void recordOutput(const char* data, size_t n) {
 // down cleared the region and lost everything that was on screen.
 void paintLiveTail() {
     if (!g_ring) return;
-    int h = g_height > 1 ? g_height - 1 : 1;   // reserve the bottom row for the prompt
-    g_ring->setViewport(g_cols, h);
-    auto rows = g_ring->visibleRows();
+    int maxContent = g_height > 1 ? g_height - 1 : 1;   // reserve one row for the prompt
+    // Show the tail of the ring, but only as many rows as there actually is
+    // content -- so the PROMPT sits right after the last line, not pinned to the
+    // bottom of the screen. On a fresh/short screen (empty ring) the prompt stays
+    // at the top like a normal shell, instead of being flung to the bottom.
+    int phys = g_ring->physicalRows();
+    int contentRows = phys < maxContent ? phys : maxContent;
+    if (contentRows < 0) contentRows = 0;
     std::string out = "\x1b[?2026h";
-    for (int i = 0; i < h; i++)
-        out += "\x1b[" + std::to_string(g_top + i) + ";1H\x1b[2K" + rows[(size_t)i];
-    out += "\x1b[" + std::to_string(g_bottom) + ";1H\x1b[2K";   // clear + park cursor on prompt row
+    if (contentRows > 0) {
+        g_ring->setViewport(g_cols, contentRows);
+        auto rows = g_ring->visibleRows();
+        for (int i = 0; i < contentRows; i++)
+            out += "\x1b[" + std::to_string(g_top + i) + ";1H\x1b[2K" + rows[(size_t)i];
+        g_ring->setViewport(g_cols, g_height);     // restore full viewport
+    }
+    int promptRow = g_top + contentRows;           // right after the last content line
+    if (promptRow > g_bottom) promptRow = g_bottom;
+    out += "\x1b[" + std::to_string(promptRow) + ";1H\x1b[2K";   // clear + park cursor there
     out += "\x1b[?2026l";
     (void)!write(STDOUT_FILENO, out.data(), out.size());
-    g_ring->setViewport(g_cols, g_height);     // restore full viewport
 }
 
 void recolorLine(long seq, const std::string& text) {
     if (!enabled() || !g_ring || seq < 0) return;
     if (!g_ring->replaceSeq((size_t)seq, scrollback::LogicalLine{text})) return;
-    if (g_ring->atLive()) paintLiveTail();   // reflect it in the live view now
-    else paintRegion();
+    if (!g_ring->atLive()) { paintRegion(); return; }   // scrolled away: repaint the history window
+
+    // AT LIVE: update the RING ONLY -- do NOT touch the live screen.
+    //
+    // The failing prompt line is already on screen exactly as the REPL drew it;
+    // the red `❯N` badge is cosmetic. Every attempt to repaint it live has
+    // collided with the terminal, because the ring's physical layout does NOT
+    // track the DECSTBM band's own auto-scrolling: after the command's output,
+    // the next prompt, and (for a typo) the command-not-found text have scrolled
+    // the band, any row we COMPUTE from the ring is stale. Writing the badge at
+    // that stale row lands in the middle of the previous command's output --
+    // e.g. the `badsa` badge/error smeared across the columns of a prior
+    // `ls /usr/bin/` (the interleaving bug). And the older full-tail repaint
+    // re-dumped the whole screen out of order.
+    //
+    // So we leave the live screen untouched. `replaceSeq` above has already put
+    // the badge into the ring, so scrolling back shows the failed line in red --
+    // which is the only place the recolor was ever reliably correct.
 }
 
 void scrollBy(int delta) {
@@ -294,6 +329,14 @@ int relay(pid_t pid, int master, JobTable& jobs, int jobId, const std::string& c
     tcsetattr(STDIN_FILENO, TCSANOW, &raw);
 
     arkScrollDebug("relay: START cmd='%s'  band=%d;%d cols=%d", cmdline.c_str(), g_top, g_bottom, g_cols);
+    // Turn OFF ark's own SGR mouse reporting for the WHOLE duration of the child.
+    // It exists only to drive scroll-back at the PROMPT; while a foreground
+    // command runs, ark isn't reading input, so any wheel/move/click just emits
+    // "<b;x;yM" reports that leak into the child's stdin AND print as raw text
+    // (e.g. moving the mouse during a long `make`/script dumped "^[[<0;6;19M" into
+    // the line). The next prompt's init() re-enables it. Alt-screen children get
+    // the same treatment via the EnterAltScreen path below.
+    (void)!write(STDOUT_FILENO, "\x1b[?1000l\x1b[?1006l", 16);
     scrollback::VtModel vt(g_cols);
     bool alt = false, stopped = false;
     int status = 0;
@@ -324,7 +367,12 @@ int relay(pid_t pid, int master, JobTable& jobs, int jobId, const std::string& c
                 // full screen and drop any half-parsed DECSTBM rewrite state.
                 escCarry.clear();
                 arkScrollDebug("relay: ENTER alt-screen -> region dropped to full");
-                (void)!write(STDOUT_FILENO, "\x1b[r", 3);
+                // Hand the FULL screen AND the mouse to the TUI: turn OFF ark's own
+                // mouse reporting so its click/wheel reports (SGR) don't collide
+                // with the child's -- otherwise a full-screen app (vim, htop,
+                // less) sees a stream of "<b;x;yM" garbage and ark's reports leak
+                // as text. Re-enabled on leave.
+                (void)!write(STDOUT_FILENO, "\x1b[r\x1b[?1000l\x1b[?1006l", 19);
             }
             if (alt) {
                 // Alt-screen apps own the whole display; pass their bytes through
@@ -351,6 +399,7 @@ int relay(pid_t pid, int master, JobTable& jobs, int jobId, const std::string& c
                 // because \x1b[...r homes the cursor on Ghostty.
                 std::string re = "\0337\x1b[" + std::to_string(g_top) + ";" +
                                  std::to_string(g_bottom) + "r\0338";
+                re += "\x1b[?1000h\x1b[?1006h";   // re-enable ark's mouse reporting
                 (void)!write(STDOUT_FILENO, re.data(), re.size());
                 arkScrollDebug("relay: LEAVE alt-screen -> region re-asserted to %d;%d", g_top, g_bottom);
             }

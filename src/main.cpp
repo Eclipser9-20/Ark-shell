@@ -940,7 +940,8 @@ int main(int argc, char** argv) {
             // always looked scrolled and the in-place recolor never ran.
             int execRow = 0, execCol = 0;
             bool execRowOk = false;
-            if (state.lastStatus != 0 && promptRow > 0 && arrowPromptMode() &&
+            if (state.lastStatus != 0 && promptRow > 0 &&
+                (arrowPromptMode() || scrollback::enabled()) &&
                 isatty(STDOUT_FILENO) && pending.find('\n') == std::string::npos) {
                 RawMode g;
                 execRowOk = queryCursorPos(execRow, execCol);
@@ -992,13 +993,23 @@ int main(int argc, char** argv) {
                                         ? pending
                                         : highlightLine(pending);
 
-                // Under scrollback the command line lives in the ring, not at a
-                // fixed screen row -- recolor it there (red arrow + exit code)
-                // and let the live tail repaint. This keeps the badge ON the
-                // failing command's own line without the stale-row doubling.
-                if (scrollback::enabled()) {
+                // Under scrollback, update the ring so scrolling back into
+                // history shows the red badge on the failing line.
+                if (scrollback::enabled())
                     scrollback::recolorLine(promptSeq, line + shown);
-                } else {
+
+                // Live-screen recolor -- runs in BOTH the scrollback and plain
+                // paths. It's the scroll-safe DSR repaint below: it paints the
+                // badge onto the prompt's REAL row only when execRow proves the
+                // command's output did not scroll that line away, and draws
+                // NOTHING otherwise. That gating is what makes it collision-free
+                // even under scrollback -- earlier attempts computed the row from
+                // the ring's physical layout, which does not track the DECSTBM
+                // band's own auto-scroll, so the badge landed mid-output and
+                // smeared across the previous command (the `badsa` badge painted
+                // over the `ls /usr/bin/` columns). When the line HAS scrolled,
+                // the ring update above still carries the badge for scroll-back.
+                {
 
                 RawMode guard; // required for queryCursorPos below
 
@@ -1035,8 +1046,9 @@ int main(int argc, char** argv) {
                               << "\x1b[" << r1 << ";" << c1 << "H" << std::flush;
                 }
                 // else: the command scrolled off its own prompt line -- leave the
-                // screen untouched. No badge, no duplicate.
-                } // end non-scrollback absolute-row repaint
+                // screen untouched. No badge, no duplicate (the ring still has it
+                // under scrollback).
+                } // end live scroll-safe absolute-row repaint
             }
             // Private Mode: while on, write NOTHING to history/disk. Otherwise
             // record the command tagged with the cwd it ran in (context-aware

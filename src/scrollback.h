@@ -29,6 +29,11 @@ public:
     // Replace the still-resident line with absolute sequence `seq` (as returned
     // by pushed()-1 at push time). Returns false if that line has been evicted.
     bool replaceSeq(size_t seq, const LogicalLine& l);
+    // Locate where logical line `seq` sits in the wrapped physical-row stream:
+    // [firstRow, firstRow+count) indices into allPhysical() at the current width.
+    // Lets a caller repaint JUST that line in place instead of the whole tail.
+    // Returns false if `seq` has been evicted or never existed.
+    bool physicalRangeOfSeq(size_t seq, int& firstRow, int& count) const;
 private:
     size_t cap_;
     size_t pushed_ = 0;   // cumulative push count, including evicted lines

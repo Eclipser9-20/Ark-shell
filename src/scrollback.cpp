@@ -40,6 +40,19 @@ bool Scrollback::replaceSeq(size_t seq, const LogicalLine& l) {
     return true;
 }
 
+bool Scrollback::physicalRangeOfSeq(size_t seq, int& firstRow, int& count) const {
+    size_t first = pushed_ - lines_.size();
+    if (seq < first || seq >= pushed_) return false;   // evicted or never existed
+    size_t idx = seq - first;
+    int row = 0;
+    for (size_t i = 0; i < idx; i++)
+        row += (int)wrapLine(lines_[i].bytes, width_).size();
+    firstRow = row;
+    count = (int)wrapLine(lines_[idx].bytes, width_).size();
+    if (count < 1) count = 1;   // an empty logical line still occupies one row
+    return true;
+}
+
 void Scrollback::scrollLines(int delta) {
     offset_ -= delta;                     // delta<0 (older) increases offset
     if (offset_ < 0) offset_ = 0;
