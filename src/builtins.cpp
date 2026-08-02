@@ -1,4 +1,5 @@
 #include "builtins.h"
+#include "chrome.h"          // releaseScrollRegionForChild / disableMouseReporting
 #include "scrollback_session.h"
 #include "complete.h"
 #include "exec.h"
@@ -610,6 +611,17 @@ static int b_ark_settings(const std::vector<std::string>&, ShellState&) {
                   << "  Or edit directly:   " << cfg << "\n";
         return 1;
     }
+
+    // The editor is a full-screen interactive TUI, so hand it a CLEAN terminal
+    // exactly like the normal path does for `vim`/`nano`: drop ark's pinned-bar
+    // scroll region (so the editor owns the whole screen, not the 2..N-1 band)
+    // and silence ark's own SGR mouse reporting (so it doesn't collide with the
+    // editor's -- the same "<b;x;yM garbage in a TUI" class we fixed elsewhere).
+    // The next prompt's reassertChrome()/init() restores both. Launched by a bare
+    // fork (not runForeground) because an interactive editor wants the REAL tty,
+    // not a captured PTY -- capture is for line-oriented output, not TUIs.
+    releaseScrollRegionForChild();
+    disableMouseReporting();
 
     BlockSigchld guard;
     pid_t pid = fork();
