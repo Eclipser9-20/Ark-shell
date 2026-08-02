@@ -579,6 +579,43 @@ static const char SENT_COND  = '\x1d';
 static long arithMutEval(const std::string& expr, ShellState& state, bool* ok = nullptr);
 static bool evalDBracket(const std::string& inner, ShellState& state);
 
+int runProgramForBuiltin(const std::vector<std::string>& argv, ShellState& state, bool interactive) {
+    if (argv.empty()) return 0;
+    bool ownTty = tcgetpgrp(STDIN_FILENO) == getpgrp();
+
+    // Line-oriented program: capture into the scrollback ring exactly like a
+    // normal external command, so its output stays wheel-scrollable afterwards.
+    if (!interactive && scrollback::enabled() && state.jobs && ownTty) {
+        int st = scrollback::runForeground(argv, *state.jobs);
+        if (st >= 0) return st;   // -1 == PTY setup failed; fall through to spawn
+    }
+
+    // Interactive TUI (or capture unavailable): hand over a CLEAN terminal -- drop
+    // the pinned band so the program owns the whole screen, and silence ark's SGR
+    // mouse reporting so it can't collide with the program's. The next prompt's
+    // reassertChrome()/init() restores both. Only when WE own the tty.
+    if (ownTty) {
+        if (interactive) releaseScrollRegionForChild();
+        if (scrollback::enabled()) disableMouseReporting();
+    }
+    std::vector<char*> cargv;
+    for (auto& a : argv) cargv.push_back(const_cast<char*>(a.c_str()));
+    cargv.push_back(nullptr);
+    std::cout.flush(); fflush(stdout);
+    BlockSigchld guard;
+    pid_t pid = fork();                 // ARK_RAW_SPAWN_OK: the sanctioned helper
+    if (pid < 0) return 1;
+    if (pid == 0) {
+        signal(SIGINT, SIG_DFL);  signal(SIGTSTP, SIG_DFL);
+        signal(SIGTTOU, SIG_DFL); signal(SIGTTIN, SIG_DFL);
+        execvp(cargv[0], cargv.data());
+        _exit(127);
+    }
+    int status = 0;
+    waitpidRetry(pid, &status, 0);
+    return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+}
+
 static int runCommand(Node* cmd, ShellState& state) {
     // `(( expr ))` arithmetic command / `[[ test ]]` extended test: the lexer
     // captured either as a single sentinel-marked word. Dispatch before any

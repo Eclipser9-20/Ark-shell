@@ -1,5 +1,4 @@
 #include "builtins.h"
-#include "chrome.h"          // releaseScrollRegionForChild / disableMouseReporting
 #include "scrollback_session.h"
 #include "complete.h"
 #include "exec.h"
@@ -305,29 +304,12 @@ static int b_ls(const std::vector<std::string>& argv, ShellState& state) {
 #endif
     for (size_t i = 1; i < argv.size(); i++) lsArgv.push_back(argv[i]);
 
-    // Under owned-scrollback, route the real ls through runForeground so its
-    // output lands in the scrollback RING (wheel-scrollable) exactly like every
-    // other external command. Without this, `ls` -- being an ark builtin that
-    // just execs /bin/ls -- wrote straight to the tty, bypassing the ring, so
-    // its output could never be scrolled back (the "can't scroll ls" bug). Any
-    // builtin-with-passthrough (not just ls) needs this to stay scrollable.
-    if (scrollback::enabled() && state.jobs) {
-        int st = scrollback::runForeground(lsArgv, *state.jobs);
-        if (st >= 0) return st;   // -1 == PTY setup failed; fall through to spawn
-    }
-
-    BlockSigchld guard;
-    pid_t pid = fork();
-    if (pid == 0) {
-        std::vector<char*> av;
-        for (auto& a : lsArgv) av.push_back(const_cast<char*>(a.c_str()));
-        av.push_back(nullptr);
-        execvp("ls", av.data());
-        _exit(127);
-    }
-    int status = 0;
-    waitpidRetry(pid, &status, 0);
-    return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+    // Route the real ls through the sanctioned helper so its output lands in the
+    // scrollback RING (wheel-scrollable) exactly like every other external
+    // command. Before this, `ls` -- an ark builtin that just execs /bin/ls --
+    // wrote straight to the tty, bypassing the ring, so it couldn't be scrolled
+    // back (the "can't scroll ls" bug). ls is line-oriented, so interactive=false.
+    return runProgramForBuiltin(lsArgv, state, /*interactive=*/false);
 }
 
 static int b_cd(const std::vector<std::string>& argv, ShellState& state) {
@@ -386,7 +368,7 @@ static int b_exec(const std::vector<std::string>& argv, ShellState& state) {
     std::vector<char*> cargv;
     for (size_t i = 1; i < argv.size(); i++) cargv.push_back(const_cast<char*>(argv[i].c_str()));
     cargv.push_back(nullptr);
-    execvp(cargv[0], cargv.data());
+    execvp(cargv[0], cargv.data());   // ARK_RAW_SPAWN_OK: `exec` REPLACES the process by definition -- there is nothing to capture, and delegating to runProgramForBuiltin (which forks) would defeat the whole point.
     std::cerr << "exec: " << argv[1] << ": " << std::strerror(errno) << "\n";
     return 127;
 }
@@ -566,7 +548,7 @@ static int b_arky_settings(const std::vector<std::string>&, ShellState& state) {
     return arkPyMain({"arky", cfg}, state);
 }
 
-static int b_ark_settings(const std::vector<std::string>&, ShellState&) {
+static int b_ark_settings(const std::vector<std::string>&, ShellState& state) {
     const char* home = getenv("HOME");
     std::string dir = std::string(home ? home : "") + "/.config/ark";
     std::string cfg = dir + "/ark.config";
@@ -612,31 +594,13 @@ static int b_ark_settings(const std::vector<std::string>&, ShellState&) {
         return 1;
     }
 
-    // The editor is a full-screen interactive TUI, so hand it a CLEAN terminal
-    // exactly like the normal path does for `vim`/`nano`: drop ark's pinned-bar
-    // scroll region (so the editor owns the whole screen, not the 2..N-1 band)
-    // and silence ark's own SGR mouse reporting (so it doesn't collide with the
-    // editor's -- the same "<b;x;yM garbage in a TUI" class we fixed elsewhere).
-    // The next prompt's reassertChrome()/init() restores both. Launched by a bare
-    // fork (not runForeground) because an interactive editor wants the REAL tty,
-    // not a captured PTY -- capture is for line-oriented output, not TUIs.
-    releaseScrollRegionForChild();
-    disableMouseReporting();
-
-    BlockSigchld guard;
-    pid_t pid = fork();
-    if (pid == 0) {
-        signal(SIGINT, SIG_DFL);
-        signal(SIGTSTP, SIG_DFL);
-        signal(SIGTTOU, SIG_DFL);
-        signal(SIGTTIN, SIG_DFL);
-        execlp(editor.c_str(), editor.c_str(), cfg.c_str(), (char*)nullptr);
-        std::cerr << "ark-settings: could not launch " << editor << ": " << std::strerror(errno) << "\n";
-        _exit(127);
-    }
-    int status = 0;
-    waitpidRetry(pid, &status, 0);
-    return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+    // The editor is a full-screen interactive TUI: route it through the sanctioned
+    // helper with interactive=true, which drops ark's pinned band (so the editor
+    // owns the whole screen, not the 2..N-1 strip) and silences ark's SGR mouse
+    // reporting (so it can't collide with the editor's -- the "<b;x;yM garbage in
+    // a TUI" class). The next prompt reasserts chrome. Not captured: an editor
+    // wants the real tty, not a PTY -- capture is for line output, not TUIs.
+    return runProgramForBuiltin({editor, cfg}, state, /*interactive=*/true);
 }
 
 // `ark-reload`: re-source ~/.config/ark/ark.config into the LIVE session, so an

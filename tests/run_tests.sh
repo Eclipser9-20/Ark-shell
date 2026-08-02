@@ -22,4 +22,8 @@ done
 # warning must match the settings the code actually reads.
 bash tests/settings_coverage.sh || fail=1
 
+# Source-level check: no builtin may hand-roll fork/exec to run a program (that
+# is how `ls` bypassed scrollback capture) -- they must use runProgramForBuiltin.
+bash tests/builtin_spawn_guard.sh || fail=1
+
 exit $fail
